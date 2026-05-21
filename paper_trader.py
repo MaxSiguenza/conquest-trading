@@ -344,6 +344,7 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         "entry_net_credit":  credit,
         "max_gain":          credit,
         "max_loss":          max_loss,
+        "cost_basis":        round(max_loss * 100 * OPTION_CONTRACTS, 2),  # max risk
         "contracts":         OPTION_CONTRACTS,
         "current_net_value": credit,
         "pnl":               0.0,

@@ -349,7 +349,7 @@ canvas { width: 100% !important; }
         <td><span class="badge badge-{{ t.trade_type }}">{{ t.trade_type | replace("_"," ") }}</span></td>
         <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
         <td>{{ t.days_held }}</td>
-        <td style="color:#94a3b8">${{ "%.2f" | format(t.cost_basis) }}</td>
+        <td style="color:#94a3b8">${{ "%.2f" | format(t.get('cost_basis', 0)) }}</td>
         <td class="{% if t.pnl >= 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
           ${{ "%.2f" | format(t.pnl) }}
         </td>
@@ -389,7 +389,7 @@ canvas { width: 100% !important; }
         <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
         <td style="color:#64748b;font-size:12px">{{ (t.date_closed or "")[:10] }}</td>
         <td>{{ t.days_held }}</td>
-        <td style="color:#94a3b8">${{ "%.2f" | format(t.cost_basis) }}</td>
+        <td style="color:#94a3b8">${{ "%.2f" | format(t.get('cost_basis', 0)) }}</td>
         <td class="{% if t.pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
           ${{ "%.2f" | format(t.pnl) }}
         </td>
