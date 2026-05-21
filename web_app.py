@@ -537,27 +537,115 @@ def _run_morning_briefing_job():
             print(f"[Scheduler] Morning briefing job failed: {e}")
 
 
+def _run_paper_generate_job():
+    """APScheduler job: generate 10 paper trades at 9:35 AM ET weekdays."""
+    with app.app_context():
+        try:
+            from paper_trader import generate_daily_trades
+            new = generate_daily_trades(10)
+            print(f"[Scheduler] Paper trade generation: {len(new)} new trades")
+        except Exception as e:
+            print(f"[Scheduler] Paper generate job failed: {e}")
+
+
+def _run_paper_close_job():
+    """APScheduler job: mark-to-market and close paper trades at 4:05 PM ET weekdays."""
+    with app.app_context():
+        try:
+            from paper_trader import run_daily_close
+            result = run_daily_close()
+            print(f"[Scheduler] Paper close job: {result}")
+        except Exception as e:
+            print(f"[Scheduler] Paper close job failed: {e}")
+
+
 def _start_scheduler():
-    """Start APScheduler background scheduler for automated morning briefings."""
+    """Start APScheduler background scheduler for automated jobs."""
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron         import CronTrigger
 
         scheduler = BackgroundScheduler()
+
+        # Morning briefing — 9:00 AM ET
         scheduler.add_job(
             _run_morning_briefing_job,
             CronTrigger(day_of_week="mon-fri", hour=9, minute=0,
                         timezone="America/New_York"),
             id="morning_briefing",
             replace_existing=True,
-            misfire_grace_time=300,  # allow up to 5 min late start
+            misfire_grace_time=300,
         )
+        # Paper trade generation — 9:35 AM ET (after open stabilises)
+        scheduler.add_job(
+            _run_paper_generate_job,
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=35,
+                        timezone="America/New_York"),
+            id="paper_generate",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+        # Paper trade close — 4:05 PM ET (5 min after close)
+        scheduler.add_job(
+            _run_paper_close_job,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=5,
+                        timezone="America/New_York"),
+            id="paper_close",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+
         scheduler.start()
-        print("✓ Scheduler running — morning briefing at 9:00 AM ET (Mon–Fri)")
+        print("✓ Scheduler running — briefing 9:00 AM · paper trades 9:35 AM / 4:05 PM ET (Mon–Fri)")
         return scheduler
     except Exception as e:
         print(f"  Scheduler not started: {e}")
         return None
+
+
+# ── Paper Trading Stats ───────────────────────────────────────────────────────
+
+@app.route("/paper-stats")
+def paper_stats():
+    from paper_trader import get_paper_stats
+    stats = get_paper_stats()
+    return render_template("paper_stats.html", stats=stats,
+                           flash_ok=None, flash_err=None)
+
+
+@app.route("/paper-stats/generate", methods=["POST"])
+def paper_stats_generate():
+    flash_ok = flash_err = None
+    try:
+        from paper_trader import generate_daily_trades
+        new = generate_daily_trades(10)
+        if new:
+            flash_ok = f"Generated {len(new)} paper trades for today."
+        else:
+            flash_ok = "Today's trades already exist (or no data available). Nothing added."
+    except Exception as e:
+        flash_err = f"Generation failed: {e}"
+    from paper_trader import get_paper_stats
+    stats = get_paper_stats()
+    return render_template("paper_stats.html", stats=stats,
+                           flash_ok=flash_ok, flash_err=flash_err)
+
+
+@app.route("/paper-stats/close", methods=["POST"])
+def paper_stats_close():
+    flash_ok = flash_err = None
+    try:
+        from paper_trader import run_daily_close
+        result  = run_daily_close()
+        flash_ok = (f"Mark-to-market complete — "
+                    f"{result['closed']} trades closed, "
+                    f"{result['still_open']} still open.")
+    except Exception as e:
+        flash_err = f"Close run failed: {e}"
+    from paper_trader import get_paper_stats
+    stats = get_paper_stats()
+    return render_template("paper_stats.html", stats=stats,
+                           flash_ok=flash_ok, flash_err=flash_err)
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────

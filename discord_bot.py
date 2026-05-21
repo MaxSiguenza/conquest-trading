@@ -144,6 +144,11 @@ async def help_cmd(ctx):
         "`!portfolio` — live P&L on all positions\n"
         "`!pnl` — send daily P&L to positions channel"
     ), inline=False)
+    embed.add_field(name="🧪  Paper Trading Stats", value=(
+        "`!stats` — win rate, P&L, Sharpe, by-type breakdown\n"
+        "`!trades` — today's 10 auto-generated paper trades\n"
+        "`!generate` — manually trigger today's 10 trades"
+    ), inline=False)
     embed.add_field(name="⚔️  Intelligence", value=(
         "`!briefing` — morning briefing with FRED macro data\n"
         "`!macro` — quick Fed macro snapshot"
@@ -509,6 +514,171 @@ async def macro_cmd(ctx):
     )
     embed.set_footer(text="Conquest Trading  •  Data: Federal Reserve FRED  •  Not financial advice")
     await thinking.delete()
+    await ctx.send(embed=embed)
+
+
+# ── !stats ────────────────────────────────────────────────────────────────────
+
+@bot.command(name="stats", aliases=["paperstat", "paperstats"])
+async def stats_cmd(ctx):
+    """Show paper trading performance summary."""
+    thinking = await ctx.send("📊 Calculating paper trading stats…")
+
+    def _get():
+        from paper_trader import get_paper_stats
+        return get_paper_stats()
+
+    s = await _run_sync(_get)
+
+    if not s["closed_count"] and not s["open_count"]:
+        await thinking.delete()
+        await ctx.send("No paper trades yet. Use `!generate` to create today's 10 trades.")
+        return
+
+    color = COLOR_GREEN if (s.get("total_pnl") or 0) >= 0 else COLOR_RED
+    embed = discord.Embed(
+        title="🧪  Paper Trading Stats",
+        color=color,
+        timestamp=_ts(),
+    )
+
+    # Top-line numbers
+    wr_str  = f"{s['win_rate']*100:.1f}%" if s["closed_count"] else "—"
+    pnl_str = f"${s['total_pnl']:+.2f}"  if s["closed_count"] else "—"
+    sh_str  = str(s["sharpe"])            if s.get("sharpe") is not None else "—"
+    pf_str  = str(s["profit_factor"])     if s.get("profit_factor") else "—"
+
+    embed.add_field(name="📊 Overview", value=(
+        f"**Trades:** {s['total_trades']} ({s['open_count']} open · {s['closed_count']} closed)\n"
+        f"**Win Rate:** {wr_str}   **Total P&L:** {pnl_str}\n"
+        f"**Sharpe:** {sh_str}   **Profit Factor:** {pf_str}\n"
+        f"**Avg hold:** {s.get('avg_hold', '—')} days"
+    ), inline=False)
+
+    # Best / worst
+    if s.get("best_trade"):
+        b = s["best_trade"]
+        embed.add_field(
+            name="🏆 Best Trade",
+            value=f"**{b['ticker']}** {b['trade_type'].replace('_',' ')} → ${b['pnl']:+.2f} ({b['pnl_pct']*100:.1f}%)",
+            inline=True,
+        )
+    if s.get("worst_trade"):
+        w = s["worst_trade"]
+        embed.add_field(
+            name="💀 Worst Trade",
+            value=f"**{w['ticker']}** {w['trade_type'].replace('_',' ')} → ${w['pnl']:+.2f} ({w['pnl_pct']*100:.1f}%)",
+            inline=True,
+        )
+
+    # By trade type breakdown
+    if s.get("by_type"):
+        lines = []
+        for tt, d in sorted(s["by_type"].items(), key=lambda x: -x[1]["total_pnl"]):
+            icon = {"call_spread":"📈","put_spread":"📉","long_call":"🟢","long_put":"🔴",
+                    "iron_condor":"🦅","stock_long":"💹","stock_short":"🔻"}.get(tt, "•")
+            lines.append(
+                f"{icon} **{tt.replace('_',' ')}** — {d['count']} trades · "
+                f"{d['win_rate']*100:.0f}% win · avg ${d['avg_pnl']:+.2f}"
+            )
+        embed.add_field(name="📋 By Type", value="\n".join(lines), inline=False)
+
+    embed.set_footer(text="Conquest Trading  •  Black-Scholes simulation  •  Not financial advice")
+    await thinking.delete()
+    await ctx.send(embed=embed)
+
+
+# ── !trades ────────────────────────────────────────────────────────────────────
+
+@bot.command(name="trades", aliases=["today", "papertrades"])
+async def trades_cmd(ctx):
+    """Show today's open paper trades."""
+    thinking = await ctx.send("📋 Loading today's paper trades…")
+
+    def _get():
+        from paper_trader import load_trades
+        from datetime import datetime
+        import pytz
+        today = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        all_t = load_trades()
+        return [t for t in all_t if t.get("date_entered", "").startswith(today)]
+
+    today_trades = await _run_sync(_get)
+
+    await thinking.delete()
+
+    if not today_trades:
+        await ctx.send("No trades generated today yet. Use `!generate` to create them.")
+        return
+
+    embed = discord.Embed(
+        title=f"🧪  Today's Paper Trades  ({len(today_trades)})",
+        color=COLOR_GOLD,
+        timestamp=_ts(),
+    )
+
+    lines = []
+    for t in today_trades:
+        icon = {"call_spread":"📈","put_spread":"📉","long_call":"🟢","long_put":"🔴",
+                "iron_condor":"🦅","stock_long":"💹","stock_short":"🔻"}.get(t["trade_type"], "•")
+        pnl  = t.get("pnl", 0)
+        pct  = t.get("pnl_pct", 0) * 100
+        sign = "+" if pnl >= 0 else ""
+        status_icon = "✅" if t["status"] == "closed" else "⏳"
+        lines.append(
+            f"{status_icon} {icon} **{t['ticker']}** {t['trade_type'].replace('_',' ')} "
+            f"| cost ${t.get('cost_basis',0):.0f} "
+            f"| {sign}${pnl:.2f} ({sign}{pct:.1f}%)"
+        )
+
+    # Split into two fields if more than 5
+    if len(lines) <= 5:
+        embed.add_field(name="Trades", value="\n".join(lines), inline=False)
+    else:
+        mid = len(lines) // 2
+        embed.add_field(name="Trades (1–5)", value="\n".join(lines[:mid]), inline=False)
+        embed.add_field(name="Trades (6–10)", value="\n".join(lines[mid:]), inline=False)
+
+    embed.set_footer(text="Conquest Trading  •  ⏳=open  ✅=closed  •  BS simulation")
+    await ctx.send(embed=embed)
+
+
+# ── !generate ─────────────────────────────────────────────────────────────────
+
+@bot.command(name="generate", aliases=["gen", "gentrades"])
+async def generate_cmd(ctx):
+    """Manually trigger today's 10 paper trades."""
+    thinking = await ctx.send("⚡ Scanning universe and generating trades…")
+
+    def _gen():
+        from paper_trader import generate_daily_trades
+        return generate_daily_trades(10)
+
+    new_trades = await _run_sync(_gen)
+    await thinking.delete()
+
+    if not new_trades:
+        await ctx.send("⚠ Today's trades already exist (or scanner returned no data). Use `!trades` to see them.")
+        return
+
+    type_summary = {}
+    for t in new_trades:
+        tt = t["trade_type"]
+        type_summary[tt] = type_summary.get(tt, 0) + 1
+
+    lines = [f"• {tt.replace('_',' ')} ×{cnt}" for tt, cnt in type_summary.items()]
+    embed = discord.Embed(
+        title=f"🧪  Generated {len(new_trades)} Paper Trades",
+        description="\n".join(lines),
+        color=COLOR_GREEN,
+        timestamp=_ts(),
+    )
+    embed.add_field(
+        name="What's next?",
+        value="They'll be marked-to-market at **4:05 PM ET** and closed if they hit stops/targets.\nUse `!trades` to see them. Use `!stats` for running totals.",
+        inline=False,
+    )
+    embed.set_footer(text="Conquest Trading  •  Black-Scholes simulation  •  Not financial advice")
     await ctx.send(embed=embed)
 
 

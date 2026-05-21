@@ -173,6 +173,7 @@
   <a href="/alerts" {% if request.path == '/alerts' %}class="active"{% endif %}>🔔 Alerts</a>
   <a href="/positions" {% if request.path == '/positions' %}class="active"{% endif %}>📋 Portfolio</a>
   <a href="/alpaca" {% if request.path == '/alpaca' %}class="active"{% endif %}>📈 Alpaca</a>
+  <a href="/paper-stats" {% if request.path.startswith('/paper-stats') %}class="active"{% endif %}>🧪 Paper Stats</a>
 </nav>
 
 <div class="container">

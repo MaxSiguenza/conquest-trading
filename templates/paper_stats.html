@@ -1,0 +1,474 @@
+{% extends "base.html" %}
+{% block title %}Paper Stats — Conquest{% endblock %}
+
+{% block extra_style %}
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.stat-tile {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+.stat-tile .label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+.stat-tile .value {
+  font-size: 26px;
+  font-weight: 700;
+  color: #f1f5f9;
+  line-height: 1;
+}
+.stat-tile .value.green  { color: #4ade80; }
+.stat-tile .value.red    { color: #f87171; }
+.stat-tile .value.purple { color: #a78bfa; }
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 14px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2d3148;
+}
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #1e2235;
+  color: #cbd5e1;
+  vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #1e2235; }
+
+.pnl-pos { color: #4ade80; font-weight: 600; }
+.pnl-neg { color: #f87171; font-weight: 600; }
+.pnl-zero{ color: #94a3b8; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge-call_spread  { background: #1e3a5f; color: #60a5fa; }
+.badge-put_spread   { background: #3b1f3e; color: #e879f9; }
+.badge-long_call    { background: #1a3a2e; color: #34d399; }
+.badge-long_put     { background: #3a2020; color: #fb7185; }
+.badge-iron_condor  { background: #2d2a1a; color: #fbbf24; }
+.badge-stock_long   { background: #1a2d3e; color: #38bdf8; }
+.badge-stock_short  { background: #2d1a1a; color: #fb923c; }
+
+.badge-open   { background: #1e3a2a; color: #4ade80; }
+.badge-closed { background: #2d3148; color: #94a3b8; }
+.badge-profit_target { background: #1a3a2e; color: #4ade80; }
+.badge-stop_loss     { background: #3a1a1a; color: #f87171; }
+.badge-max_hold      { background: #2a2a1a; color: #fbbf24; }
+
+.bar-wrap {
+  background: #0f1117;
+  border-radius: 4px;
+  height: 6px;
+  width: 100%;
+  overflow: hidden;
+}
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+.bar-green  { background: #4ade80; }
+.bar-red    { background: #f87171; }
+.bar-yellow { background: #fbbf24; }
+
+.action-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.btn {
+  padding: 10px 22px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn-primary  { background: #7c6af7; color: #fff; }
+.btn-secondary{ background: #2d3148; color: #e2e8f0; }
+.btn-green    { background: #166534; color: #bbf7d0; }
+
+.chart-wrap {
+  position: relative;
+  height: 180px;
+  margin: 8px 0 4px;
+}
+canvas { width: 100% !important; }
+
+.flash { border-radius: 8px; padding: 12px 16px; font-size: 13px; margin-bottom: 16px; }
+.flash-ok  { background: #14532d; color: #bbf7d0; border: 1px solid #166534; }
+.flash-err { background: #450a0a; color: #fecaca; border: 1px solid #7f1d1d; }
+
+.tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.tab {
+  padding: 8px 18px;
+  border-radius: 8px;
+  border: 1px solid #2d3148;
+  font-size: 13px;
+  font-weight: 500;
+  color: #94a3b8;
+  cursor: pointer;
+  background: transparent;
+  transition: all 0.15s;
+}
+.tab.active, .tab:hover {
+  background: #2d3148;
+  color: #e2e8f0;
+  border-color: #4b5563;
+}
+{% endblock %}
+
+{% block content %}
+<h1>📊 Paper Trading Stats <span style="font-size:13px;color:#64748b;font-weight:400;">— 10 trades/day · BS simulation</span></h1>
+
+{% if flash_ok %}
+  <div class="flash flash-ok">✓ {{ flash_ok }}</div>
+{% endif %}
+{% if flash_err %}
+  <div class="flash flash-err">⚠ {{ flash_err }}</div>
+{% endif %}
+
+<!-- Action buttons -->
+<div class="action-row">
+  <form method="POST" action="/paper-stats/generate" style="margin:0">
+    <button type="submit" class="btn btn-primary">⚡ Generate Today's 10 Trades</button>
+  </form>
+  <form method="POST" action="/paper-stats/close" style="margin:0">
+    <button type="submit" class="btn btn-secondary">📐 Mark to Market &amp; Close</button>
+  </form>
+  <span style="font-size:12px;color:#475569;">
+    Auto-runs at 9:35 AM (generate) and 4:05 PM ET (close) on weekdays
+  </span>
+</div>
+
+<!-- Top stat tiles -->
+<div class="stat-grid">
+  <div class="stat-tile">
+    <div class="label">Total Trades</div>
+    <div class="value purple">{{ stats.total_trades }}</div>
+    <div style="font-size:11px;color:#64748b;margin-top:4px;">
+      {{ stats.open_count }} open · {{ stats.closed_count }} closed
+    </div>
+  </div>
+
+  <div class="stat-tile">
+    <div class="label">Win Rate</div>
+    {% if stats.closed_count %}
+      {% set wr = (stats.win_rate * 100) | round(1) %}
+      <div class="value {% if wr >= 50 %}green{% else %}red{% endif %}">{{ wr }}%</div>
+      <div class="bar-wrap" style="margin-top:8px">
+        <div class="bar-fill {% if wr >= 50 %}bar-green{% else %}bar-red{% endif %}"
+             style="width:{{ wr }}%"></div>
+      </div>
+    {% else %}
+      <div class="value" style="color:#475569">—</div>
+    {% endif %}
+  </div>
+
+  <div class="stat-tile">
+    <div class="label">Total P&amp;L</div>
+    {% if stats.total_pnl is defined %}
+      <div class="value {% if stats.total_pnl >= 0 %}green{% else %}red{% endif %}">
+        ${{ "%.2f" | format(stats.total_pnl) }}
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-top:4px;">
+        avg ${{ "%.2f" | format(stats.avg_pnl) }}/trade
+      </div>
+    {% else %}
+      <div class="value" style="color:#475569">—</div>
+    {% endif %}
+  </div>
+
+  <div class="stat-tile">
+    <div class="label">Sharpe Ratio</div>
+    {% if stats.sharpe is not none and stats.sharpe is not none %}
+      <div class="value {% if stats.sharpe >= 1 %}green{% elif stats.sharpe >= 0 %}purple{% else %}red{% endif %}">
+        {{ stats.sharpe }}
+      </div>
+    {% else %}
+      <div class="value" style="color:#475569">—</div>
+    {% endif %}
+  </div>
+
+  <div class="stat-tile">
+    <div class="label">Profit Factor</div>
+    {% if stats.profit_factor %}
+      <div class="value {% if stats.profit_factor >= 1.5 %}green{% elif stats.profit_factor >= 1.0 %}purple{% else %}red{% endif %}">
+        {{ stats.profit_factor }}
+      </div>
+    {% else %}
+      <div class="value" style="color:#475569">—</div>
+    {% endif %}
+  </div>
+
+  <div class="stat-tile">
+    <div class="label">Avg Hold</div>
+    <div class="value purple">{{ stats.avg_hold if stats.avg_hold else "—" }}</div>
+    <div style="font-size:11px;color:#64748b;margin-top:4px;">calendar days</div>
+  </div>
+</div>
+
+{% if stats.cum_pnl %}
+<!-- Equity curve -->
+<div class="card">
+  <div class="section-title">Equity Curve</div>
+  <div class="chart-wrap">
+    <canvas id="equityChart"></canvas>
+  </div>
+</div>
+{% endif %}
+
+{% if stats.by_type %}
+<!-- By trade type -->
+<div class="card">
+  <div class="section-title">Performance by Trade Type</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Trades</th>
+        <th>Win %</th>
+        <th>Win Rate Bar</th>
+        <th>Avg P&L</th>
+        <th>Total P&L</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tt, d in stats.by_type.items() | sort(attribute='1.total_pnl', reverse=True) %}
+      <tr>
+        <td><span class="badge badge-{{ tt }}">{{ tt | replace("_", " ") }}</span></td>
+        <td>{{ d.count }}</td>
+        <td>{{ (d.win_rate * 100) | round(1) }}%</td>
+        <td style="min-width:100px">
+          <div class="bar-wrap">
+            <div class="bar-fill {% if d.win_rate >= 0.5 %}bar-green{% else %}bar-red{% endif %}"
+                 style="width:{{ (d.win_rate * 100) | round(0) }}%"></div>
+          </div>
+        </td>
+        <td class="{% if d.avg_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          ${{ "%.2f" | format(d.avg_pnl) }}
+        </td>
+        <td class="{% if d.total_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          ${{ "%.2f" | format(d.total_pnl) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if stats.by_ticker %}
+<!-- By ticker -->
+<div class="card">
+  <div class="section-title">Performance by Ticker</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Trades</th>
+        <th>Win %</th>
+        <th>Avg P&L</th>
+        <th>Total P&L</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tk, d in stats.by_ticker.items() | sort(attribute='1.total_pnl', reverse=True) %}
+      <tr>
+        <td><strong style="color:#e2e8f0">{{ tk }}</strong></td>
+        <td>{{ d.count }}</td>
+        <td>{{ (d.win_rate * 100) | round(1) }}%</td>
+        <td class="{% if d.avg_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          ${{ "%.2f" | format(d.avg_pnl) }}
+        </td>
+        <td class="{% if d.total_pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          ${{ "%.2f" | format(d.total_pnl) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- Open trades -->
+{% if stats.open_trades %}
+<div class="card">
+  <div class="section-title">Open Positions ({{ stats.open_count }})</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Type</th>
+        <th>Entered</th>
+        <th>Days</th>
+        <th>Cost</th>
+        <th>P&L $</th>
+        <th>P&L %</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in stats.open_trades %}
+      <tr>
+        <td><strong style="color:#e2e8f0">{{ t.ticker }}</strong></td>
+        <td><span class="badge badge-{{ t.trade_type }}">{{ t.trade_type | replace("_"," ") }}</span></td>
+        <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
+        <td>{{ t.days_held }}</td>
+        <td style="color:#94a3b8">${{ "%.2f" | format(t.cost_basis) }}</td>
+        <td class="{% if t.pnl >= 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+          ${{ "%.2f" | format(t.pnl) }}
+        </td>
+        <td class="{% if t.pnl_pct >= 0 %}pnl-pos{% elif t.pnl_pct < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
+          {{ "%.1f" | format(t.pnl_pct * 100) }}%
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- Closed trades -->
+{% if stats.closed_trades %}
+<div class="card">
+  <div class="section-title">Trade History ({{ stats.closed_count }} closed)</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Type</th>
+        <th>Entered</th>
+        <th>Closed</th>
+        <th>Days</th>
+        <th>Cost</th>
+        <th>P&L $</th>
+        <th>P&L %</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in stats.closed_trades %}
+      <tr>
+        <td><strong style="color:#e2e8f0">{{ t.ticker }}</strong></td>
+        <td><span class="badge badge-{{ t.trade_type }}">{{ t.trade_type | replace("_"," ") }}</span></td>
+        <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
+        <td style="color:#64748b;font-size:12px">{{ (t.date_closed or "")[:10] }}</td>
+        <td>{{ t.days_held }}</td>
+        <td style="color:#94a3b8">${{ "%.2f" | format(t.cost_basis) }}</td>
+        <td class="{% if t.pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          ${{ "%.2f" | format(t.pnl) }}
+        </td>
+        <td class="{% if t.pnl_pct >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+          {{ "%.1f" | format(t.pnl_pct * 100) }}%
+        </td>
+        <td>
+          <span class="badge badge-{{ t.close_reason }}">{{ (t.close_reason or "—") | replace("_"," ") }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if not stats.total_trades %}
+<div class="card" style="text-align:center;padding:48px;color:#475569">
+  <div style="font-size:48px;margin-bottom:16px">📊</div>
+  <div style="font-size:16px;color:#94a3b8;margin-bottom:8px">No paper trades yet</div>
+  <div style="font-size:13px">Click <strong style="color:#7c6af7">Generate Today's 10 Trades</strong> to start collecting stats.</div>
+</div>
+{% endif %}
+
+<!-- Chart.js equity curve -->
+{% if stats.cum_pnl %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+  const data = {{ stats.cum_pnl | tojson }};
+  const labels = data.map(d => d.date);
+  const vals   = data.map(d => d.cum_pnl);
+  const color  = vals[vals.length - 1] >= 0 ? '#4ade80' : '#f87171';
+  const fill   = vals[vals.length - 1] >= 0 ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)';
+
+  const ctx = document.getElementById('equityChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: vals,
+        borderColor: color,
+        backgroundColor: fill,
+        fill: true,
+        tension: 0.35,
+        pointRadius: vals.length > 30 ? 0 : 3,
+        pointHoverRadius: 5,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` $${ctx.parsed.y.toFixed(2)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#64748b', maxTicksLimit: 10, font: { size: 11 } },
+          grid:  { color: '#1e2235' }
+        },
+        y: {
+          ticks: {
+            color: '#64748b',
+            font: { size: 11 },
+            callback: v => '$' + v.toFixed(0)
+          },
+          grid: { color: '#1e2235' }
+        }
+      }
+    }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

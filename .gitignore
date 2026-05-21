@@ -15,6 +15,7 @@ build/
 # Data files with personal info
 positions.json
 alerts_settings.json
+paper_trades.json
 
 # OS junk
 .DS_Store
