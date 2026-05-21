@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+
+{% block title %}Conquest Trading{% endblock %}
+
+{% block extra_style %}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.tool-card {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 12px;
+  padding: 22px;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  transition: all 0.15s;
+  cursor: pointer;
+}
+
+.tool-card:hover {
+  border-color: #7c6af7;
+  transform: translateY(-2px);
+  background: #1e2133;
+}
+
+.tool-card .icon {
+  font-size: 26px;
+  margin-bottom: 12px;
+}
+
+.tool-card h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 6px;
+}
+
+.tool-card p {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 99px;
+  margin-top: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.tag-credit  { background: #1a3a2a; color: #4ade80; }
+.tag-debit   { background: #1a2a3a; color: #60a5fa; }
+.tag-income  { background: #2a1a3a; color: #c084fc; }
+.tag-macro   { background: #3a2a1a; color: #fb923c; }
+.tag-scan    { background: #1a2a3a; color: #38bdf8; }
+.tag-paper   { background: #1a1f35; color: #818cf8; }
+.tag-alpaca  { background: #1a3328; color: #34d399; }
+
+.subtitle {
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 28px;
+}
+{% endblock %}
+
+{% block content %}
+<h1>Conquest Trading</h1>
+<p class="subtitle">All tools in one place. Click any card to open it.</p>
+
+<div class="grid">
+
+  <a href="/macro" class="tool-card">
+    <div class="icon">🌍</div>
+    <h3>Macro Dashboard</h3>
+    <p>Check the full economic backdrop before any trade. DXY, yields, HYG, oil, copper, sector rotation phase.</p>
+    <span class="tag tag-macro">Run First</span>
+  </a>
+
+  <a href="/mtf" class="tool-card">
+    <div class="icon">📊</div>
+    <h3>Multi-Timeframe Dashboard</h3>
+    <p>Scan any list of stocks. Shows MTF signals, ADX, HV Rank, RS rank, squeeze, OBV, and sector ETF confirmation.</p>
+    <span class="tag tag-scan">Scanner</span>
+  </a>
+
+  <a href="/spreads" class="tool-card">
+    <div class="icon">📈</div>
+    <h3>Spread Finder</h3>
+    <p>Finds bull call spreads and bull put spreads within your budget. HVR-driven recommendation on which type to use.</p>
+    <span class="tag tag-debit">Debit</span>
+    <span class="tag tag-credit">Credit</span>
+  </a>
+
+  <a href="/csp" class="tool-card">
+    <div class="icon">💵</div>
+    <h3>Cash-Secured Put Finder</h3>
+    <p>Step 1 of the Wheel Strategy. Sell a put, collect premium, get assigned shares at a discount if exercised.</p>
+    <span class="tag tag-income">Wheel Step 1</span>
+  </a>
+
+  <a href="/covered-call" class="tool-card">
+    <div class="icon">📝</div>
+    <h3>Covered Call Analyzer</h3>
+    <p>Step 2 of the Wheel Strategy. Own 100+ shares? Sell a call against them each month for steady income.</p>
+    <span class="tag tag-income">Wheel Step 2</span>
+  </a>
+
+  <a href="/iron-condor" class="tool-card">
+    <div class="icon">🦅</div>
+    <h3>Iron Condor Finder</h3>
+    <p>Profit if the stock stays in a range. Bull put spread + bear call spread simultaneously. Best for low-volatility stocks.</p>
+    <span class="tag tag-credit">Credit</span>
+  </a>
+
+  <a href="/chart" class="tool-card">
+    <div class="icon">📉</div>
+    <h3>Chart Analyzer</h3>
+    <p>Interactive chart with EMAs, Bollinger Bands, RSI, MACD, Monte Carlo forecast cone, buy/sell signals, and backtest equity curve.</p>
+    <span class="tag tag-scan">Interactive</span>
+  </a>
+
+  <a href="/alerts" class="tool-card">
+    <div class="icon">🔔</div>
+    <h3>Discord Alerts</h3>
+    <p>Scan your entire watchlist at once. Get notified on your phone via Discord when entry signals or MACD crossovers fire on any ticker.</p>
+    <span class="tag tag-scan">Alerts</span>
+  </a>
+
+  <a href="/positions" class="tool-card">
+    <div class="icon">📋</div>
+    <h3>Paper Portfolio</h3>
+    <p>Track paper trades with live P&L. Add spreads, options, and stocks. Live Black-Scholes pricing with hold/close/roll recommendations.</p>
+    <span class="tag tag-paper">Paper Trading</span>
+  </a>
+
+  <a href="/alpaca" class="tool-card">
+    <div class="icon">📈</div>
+    <h3>Alpaca Paper Account</h3>
+    <p>Live paper brokerage account. $100K virtual equity, $200K buying power. Submit paper stock orders directly from the dashboard.</p>
+    <span class="tag tag-alpaca">Live Paper</span>
+  </a>
+
+</div>
+
+<div class="card" style="margin-top: 32px;">
+  <p style="font-size: 13px; color: #475569; line-height: 1.7;">
+    <strong style="color: #94a3b8;">Workflow:</strong>
+    Run <a href="/macro" style="color: #7c6af7;">Macro</a> first to check the economic backdrop.
+    Then run <a href="/mtf" style="color: #7c6af7;">MTF Dashboard</a> to find strong signals.
+    Then use <a href="/spreads" style="color: #7c6af7;">Spread Finder</a> on the best picks.
+    Close all trades at 50% profit. Never hold past 21 DTE.
+  </p>
+</div>
+{% endblock %}

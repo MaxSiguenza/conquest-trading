@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+{% block title %}Chart{% if ticker %} — {{ ticker }}{% endif %}{% endblock %}
+
+{% block extra_style %}
+.chart-form {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.chart-form .field { flex: 0 0 200px; }
+.chart-form .field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+.chart-form .field input {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 0;
+  transition: border-color 0.15s;
+}
+.chart-form .field input:focus { border-color: #7c6af7; }
+
+.btn-run {
+  background: #7c6af7;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 32px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  height: 42px;
+}
+.btn-run:hover    { background: #6a58e0; }
+.btn-run:disabled { background: #2d3148; color: #475569; cursor: not-allowed; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.stat-box {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.stat-box .label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 4px;
+}
+
+.stat-box .value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.stat-box .sub {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.bull  { color: #4ade80; }
+.bear  { color: #f87171; }
+.warn  { color: #fb923c; }
+.purp  { color: #7c6af7; }
+
+.entry-banner {
+  background: #1a3a2a;
+  border: 1px solid #4ade80;
+  border-radius: 10px;
+  padding: 12px 18px;
+  color: #4ade80;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.forecast-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.forecast-box {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.forecast-box .label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 4px;
+}
+
+.forecast-box .value {
+  font-size: 17px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.forecast-box .pct {
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.chart-wrap {
+  border-radius: 12px;
+  border: 1px solid #2d3148;
+  overflow: hidden;
+  background: #0f1117;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.metric-row {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.metric-row .mkey { color: #64748b; }
+.metric-row .mval { color: #e2e8f0; font-weight: 600; font-family: monospace; }
+
+.spinner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  color: #7c6af7;
+  font-size: 13px;
+  margin-top: 12px;
+}
+.spinner.visible { display: flex; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #7c6af7; animation: bounce 1.2s infinite; }
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%,80%,100%{transform:scale(0.6);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+
+.error-box {
+  background: #2a1a1a;
+  border: 1px solid #f87171;
+  border-radius: 10px;
+  padding: 14px 18px;
+  color: #f87171;
+  font-size: 13px;
+  margin-top: 20px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 12px;
+  margin-top: 28px;
+}
+{% endblock %}
+
+{% block content %}
+<a href="/" style="font-size:13px;color:#64748b;text-decoration:none;display:inline-block;margin-bottom:20px;">← Back to Dashboard</a>
+<h1>Chart Analyzer</h1>
+
+<div class="card">
+  <form method="POST" id="chart-form">
+    <div class="chart-form">
+      <div class="field">
+        <label for="ticker">Ticker</label>
+        <input type="text" id="ticker" name="ticker" placeholder="e.g. AAPL" value="{{ ticker }}" autocomplete="off">
+      </div>
+      <button type="submit" class="btn-run" id="run-btn">Generate Chart</button>
+    </div>
+  </form>
+  <div class="spinner" id="spinner">
+    <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+    <span>Running analysis... this takes ~15 seconds</span>
+  </div>
+</div>
+
+{% if error %}
+<div class="error-box">Error: {{ error }}</div>
+{% endif %}
+
+{% if stats %}
+
+  {% if stats.entry %}
+  <div class="entry-banner">
+    ENTER NOW — All filters passed: MTF 3/3, MACD, RSI, VIX, Volume, OBV, ADX
+  </div>
+  {% endif %}
+
+  {# ── Key stats ── #}
+  <p class="section-label">Key Stats</p>
+  <div class="stat-grid">
+    <div class="stat-box">
+      <div class="label">Price</div>
+      <div class="value">${{ "%.2f"|format(stats.price) }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">MTF Score</div>
+      <div class="value {% if stats.mtf_score == 3 %}bull{% elif stats.mtf_score >= 2 %}warn{% else %}bear{% endif %}">
+        {{ stats.mtf_score }}/3
+      </div>
+      <div class="sub">{{ stats.monthly }} / {{ stats.weekly }} / {{ stats.daily }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">HV Rank</div>
+      <div class="value {% if stats.hv_rank > 50 %}warn{% else %}bull{% endif %}">
+        {{ "%.0f"|format(stats.hv_rank) }}/100
+      </div>
+      <div class="sub">{{ ">50 sell premium" if stats.hv_rank > 50 else "<30 buy options" if stats.hv_rank < 30 else "moderate" }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">ADX</div>
+      <div class="value {% if stats.adx > 25 %}bull{% else %}bear{% endif %}">
+        {{ "%.0f"|format(stats.adx) }}
+      </div>
+      <div class="sub">{{ "Strong trend" if stats.adx > 25 else "Weak — reduce size" }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">RSI</div>
+      <div class="value {% if stats.rsi > 70 %}bear{% elif stats.rsi < 30 %}bull{% else %}purp{% endif %}">
+        {{ "%.1f"|format(stats.rsi) }}
+      </div>
+      <div class="sub">{{ "Overbought" if stats.rsi > 70 else "Oversold" if stats.rsi < 30 else "Neutral" }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Kelly Size</div>
+      <div class="value purp">{{ "%.1f"|format(stats.kelly * 100) }}%</div>
+      <div class="sub">of portfolio per trade</div>
+    </div>
+  </div>
+
+  {# ── Monte Carlo forecast ── #}
+  <p class="section-label">{{ stats.forecast.days }}-Day Monte Carlo Forecast (1,000 simulations)</p>
+  <div class="forecast-grid">
+    <div class="forecast-box">
+      <div class="label">Current</div>
+      <div class="value">${{ "%.2f"|format(stats.forecast.current) }}</div>
+    </div>
+    <div class="forecast-box">
+      <div class="label">Median Target</div>
+      <div class="value">
+        ${{ "%.2f"|format(stats.forecast.median) }}
+        <span class="pct {% if stats.forecast.median > stats.forecast.current %}bull{% else %}bear{% endif %}">
+          ({{ "%+.1f"|format((stats.forecast.median / stats.forecast.current - 1) * 100) }}%)
+        </span>
+      </div>
+    </div>
+    <div class="forecast-box">
+      <div class="label">Bull Case (90th %)</div>
+      <div class="value bull">
+        ${{ "%.2f"|format(stats.forecast.bull) }}
+        <span class="pct">({{ "%+.1f"|format((stats.forecast.bull / stats.forecast.current - 1) * 100) }}%)</span>
+      </div>
+    </div>
+    <div class="forecast-box">
+      <div class="label">Bear Case (10th %)</div>
+      <div class="value bear">
+        ${{ "%.2f"|format(stats.forecast.bear) }}
+        <span class="pct">({{ "%+.1f"|format((stats.forecast.bear / stats.forecast.current - 1) * 100) }}%)</span>
+      </div>
+    </div>
+    <div class="forecast-box">
+      <div class="label">Prob Up</div>
+      <div class="value {% if stats.forecast.prob_up > 0.55 %}bull{% elif stats.forecast.prob_up < 0.45 %}bear{% else %}warn{% endif %}">
+        {{ "%.1f"|format(stats.forecast.prob_up * 100) }}%
+      </div>
+    </div>
+    <div class="forecast-box">
+      <div class="label">Ann. Volatility</div>
+      <div class="value purp">{{ "%.1f"|format(stats.forecast.implied_vol * 100) }}%</div>
+    </div>
+  </div>
+
+  {# ── Chart ── #}
+  <p class="section-label">Full Analysis Chart — scroll to zoom, drag to pan</p>
+  <div class="chart-wrap">{{ chart_html | safe }}</div>
+
+  <script>
+  (function () {
+    function initSync() {
+      const gd = document.querySelector(".js-plotly-plot");
+      if (!gd) { setTimeout(initSync, 300); return; }
+      let busy = false;
+      gd.on("plotly_relayout", function (ed) {
+        if (busy) return;
+        // Only react to primary x-axis changes (scroll zoom / box zoom / pan)
+        const r0 = ed["xaxis.range[0]"], r1 = ed["xaxis.range[1]"];
+        const reset = ed["xaxis.autorange"] === true;
+        if (r0 === undefined && !reset) return;
+        const update = reset
+          ? { "xaxis2.autorange": true, "xaxis3.autorange": true, "xaxis4.autorange": true }
+          : { "xaxis2.range": [r0, r1], "xaxis3.range": [r0, r1], "xaxis4.range": [r0, r1] };
+        busy = true;
+        Plotly.relayout(gd, update).then(function () { busy = false; });
+      });
+    }
+    window.addEventListener("load", initSync);
+  })();
+  </script>
+
+  {# ── Backtest metrics ── #}
+  <p class="section-label">Backtest Performance</p>
+  <div class="metrics-grid">
+    {% for k, v in stats.metrics.items() %}
+    <div class="metric-row">
+      <span class="mkey">{{ k }}</span>
+      <span class="mval">{{ v }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+{% endif %}
+
+<script>
+document.getElementById("chart-form").addEventListener("submit", function() {
+  document.getElementById("run-btn").disabled = true;
+  document.getElementById("run-btn").textContent = "Generating...";
+  document.getElementById("spinner").classList.add("visible");
+});
+{% if chart_html %}
+window.addEventListener("load", function() {
+  document.querySelector(".stat-grid").scrollIntoView({ behavior: "smooth" });
+});
+{% endif %}
+</script>
+{% endblock %}

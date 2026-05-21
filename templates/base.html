@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Conquest Trading{% endblock %}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    nav {
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3148;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 56px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    nav .logo {
+      font-weight: 700;
+      font-size: 15px;
+      color: #7c6af7;
+      margin-right: 16px;
+      letter-spacing: 0.5px;
+    }
+
+    nav a {
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+
+    nav a:hover, nav a.active {
+      background: #2d3148;
+      color: #e2e8f0;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 24px;
+    }
+
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+      margin-bottom: 16px;
+    }
+
+    input[type="text"]:focus {
+      border-color: #7c6af7;
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+    }
+
+    .form-row .field { margin-bottom: 0; }
+    .form-row input[type="text"] { margin-bottom: 0; }
+
+    button[type="submit"] {
+      background: #7c6af7;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 11px 28px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 20px;
+      transition: background 0.15s;
+    }
+
+    button[type="submit"]:hover { background: #6a58e0; }
+
+    pre {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 20px;
+      font-family: "Fira Code", "Cascadia Code", "Consolas", monospace;
+      font-size: 12.5px;
+      line-height: 1.6;
+      color: #c9d6e8;
+      overflow-x: auto;
+      white-space: pre;
+      margin-top: 24px;
+    }
+
+    .loading {
+      display: none;
+      color: #7c6af7;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    footer {
+      border-top: 1px solid #2d3148;
+      padding: 20px 24px;
+      text-align: center;
+      font-size: 11px;
+      color: #475569;
+      line-height: 1.6;
+      margin-top: 48px;
+    }
+
+    footer strong { color: #64748b; }
+
+    {% block extra_style %}{% endblock %}
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">CONQUEST</span>
+  <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Home</a>
+  <a href="/macro" {% if request.path == '/macro' %}class="active"{% endif %}>Macro</a>
+  <a href="/mtf" {% if request.path == '/mtf' %}class="active"{% endif %}>MTF Dashboard</a>
+  <a href="/spreads" {% if request.path == '/spreads' %}class="active"{% endif %}>Spread Finder</a>
+  <a href="/csp" {% if request.path == '/csp' %}class="active"{% endif %}>CSP Finder</a>
+  <a href="/covered-call" {% if request.path == '/covered-call' %}class="active"{% endif %}>Covered Call</a>
+  <a href="/iron-condor" {% if request.path == '/iron-condor' %}class="active"{% endif %}>Iron Condor</a>
+  <a href="/chart" {% if request.path == '/chart' %}class="active"{% endif %}>Chart</a>
+  <a href="/alerts" {% if request.path == '/alerts' %}class="active"{% endif %}>🔔 Alerts</a>
+  <a href="/positions" {% if request.path == '/positions' %}class="active"{% endif %}>📋 Portfolio</a>
+  <a href="/alpaca" {% if request.path == '/alpaca' %}class="active"{% endif %}>📈 Alpaca</a>
+</nav>
+
+<div class="container">
+  {% block content %}{% endblock %}
+</div>
+
+<footer>
+  <p>
+    <strong>Not financial advice.</strong>
+    This tool is for educational and informational purposes only.
+    Nothing here constitutes a recommendation to buy or sell any security.
+    Options trading involves significant risk and is not suitable for all investors.
+    You could lose your entire investment. Always do your own research.
+  </p>
+</footer>
+
+</body>
+</html>

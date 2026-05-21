@@ -1,0 +1,33 @@
+# Conquest Trading — Python dependencies
+# Generated for Railway/Render cloud deployment
+
+# Core data + math
+flask==3.1.3
+yfinance==1.3.0
+pandas==2.3.3
+numpy==2.2.6
+scipy==1.14.1
+
+# Visualization
+matplotlib>=3.8.0
+
+# API integrations
+anthropic==0.103.1
+requests==2.32.3
+python-dotenv==1.2.2
+fredapi==0.5.2
+alpaca-py==0.43.4
+
+# Scheduling + async
+apscheduler==3.11.2
+aiohttp==3.13.5
+pytz==2024.2
+
+# Indicators
+pandas-ta==0.4.71b0
+
+# Discord bot
+discord.py==2.7.1
+
+# Options pricing
+py_vollib==1.0.1

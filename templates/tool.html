@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block extra_style %}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  align-items: end;
+}
+
+.field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+
+.field input {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  margin-bottom: 0;
+}
+
+.field input:focus { border-color: #7c6af7; }
+
+.btn-run {
+  background: #7c6af7;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 32px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  height: 42px;
+  align-self: end;
+}
+
+.btn-run:hover { background: #6a58e0; }
+.btn-run:disabled { background: #2d3148; color: #475569; cursor: not-allowed; }
+
+.spinner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  color: #7c6af7;
+  font-size: 13px;
+  margin-top: 16px;
+}
+
+.spinner.visible { display: flex; }
+
+.dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #7c6af7;
+  animation: bounce 1.2s infinite;
+}
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+pre {
+  background: #0a0c14;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 22px;
+  font-family: "Fira Code", "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: #c9d6e8;
+  overflow-x: auto;
+  white-space: pre;
+  margin-top: 24px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.back {
+  font-size: 13px;
+  color: #64748b;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 20px;
+  transition: color 0.15s;
+}
+
+.back:hover { color: #94a3b8; }
+
+.result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24px;
+  margin-bottom: 8px;
+}
+
+.result-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.copy-btn {
+  font-size: 11px;
+  color: #64748b;
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.copy-btn:hover { color: #e2e8f0; border-color: #475569; }
+{% endblock %}
+
+{% block content %}
+<a href="/" class="back">← Back to Dashboard</a>
+<h1>{{ title }}</h1>
+
+<div class="card">
+  <form method="POST" id="tool-form">
+    <div class="form-grid">
+      {% for field in fields %}
+      <div class="field">
+        <label for="{{ field.name }}">{{ field.label }}</label>
+        <input
+          type="text"
+          id="{{ field.name }}"
+          name="{{ field.name }}"
+          placeholder="{{ field.placeholder }}"
+          value="{{ field.value }}"
+          autocomplete="off"
+        >
+      </div>
+      {% endfor %}
+      <button type="submit" class="btn-run" id="run-btn">Run</button>
+    </div>
+  </form>
+
+  <div class="spinner" id="spinner">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <span>Fetching live data...</span>
+  </div>
+</div>
+
+{% if output %}
+<div class="result-header">
+  <span class="result-label">Output</span>
+  <button class="copy-btn" onclick="copyOutput()">Copy</button>
+</div>
+<pre id="output-box">{{ output }}</pre>
+{% endif %}
+
+<script>
+document.getElementById("tool-form").addEventListener("submit", function() {
+  document.getElementById("run-btn").disabled = true;
+  document.getElementById("run-btn").textContent = "Running...";
+  document.getElementById("spinner").classList.add("visible");
+});
+
+function copyOutput() {
+  const text = document.getElementById("output-box").innerText;
+  navigator.clipboard.writeText(text);
+  const btn = document.querySelector(".copy-btn");
+  btn.textContent = "Copied!";
+  setTimeout(() => btn.textContent = "Copy", 2000);
+}
+
+function colorizeOutput() {
+  const box = document.getElementById("output-box");
+  if (!box) return;
+
+  // Grab raw text and HTML-escape it
+  const raw = box.textContent || box.innerText;
+  let h = raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // ── Separator lines (=== --- ═══) ──
+  h = h.replace(/([═=\-]{4,})/g,
+    '<span style="color:#2d3148">$1</span>');
+
+  // ── Section headers (line ending in colon, or ALL CAPS standalone) ──
+  h = h.replace(/^([A-Z][A-Z &\-\/]{3,}:)/gm,
+    '<span style="color:#94a3b8;font-weight:600">$1</span>');
+
+  // ── BULL / BEAR ──
+  h = h.replace(/\bBULL\b/g,
+    '<span style="color:#4ade80;font-weight:700">BULL</span>');
+  h = h.replace(/\bBEAR\b/g,
+    '<span style="color:#f87171;font-weight:700">BEAR</span>');
+
+  // ── YES / PASS / ✓ / STRONG ──
+  h = h.replace(/\b(YES|PASS|STRONG)\b|✓/g,
+    '<span style="color:#4ade80;font-weight:600">$&</span>');
+
+  // ── NO / FAIL / WEAK / ✗ ──
+  h = h.replace(/\b(NO|FAIL|WEAK)\b|✗/g,
+    '<span style="color:#f87171;font-weight:600">$&</span>');
+
+  // ── MTF scores ──
+  h = h.replace(/\b3\/3\b/g,
+    '<span style="color:#4ade80;font-weight:700">3/3</span>');
+  h = h.replace(/\b2\/3\b/g,
+    '<span style="color:#fb923c;font-weight:700">2/3</span>');
+  h = h.replace(/\b[01]\/3\b/g,
+    m => `<span style="color:#f87171;font-weight:700">${m}</span>`);
+
+  // ── Positive percentages (+x.x%) ──
+  h = h.replace(/\+(\d[\d,.]*%)/g,
+    '<span style="color:#4ade80">+$1</span>');
+
+  // ── Negative percentages (-x.x%) ──
+  h = h.replace(/(^|\s)-(\d[\d,.]*%)/g,
+    '$1<span style="color:#f87171">-$2</span>');
+
+  // ── Dollar amounts ──
+  h = h.replace(/\$[\d,]+\.?\d*/g,
+    '<span style="color:#c9d6e8;font-weight:500">$&</span>');
+
+  // ── Neutral labels (ADX, HVR, RSI, OBV, VIX, DXY, etc.) ──
+  h = h.replace(/\b(ADX|HVR|RSI|OBV|VIX|DXY|DTE|IV|EMA|SMA|BB|ATR|MACD|MTF)\b/g,
+    '<span style="color:#7c6af7">$1</span>');
+
+  // ── Numbers with colons (stat values like "ADX: 34.2") ──
+  h = h.replace(/:\s+(\d[\d.,]+)/g,
+    ': <span style="color:#e2e8f0">$1</span>');
+
+  box.innerHTML = h;
+}
+
+{% if output %}
+window.addEventListener("load", function() {
+  colorizeOutput();
+  document.getElementById("output-box").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+{% endif %}
+</script>
+{% endblock %}

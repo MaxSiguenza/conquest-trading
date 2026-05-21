@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}Alpaca Paper Account{% endblock %}
+
+{% block extra_style %}
+.acct-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.acct-tile {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 16px 18px;
+  text-align: center;
+}
+.acct-tile .label {
+  font-size: 10px; font-weight: 600; color: #475569;
+  text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px;
+}
+.acct-tile .value {
+  font-size: 17px; font-weight: 700;
+  font-family: monospace; color: #f1f5f9;
+}
+.acct-tile .value.pos { color: #4ade80; }
+.acct-tile .value.neg { color: #f87171; }
+
+.positions-table {
+  width: 100%; border-collapse: collapse;
+}
+.positions-table th {
+  font-size: 10px; font-weight: 600; color: #475569;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  text-align: left; padding: 8px 12px;
+  border-bottom: 1px solid #2d3148;
+}
+.positions-table td {
+  font-size: 13px; color: #c9d6e8;
+  font-family: monospace; padding: 10px 12px;
+  border-bottom: 1px solid #1a1d27;
+}
+.positions-table tr:hover td { background: #1a1d27; }
+.pnl-pos { color: #4ade80; font-weight: 600; }
+.pnl-neg { color: #f87171; font-weight: 600; }
+
+.order-form {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;
+  margin-top: 20px;
+}
+.field label {
+  display: block; font-size: 10px; font-weight: 600;
+  color: #64748b; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 5px;
+}
+.field input, .field select {
+  background: #0f1117; border: 1px solid #2d3148; border-radius: 8px;
+  color: #e2e8f0; padding: 9px 12px; font-size: 13px;
+  font-family: monospace; outline: none;
+}
+.field input:focus, .field select:focus { border-color: #7c6af7; }
+.btn { border: none; border-radius: 8px; padding: 10px 20px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.btn-buy  { background: #1a3a2a; color: #4ade80; border: 1px solid #4ade80; }
+.btn-buy:hover  { background: #1f4a34; }
+.btn-sell { background: #2a1a1a; color: #f87171; border: 1px solid #f87171; }
+.btn-sell:hover { background: #3a2020; }
+.btn-ghost { background: transparent; color: #64748b; border: 1px solid #2d3148; }
+.status-err { background: #2a1a1a; border: 1px solid #f87171; color: #f87171;
+              border-radius: 10px; padding: 12px 16px; font-size: 13px; font-weight: 600; margin-bottom: 20px; }
+.paper-badge {
+  display: inline-block; background: #2d1f4e; color: #a78bfa;
+  border: 1px solid #7c6af7; border-radius: 99px;
+  font-size: 11px; font-weight: 700; padding: 3px 12px; margin-left: 10px;
+  vertical-align: middle; letter-spacing: 0.4px;
+}
+{% endblock %}
+
+{% block content %}
+<a href="/" style="font-size:13px;color:#64748b;text-decoration:none;display:inline-block;margin-bottom:20px;">← Back to Dashboard</a>
+<h1>Alpaca Paper Account <span class="paper-badge">PAPER MONEY</span></h1>
+<p style="font-size:13px;color:#64748b;margin-top:-8px;margin-bottom:20px;">
+  This is virtual money only. No real trades are placed.
+</p>
+
+{% if summary.error %}
+  <div class="status-err">⚠ Alpaca connection error: {{ summary.error }}</div>
+  <p style="font-size:13px;color:#64748b;">
+    Check that ALPACA_API_KEY and ALPACA_SECRET_KEY are in your .env file.
+  </p>
+{% else %}
+
+{# ── Account summary tiles ── #}
+<div class="acct-grid">
+  <div class="acct-tile">
+    <div class="label">Portfolio Value</div>
+    <div class="value">${{ "{:,.2f}".format(summary.portfolio_value) }}</div>
+  </div>
+  <div class="acct-tile">
+    <div class="label">Equity</div>
+    <div class="value">${{ "{:,.2f}".format(summary.equity) }}</div>
+  </div>
+  <div class="acct-tile">
+    <div class="label">Cash</div>
+    <div class="value">${{ "{:,.2f}".format(summary.cash) }}</div>
+  </div>
+  <div class="acct-tile">
+    <div class="label">Buying Power</div>
+    <div class="value">${{ "{:,.2f}".format(summary.buying_power) }}</div>
+  </div>
+  <div class="acct-tile">
+    <div class="label">Today P&amp;L</div>
+    {% set pnl = summary.pnl %}
+    <div class="value {% if pnl >= 0 %}pos{% else %}neg{% endif %}">
+      {{ "%+,.2f"|format(pnl) }}
+    </div>
+    {% set pct = summary.pnl_pct * 100 %}
+    <div style="font-size:11px;color:#475569;margin-top:4px;">{{ "%+.2f"|format(pct) }}%</div>
+  </div>
+  <div class="acct-tile">
+    <div class="label">Status</div>
+    <div class="value" style="font-size:13px;color:#4ade80;">{{ summary.status | upper }}</div>
+  </div>
+</div>
+
+{# ── Alpaca stock positions ── #}
+<div class="card">
+  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:16px;">
+    Alpaca Stock Positions
+  </p>
+
+  {% if positions %}
+  <table class="positions-table">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Qty</th>
+        <th>Avg Entry</th>
+        <th>Current</th>
+        <th>P&amp;L $</th>
+        <th>P&amp;L %</th>
+        <th>Side</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in positions %}
+        {% if p.error is defined and p.error %}
+          <tr><td colspan="7" style="color:#f87171;">Error: {{ p.error }}</td></tr>
+        {% else %}
+          <tr>
+            <td style="font-weight:700;color:#f1f5f9;">{{ p.symbol }}</td>
+            <td>{{ "%.0f"|format(p.qty) }}</td>
+            <td>${{ "%.2f"|format(p.avg_entry) }}</td>
+            <td>${{ "%.2f"|format(p.current_price) }}</td>
+            <td class="{% if p.pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+              {{ "%+,.2f"|format(p.pnl) }}
+            </td>
+            <td class="{% if p.pnl_pct >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+              {{ "%+.2f"|format(p.pnl_pct * 100) }}%
+            </td>
+            <td style="color:#64748b;text-transform:uppercase;font-size:11px;">{{ p.side }}</td>
+          </tr>
+        {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="font-size:13px;color:#475569;text-align:center;padding:24px;">
+    No open stock positions in the Alpaca paper account.
+  </p>
+  {% endif %}
+</div>
+
+{# ── Place a paper order ── #}
+<div class="card">
+  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:16px;">
+    Place Paper Market Order
+  </p>
+  <p style="font-size:12px;color:#64748b;margin-bottom:16px;">
+    Orders execute at market price in the paper account. For stocks only —
+    options require a brokerage account to track separately.
+  </p>
+  <form method="POST" action="/alpaca/order" class="order-form">
+    <div class="field">
+      <label>Symbol</label>
+      <input type="text" name="symbol" placeholder="AAPL" style="width:100px;text-transform:uppercase" required>
+    </div>
+    <div class="field">
+      <label>Shares</label>
+      <input type="number" name="qty" placeholder="10" min="1" step="1" style="width:90px" required>
+    </div>
+    <div class="field">
+      <label>Side</label>
+      <select name="side" style="width:90px">
+        <option value="buy">Buy</option>
+        <option value="sell">Sell</option>
+      </select>
+    </div>
+    <button type="submit" name="order_side" id="order-btn" class="btn btn-buy">
+      Submit Paper Order
+    </button>
+  </form>
+  <p style="font-size:11px;color:#475569;margin-top:12px;">
+    ⚠ Paper trades only — this is virtual money, no real positions are created.
+  </p>
+</div>
+
+{% endif %}
+
+<script>
+// Change button color based on buy/sell selection
+document.querySelector('select[name="side"]')?.addEventListener("change", function() {
+  const btn = document.getElementById("order-btn");
+  if (btn) {
+    btn.className = "btn " + (this.value === "buy" ? "btn-buy" : "btn-sell");
+    btn.textContent = (this.value === "buy" ? "Buy Shares" : "Sell Shares");
+  }
+});
+</script>
+{% endblock %}

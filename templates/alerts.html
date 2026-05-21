@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% block title %}Signal Alerts{% endblock %}
+
+{% block extra_style %}
+.setup-steps {
+  counter-reset: step;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px 0;
+}
+.setup-steps li {
+  counter-increment: step;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+.setup-steps li::before {
+  content: counter(step);
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: #2d3148;
+  color: #7c6af7;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+.setup-steps a { color: #7c6af7; }
+
+.alert-form { display: flex; flex-direction: column; gap: 16px; }
+
+.field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+.field input[type="text"],
+.field textarea {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-family: "Fira Code", "Cascadia Code", "Consolas", monospace;
+  outline: none;
+  transition: border-color 0.15s;
+  resize: vertical;
+}
+.field input[type="text"]:focus,
+.field textarea:focus { border-color: #7c6af7; }
+
+.btn-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 24px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-primary { background: #7c6af7; color: #fff; }
+.btn-primary:hover { background: #6a58e0; }
+.btn-secondary { background: #1a1d27; color: #94a3b8; border: 1px solid #2d3148; }
+.btn-secondary:hover { color: #e2e8f0; border-color: #475569; }
+.btn-send { background: #5865f2; color: #fff; }  /* Discord blue */
+.btn-send:hover { background: #4752c4; }
+.btn-briefing { background: #2d1f4e; color: #a78bfa; border: 1px solid #7c6af7; }
+.btn-briefing:hover { background: #3d2a6e; color: #c4b5fd; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.status-box {
+  border-radius: 10px;
+  padding: 12px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-ok   { background: #1a3a2a; border: 1px solid #4ade80; color: #4ade80; }
+.status-err  { background: #2a1a1a; border: 1px solid #f87171; color: #f87171; }
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 12px;
+  margin-top: 28px;
+}
+
+/* Results table */
+.results-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.result-row {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: 80px 90px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  transition: border-color 0.15s;
+}
+.result-row.entry  { border-color: #4ade80; background: #111d17; }
+.result-row.cross  { border-color: #fb923c; background: #1c1510; }
+.result-row.error  { border-color: #f87171; background: #1c1010; opacity: 0.7; }
+
+.result-ticker {
+  font-size: 15px;
+  font-weight: 700;
+  font-family: monospace;
+  color: #f1f5f9;
+}
+.result-price {
+  font-size: 14px;
+  font-weight: 600;
+  color: #c9d6e8;
+  font-family: monospace;
+}
+.result-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 99px;
+  background: #0f1117;
+  color: #64748b;
+}
+.chip.bull   { color: #4ade80; }
+.chip.bear   { color: #f87171; }
+.chip.purple { color: #7c6af7; }
+.chip.orange { color: #fb923c; }
+
+.signal-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 99px;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.badge-entry { background: #1a3a2a; color: #4ade80; border: 1px solid #4ade80; }
+.badge-cross { background: #2a1c10; color: #fb923c; border: 1px solid #fb923c; }
+.badge-none  { background: #0f1117; color: #475569; border: 1px solid #2d3148; }
+.badge-error { background: #2a1010; color: #f87171; border: 1px solid #f87171; }
+
+.spinner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  color: #7c6af7;
+  font-size: 13px;
+  margin-top: 12px;
+}
+.spinner.visible { display: flex; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #7c6af7; animation: bounce 1.2s infinite; }
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%,80%,100%{transform:scale(0.6);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+
+.discord-logo {
+  width: 18px; height: 18px;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+{% endblock %}
+
+{% block content %}
+<a href="/" style="font-size:13px;color:#64748b;text-decoration:none;display:inline-block;margin-bottom:20px;">← Back to Dashboard</a>
+<h1>Discord Signal Alerts</h1>
+
+{# ── Setup instructions ── #}
+<div class="card">
+  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px;">How to set up your Discord webhook</p>
+  <ol class="setup-steps">
+    <li>Open Discord and go to the channel where you want alerts (or create a new one like <strong>#trading-alerts</strong>).</li>
+    <li>Click the <strong>⚙️ Edit Channel</strong> gear → <strong>Integrations</strong> → <strong>Webhooks</strong> → <strong>New Webhook</strong>.</li>
+    <li>Give it a name like <em>Quant Bot</em>, then click <strong>Copy Webhook URL</strong>.</li>
+    <li>Paste it in the field below and click <strong>Test Connection</strong> to verify it works.</li>
+  </ol>
+
+  <form method="POST" id="alert-form">
+    <div class="alert-form">
+      <div class="field">
+        <label>Discord Webhook URL</label>
+        <input type="text" name="webhook_url" id="webhook_url"
+               placeholder="https://discord.com/api/webhooks/..."
+               value="{{ settings.webhook_url }}" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Watchlist — space-separated tickers</label>
+        <textarea name="watchlist" id="watchlist" rows="3"
+                  placeholder="AAPL NVDA MSFT GOOGL AMZN">{{ settings.watchlist }}</textarea>
+      </div>
+
+      {# Auto morning briefing toggle #}
+      <div class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;">
+          <input type="checkbox" name="auto_briefing" id="auto_briefing"
+                 {% if auto_briefing %}checked{% endif %}
+                 style="width:16px;height:16px;accent-color:#7c6af7;cursor:pointer;">
+          <span style="font-size:12px;font-weight:600;color:#94a3b8;">
+            Auto-send morning briefing at 9:00 AM ET (Mon–Fri)
+          </span>
+        </label>
+        <span style="font-size:11px;color:#475569;">Requires webhook URL above</span>
+      </div>
+
+      <div class="btn-row">
+        <button type="submit" name="action" value="scan" class="btn btn-primary" id="scan-btn">
+          Scan Watchlist
+        </button>
+        <button type="submit" name="action" value="send" class="btn btn-send" id="send-btn">
+          &#128172; Scan &amp; Send to Discord
+        </button>
+        <button type="submit" name="action" value="briefing" class="btn btn-briefing" id="briefing-btn">
+          ⚔️ Morning Briefing
+        </button>
+        <button type="submit" name="action" value="test" class="btn btn-secondary" id="test-btn">
+          Test Connection
+        </button>
+      </div>
+    </div>
+  </form>
+
+  <div class="spinner" id="spinner">
+    <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+    <span id="spinner-text">Scanning watchlist — ~3 sec per ticker...</span>
+  </div>
+
+  {# Status message after test / send #}
+  {% if send_status %}
+    {% if "successfully" in send_status or "sent" in send_status.lower() %}
+    <div class="status-box status-ok">✓ {{ send_status }}</div>
+    {% else %}
+    <div class="status-box status-err">✗ {{ send_status }}</div>
+    {% endif %}
+  {% endif %}
+</div>
+
+{# ── Scan results ── #}
+{% if scan_results is not none %}
+{% set entries = scan_results | selectattr("entry_signal") | list %}
+{% set crosses = scan_results | selectattr("macd_cross_up") | rejectattr("entry_signal") | list %}
+
+{# Summary banner — always visible, no scrolling required #}
+{% if entries %}
+<div class="status-box status-ok" style="margin-top:20px;font-size:14px;">
+  ✦ {{ entries | length }} ENTRY SIGNAL(S) FOUND — scroll down to see details
+</div>
+{% elif crosses %}
+<div class="status-box" style="background:#1c1510;border:1px solid #fb923c;color:#fb923c;margin-top:20px;font-size:14px;">
+  ↑ {{ crosses | length }} MACD CROSS(ES) — momentum shifting, scroll down
+</div>
+{% else %}
+<div class="status-box" style="background:#1a1d27;border:1px solid #2d3148;color:#64748b;margin-top:20px;font-size:13px;">
+  ✓ Scan complete — {{ scan_results | length }} ticker(s) checked, no fresh signals today.
+  This is normal. Wait for the setup — don't force trades.
+</div>
+{% endif %}
+
+<p class="section-label" id="results-anchor">
+  Scan Results —
+  {{ entries | length }} entry signal(s) &nbsp;·&nbsp;
+  {{ crosses | length }} MACD cross(es) &nbsp;·&nbsp;
+  {{ scan_results | length }} tickers scanned
+</p>
+
+<div class="results-grid">
+  {% for r in scan_results %}
+    {% if r.error %}
+    <div class="result-row error">
+      <span class="result-ticker">{{ r.ticker }}</span>
+      <span class="result-price">—</span>
+      <span style="font-size:12px;color:#f87171;">{{ r.error[:80] }}</span>
+      <span class="signal-badge badge-error">Error</span>
+    </div>
+    {% else %}
+    <div class="result-row {% if r.signal_stale %}error{% elif r.entry_signal %}entry{% elif r.macd_cross_up %}cross{% endif %}">
+      <span class="result-ticker">{{ r.ticker }}</span>
+      <div>
+        <span class="result-price">${{ "%.2f"|format(r.price) }}</span>
+        {% set chg = r.today_chg_pct %}
+        <span style="font-size:11px;font-weight:600;margin-left:6px;
+          color:{% if chg >= 0 %}#4ade80{% else %}#f87171{% endif %}">
+          {{ "%+.1f"|format(chg) }}%
+        </span>
+        {% if r.signal_stale %}
+        <span style="font-size:10px;color:#f87171;display:block;">⚠ signal stale — down {{ "%.1f"|format(chg) }}% today</span>
+        {% endif %}
+      </div>
+      <div class="result-details">
+        <span class="chip {% if r.mtf_score == 3 %}bull{% elif r.mtf_score >= 2 %}orange{% else %}bear{% endif %}">
+          MTF {{ r.mtf_score }}/3
+        </span>
+        <span class="chip {% if r.daily == 'BULL' %}bull{% else %}bear{% endif %}">D:{{ r.daily }}</span>
+        <span class="chip {% if r.weekly == 'BULL' %}bull{% else %}bear{% endif %}">W:{{ r.weekly }}</span>
+        <span class="chip {% if r.monthly == 'BULL' %}bull{% else %}bear{% endif %}">M:{{ r.monthly }}</span>
+        <span class="chip purple">RSI {{ "%.0f"|format(r.rsi) }}</span>
+        <span class="chip {% if r.adx > 25 %}bull{% else %}bear{% endif %}">ADX {{ "%.0f"|format(r.adx) }}</span>
+        <span class="chip {% if r.hv_rank > 50 %}orange{% elif r.hv_rank < 30 %}bull{% endif %}">
+          HVR {{ "%.0f"|format(r.hv_rank) }}
+        </span>
+        {% if r.sqz_fired %}
+          <span class="chip orange" title="TTM Squeeze just fired — breakout from coil">🔥 SQZ</span>
+        {% elif r.sqz_on %}
+          <span class="chip purple" title="Squeeze active — stock coiling, watch for breakout">⚡ SQZ</span>
+        {% endif %}
+      </div>
+      {% if r.signal_stale %}
+        <span class="signal-badge badge-error">⚠ Stale</span>
+      {% elif r.entry_signal %}
+        <span class="signal-badge badge-entry">✦ Entry</span>
+      {% elif r.macd_cross_up %}
+        <span class="signal-badge badge-cross">↑ MACD Cross</span>
+      {% else %}
+        <span class="signal-badge badge-none">No Signal</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+const form = document.getElementById("alert-form");
+const spinner = document.getElementById("spinner");
+const spinnerText = document.getElementById("spinner-text");
+
+form.addEventListener("submit", function(e) {
+  const action = document.activeElement.value;
+  // Disable all buttons
+  document.querySelectorAll(".btn").forEach(b => b.disabled = true);
+  spinner.classList.add("visible");
+  if (action === "send") {
+    spinnerText.textContent = "Scanning and sending to Discord — please wait...";
+  } else if (action === "briefing") {
+    spinnerText.textContent = "⚔️ Scanning watchlist and writing morning briefing — ~15 seconds...";
+  } else if (action === "test") {
+    spinnerText.textContent = "Testing webhook...";
+  } else {
+    const count = document.getElementById("watchlist").value.trim().split(/\s+/).length;
+    spinnerText.textContent = `Scanning ${count} ticker(s) in parallel — usually 5-10 seconds...`;
+  }
+});
+
+{% if scan_results is not none %}
+window.addEventListener("load", function() {
+  const banner = document.querySelector(".status-box");
+  if (banner) banner.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+{% endif %}
+</script>
+{% endblock %}
