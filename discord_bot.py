@@ -592,56 +592,140 @@ async def stats_cmd(ctx):
 
 # ── !trades ────────────────────────────────────────────────────────────────────
 
-@bot.command(name="trades", aliases=["today", "papertrades"])
+@bot.command(name="trades", aliases=["today", "papertrades", "positions"])
 async def trades_cmd(ctx):
-    """Show today's open paper trades."""
-    thinking = await ctx.send("📋 Loading today's paper trades…")
+    """Show live paper positions in Hidden Wolf style."""
+    thinking = await ctx.send("📋 Loading positions…")
 
     def _get():
-        from paper_trader import load_trades
-        from datetime import datetime
-        import pytz
-        today = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
-        all_t = load_trades()
-        return [t for t in all_t if t.get("date_entered", "").startswith(today)]
+        from paper_trader import load_trades, get_paper_stats, run_daily_close
+        import yfinance as yf
 
-    today_trades = await _run_sync(_get)
+        # Fresh mark-to-market so numbers are current
+        run_daily_close()
+
+        today_str = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        all_t  = load_trades()
+        open_t = [t for t in all_t if t.get("status") == "open"]
+        stats  = get_paper_stats()
+
+        # SPY return since earliest open trade (for alpha calc)
+        spx_return = 0.0
+        try:
+            if open_t:
+                earliest = min(t.get("date_entered","")[:10] for t in open_t)
+                spy = yf.download("SPY", start=earliest, progress=False, auto_adjust=True)
+                if not spy.empty and len(spy) >= 2:
+                    spx_return = float(spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1) * 100
+        except Exception:
+            pass
+
+        total_cost    = sum(abs(t.get("cost_basis", 0)) for t in open_t)
+        total_pnl_open= sum(t.get("pnl", 0) for t in open_t)
+        today_pnl     = sum(
+            t.get("pnl", 0) for t in all_t
+            if t.get("date_entered", "").startswith(today_str)
+        )
+
+        return open_t, stats, total_cost, total_pnl_open, today_pnl, spx_return
+
+    import pytz
+    open_trades, stats, total_cost, total_pnl_open, today_pnl, spx_return = \
+        await _run_sync(_get)
 
     await thinking.delete()
 
-    if not today_trades:
-        await ctx.send("No trades generated today yet. Use `!generate` to create them.")
+    if not open_trades and not stats["closed_count"]:
+        await ctx.send("No paper trades yet. Use `!generate` to create today's batch.")
         return
 
+    # ── Overall return on deployed capital ────────────────────────────────────
+    overall_pct = (total_pnl_open / total_cost * 100) if total_cost else 0
+    alpha       = overall_pct - spx_return
+    win_rate    = stats.get("win_rate", 0) * 100
+    all_time_pnl= stats.get("total_pnl", 0)
+
+    color = COLOR_GREEN if total_pnl_open >= 0 else COLOR_RED
+
     embed = discord.Embed(
-        title=f"🧪  Today's Paper Trades  ({len(today_trades)})",
-        color=COLOR_GOLD,
+        title="⚔️  CONQUEST — LIVE PAPER TRADES",
+        color=color,
         timestamp=_ts(),
     )
 
+    # ── Header summary row ────────────────────────────────────────────────────
+    embed.add_field(
+        name="Total P&L",
+        value=f"**${total_pnl_open:+.2f}**\n({overall_pct:+.1f}%)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Alpha vs SPY",
+        value=f"**{alpha:+.2f}%**\nSPY: {spx_return:+.1f}%",
+        inline=True,
+    )
+    embed.add_field(
+        name="Win Rate",
+        value=f"**{win_rate:.1f}%**\n{stats['closed_count']} closed",
+        inline=True,
+    )
+    embed.add_field(
+        name="Today P&L",
+        value=f"**${today_pnl:+.2f}**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Positions",
+        value=f"**{len(open_trades)}** open",
+        inline=True,
+    )
+    embed.add_field(
+        name="All-Time P&L",
+        value=f"**${all_time_pnl:+.2f}**",
+        inline=True,
+    )
+
+    # ── Position lines ────────────────────────────────────────────────────────
+    def _conviction(mtf):
+        if mtf >= 3:   return "HIGH"
+        if mtf >= 2:   return "MEDIUM"
+        return "LOW"
+
+    def _direction(trade_type):
+        return {
+            "stock_long":  "LONG",
+            "stock_short": "SHORT",
+            "long_call":   "LONG CALL",
+            "long_put":    "LONG PUT",
+            "call_spread": "CALL SPD",
+            "put_spread":  "PUT SPD",
+            "iron_condor": "CONDOR",
+        }.get(trade_type, trade_type.upper())
+
+    sorted_trades = sorted(open_trades, key=lambda t: t.get("pnl", 0), reverse=True)
     lines = []
-    for t in today_trades:
-        icon = {"call_spread":"📈","put_spread":"📉","long_call":"🟢","long_put":"🔴",
-                "iron_condor":"🦅","stock_long":"💹","stock_short":"🔻"}.get(t["trade_type"], "•")
-        pnl  = t.get("pnl", 0)
-        pct  = t.get("pnl_pct", 0) * 100
-        sign = "+" if pnl >= 0 else ""
-        status_icon = "✅" if t["status"] == "closed" else "⏳"
+    for t in sorted_trades:
+        pnl   = t.get("pnl", 0)
+        pct   = t.get("pnl_pct", 0) * 100
+        dot   = "🟢" if pnl >= 0 else "🔴"
+        conv  = _conviction(t.get("mtf_score", 0))
+        dirn  = _direction(t["trade_type"])
+        weight= (abs(t.get("cost_basis", 0)) / total_cost * 100) if total_cost else 0
+        days  = t.get("days_held", 0)
         lines.append(
-            f"{status_icon} {icon} **{t['ticker']}** {t['trade_type'].replace('_',' ')} "
-            f"| cost ${t.get('cost_basis',0):.0f} "
-            f"| {sign}${pnl:.2f} ({sign}{pct:.1f}%)"
+            f"{dot} **{t['ticker']}** ({dirn}) | "
+            f"{pct:+.1f}% | {conv} | {weight:.1f}% | day {days}"
         )
 
-    # Split into two fields if more than 5
-    if len(lines) <= 5:
-        embed.add_field(name="Trades", value="\n".join(lines), inline=False)
-    else:
+    if lines:
         mid = len(lines) // 2
-        embed.add_field(name="Trades (1–5)", value="\n".join(lines[:mid]), inline=False)
-        embed.add_field(name="Trades (6–10)", value="\n".join(lines[mid:]), inline=False)
+        if len(lines) <= 5:
+            embed.add_field(name="Open Positions", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="Open Positions (1–5)",  value="\n".join(lines[:mid]),  inline=False)
+            embed.add_field(name="Open Positions (6–10)", value="\n".join(lines[mid:]), inline=False)
 
-    embed.set_footer(text="Conquest Trading  •  ⏳=open  ✅=closed  •  BS simulation")
+    embed.set_footer(text="Updated every 15 min during market hours  •  Conquest Trading  •  BS simulation")
     await ctx.send(embed=embed)
 
 
