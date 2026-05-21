@@ -106,10 +106,12 @@ bot = commands.Bot(
 async def on_ready():
     print(f"\n⚔️  Conquest Bot online  →  {bot.user}")
     print(f"   Servers:  {len(bot.guilds)}")
-    print(f"   Commands: !scan  !analyze  !portfolio  !briefing  !macro  !pnl  !help")
-    print(f"   Auto-briefing task starting...\n")
+    print(f"   Commands: !scan  !analyze  !portfolio  !briefing  !macro  !pnl  !stats  !trades  !help")
+    print(f"   Auto tasks starting...\n")
     if not morning_briefing_task.is_running():
         morning_briefing_task.start()
+    if not paper_trading_loop.is_running():
+        paper_trading_loop.start()
 
 
 @bot.event
@@ -684,8 +686,236 @@ async def generate_cmd(ctx):
 
 # ── Auto morning briefing — 9:00 AM ET, Mon–Fri ───────────────────────────────
 
-_briefing_sent_date = None   # tracks what date we last sent the auto-briefing
+# ── Shared state for auto tasks ───────────────────────────────────────────────
+_briefing_sent_date    = None   # date of last auto morning briefing
+_paper_generated_dates = set()  # dates paper trades were already generated
+_paper_notified_ids    = set()  # closed trade IDs already posted to Discord
+_paper_eod_dates       = set()  # dates EOD summary already posted
 
+
+async def _get_alert_channel():
+    """
+    Find the Discord channel to post automated alerts in.
+    Checks bot_alerts_channel_id in settings first, then falls back to
+    common channel name matches.
+    """
+    s = _load_settings()
+    channel_id = s.get("bot_alerts_channel_id")
+    if channel_id:
+        ch = bot.get_channel(int(channel_id))
+        if ch:
+            return ch
+    for guild in bot.guilds:
+        for ch in guild.text_channels:
+            if ch.name.lower() in ("trade-alerts", "trading-alerts",
+                                   "conquest", "conquest-alerts", "general"):
+                return ch
+    return None
+
+
+# ── Fully-automated paper trading loop ────────────────────────────────────────
+# Runs every 15 minutes.  No manual interaction needed at all.
+#
+#  9:35 AM ET  → generate 10 trades, post summary to Discord
+#  Every 15 min during market hours → mark-to-market, close stops/targets,
+#                                     post close notification for each one
+#  4:05 PM ET  → final mark + EOD daily summary
+
+@tasks.loop(minutes=15)
+async def paper_trading_loop():
+    global _paper_generated_dates, _paper_notified_ids, _paper_eod_dates
+
+    try:
+        import pytz
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+        today  = now_et.date()
+        h, m   = now_et.hour, now_et.minute
+
+        # Weekdays only
+        if now_et.weekday() >= 5:
+            return
+
+        # Market window: 9:30 AM – 4:15 PM ET
+        after_open  = (h > 9) or (h == 9  and m >= 30)
+        before_close= (h < 16) or (h == 16 and m <= 15)
+        if not (after_open and before_close):
+            return
+
+        channel = await _get_alert_channel()
+
+        # ── 1. Generate today's trades (9:35–10:00 AM window) ─────────────────
+        if today not in _paper_generated_dates and (h == 9 and m >= 35 or h >= 10):
+            _paper_generated_dates.add(today)
+
+            def _gen():
+                from paper_trader import generate_daily_trades
+                return generate_daily_trades(10)
+
+            new_trades = await _run_sync(_gen)
+
+            if new_trades and channel:
+                type_counts: dict = {}
+                for t in new_trades:
+                    tt = t["trade_type"]
+                    type_counts[tt] = type_counts.get(tt, 0) + 1
+
+                breakdown = "  ".join(
+                    f"{tt.replace('_',' ')} ×{cnt}"
+                    for tt, cnt in sorted(type_counts.items())
+                )
+                embed = discord.Embed(
+                    title=f"🧪  Paper Trades Generated  —  {today.strftime('%b %d')}",
+                    description=(
+                        f"**{len(new_trades)} trades** placed across the universe.\n"
+                        f"{breakdown}\n\n"
+                        "I'll check every 15 min and close anything that hits a target or stop.\n"
+                        "Use `!trades` to see the full list."
+                    ),
+                    color=COLOR_GOLD,
+                    timestamp=_ts(),
+                )
+                embed.set_footer(
+                    text="Auto-closes: options +50%/−75% · stocks +5%/−3% · max 5 days"
+                )
+                await channel.send(embed=embed)
+
+        # ── 2. Mark-to-market + close check (every tick during market hours) ──
+        def _run_close():
+            from paper_trader import run_daily_close, load_trades
+            run_daily_close()
+            all_t = load_trades()
+            # Return trades that closed and haven't been notified yet
+            newly = [
+                t for t in all_t
+                if t.get("status") == "closed"
+                and t.get("id") not in _paper_notified_ids
+            ]
+            return newly
+
+        newly_closed = await _run_sync(_run_close)
+
+        # Post a notification for every newly closed trade
+        for t in newly_closed:
+            _paper_notified_ids.add(t.get("id", ""))
+            if not channel:
+                continue
+
+            pnl    = t.get("pnl", 0)
+            pnl_pct= t.get("pnl_pct", 0) * 100
+            reason = t.get("close_reason", "closed")
+            won    = pnl >= 0
+
+            if reason == "profit_target":
+                icon, label, color = "✅", "PROFIT TARGET HIT", COLOR_GREEN
+            elif reason == "stop_loss":
+                icon, label, color = "🛑", "STOP LOSS HIT", COLOR_RED
+            else:
+                icon, label, color = "⏱", "MAX HOLD REACHED", COLOR_ORANGE
+
+            tt_display = t["trade_type"].replace("_", " ").title()
+            embed = discord.Embed(
+                title=f"{icon}  {label}  —  {t['ticker']} {tt_display}",
+                color=color,
+                timestamp=_ts(),
+            )
+            embed.add_field(
+                name="Result",
+                value=(
+                    f"**{'▲' if won else '▼'} ${pnl:+.2f}** ({pnl_pct:+.1f}%)\n"
+                    f"Held {t.get('days_held', 0)} day(s)  ·  "
+                    f"Cost ${t.get('cost_basis', 0):.0f}"
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Trade",
+                value=(
+                    f"Entered: {t.get('date_entered','')[:10]}\n"
+                    f"Closed:  {t.get('date_closed','')[:10]}"
+                ),
+                inline=True,
+            )
+            embed.set_footer(
+                text="Conquest Trading  •  paper simulation  •  not financial advice"
+            )
+            await channel.send(embed=embed)
+
+        # ── 3. EOD summary (4:05–4:20 PM) ─────────────────────────────────────
+        if h == 16 and 5 <= m <= 20 and today not in _paper_eod_dates:
+            _paper_eod_dates.add(today)
+
+            def _get_stats():
+                from paper_trader import get_paper_stats, load_trades
+                from datetime import datetime as _dt
+                stats = get_paper_stats()
+                # Today's closed trades
+                today_str = today.strftime("%Y-%m-%d")
+                all_t = load_trades()
+                today_closed = [
+                    t for t in all_t
+                    if t.get("status") == "closed"
+                    and (t.get("date_closed") or "")[:10] == today_str
+                ]
+                today_pnl = sum(t.get("pnl", 0) for t in today_closed)
+                return stats, today_closed, round(today_pnl, 2)
+
+            stats, today_closed, today_pnl = await _run_sync(_get_stats)
+
+            if channel:
+                color = COLOR_GREEN if today_pnl >= 0 else COLOR_RED
+                embed = discord.Embed(
+                    title=f"📊  Paper Trading EOD Wrap  —  {today.strftime('%b %d')}",
+                    color=color,
+                    timestamp=_ts(),
+                )
+                embed.add_field(
+                    name="Today",
+                    value=(
+                        f"Closed {len(today_closed)} trades\n"
+                        f"Today P&L: **${today_pnl:+.2f}**"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="All-Time",
+                    value=(
+                        f"{stats['closed_count']} closed · "
+                        f"{stats['win_rate']*100:.1f}% win rate\n"
+                        f"Total P&L: **${stats['total_pnl']:+.2f}**\n"
+                        f"Sharpe: {stats['sharpe'] or '—'}"
+                    ),
+                    inline=True,
+                )
+                if today_closed:
+                    winners = sorted(today_closed,
+                                     key=lambda t: t.get("pnl", 0), reverse=True)
+                    lines = []
+                    for t in winners[:5]:
+                        sign = "▲" if t.get("pnl", 0) >= 0 else "▼"
+                        lines.append(
+                            f"{sign} **{t['ticker']}** {t['trade_type'].replace('_',' ')} "
+                            f"${t.get('pnl',0):+.2f} · {t.get('close_reason','').replace('_',' ')}"
+                        )
+                    embed.add_field(
+                        name="Today's Closed Trades",
+                        value="\n".join(lines) or "None",
+                        inline=False,
+                    )
+                embed.set_footer(
+                    text="Next batch generates tomorrow at 9:35 AM ET  •  Conquest Trading"
+                )
+                await channel.send(embed=embed)
+
+    except Exception as e:
+        print(f"[PaperLoop] Error: {e}")
+
+
+@paper_trading_loop.before_loop
+async def before_paper_loop():
+    await bot.wait_until_ready()
+
+
+# ── Auto morning briefing ─────────────────────────────────────────────────────
 
 @tasks.loop(minutes=1)
 async def morning_briefing_task():
@@ -708,22 +938,7 @@ async def morning_briefing_task():
 
         _briefing_sent_date = today
 
-        # Find which channel to post in
-        channel_id = s.get("bot_alerts_channel_id")
-        channel    = None
-        if channel_id:
-            channel = bot.get_channel(int(channel_id))
-        if not channel:
-            # Fall back to the first matching channel name
-            for guild in bot.guilds:
-                for ch in guild.text_channels:
-                    if ch.name.lower() in ("trade-alerts", "trading-alerts",
-                                           "conquest", "conquest-alerts", "general"):
-                        channel = ch
-                        break
-                if channel:
-                    break
-
+        channel = await _get_alert_channel()
         if not channel:
             print("[Bot] Auto-briefing: no channel found. "
                   "Set bot_alerts_channel_id in alerts_settings.json.")
