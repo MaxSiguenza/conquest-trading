@@ -592,7 +592,7 @@ async def stats_cmd(ctx):
 
 # ── !trades ────────────────────────────────────────────────────────────────────
 
-@bot.command(name="trades", aliases=["today", "papertrades", "positions"])
+@bot.command(name="trades", aliases=["today", "papertrades"])
 async def trades_cmd(ctx):
     """Show live paper positions in Hidden Wolf style."""
     thinking = await ctx.send("📋 Loading positions…")
