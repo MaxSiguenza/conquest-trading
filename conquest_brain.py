@@ -590,15 +590,19 @@ def watchlist_screener(tickers_blocks: list) -> list:
     Prompt 5 adapted — screen multiple tickers for value vs growth.
     tickers_blocks: list of (ticker, data_block) tuples
     Returns list of dicts sorted by Value/Growth Score.
+
+    Batches 15 tickers at a time to avoid token overflow.
     """
     import json as _json
 
-    sections = "\n\n".join(
-        f"=== {ticker} ===\n{block[:800]}"
-        for ticker, block in tickers_blocks
-    )
+    BATCH_SIZE = 15
 
-    prompt = f"""You are screening these stocks for fundamental value vs growth quality.
+    def _screen_batch(batch):
+        sections = "\n\n".join(
+            f"=== {ticker} ===\n{block[:600]}"
+            for ticker, block in batch
+        )
+        prompt = f"""You are screening these {len(batch)} stocks for fundamental value vs growth quality.
 
 {sections}
 
@@ -606,10 +610,10 @@ def watchlist_screener(tickers_blocks: list) -> list:
 For each stock, calculate the Value/Growth Score = P/S TTM ÷ revenue growth %.
 Lower score = more growth per valuation dollar (better).
 
-Also flag: any stock with P/E below the typical sector average AND positive revenue growth
-qualifies as potentially undervalued.
+Also flag: any stock with P/E below typical sector average AND positive revenue growth
+as potentially undervalued.
 
-Output ONLY a JSON array sorted by score ascending (best first):
+Output ONLY a raw JSON array (no markdown, no fences) with ALL {len(batch)} tickers:
 [
   {{
     "ticker": "X",
@@ -622,12 +626,12 @@ Output ONLY a JSON array sorted by score ascending (best first):
 ]
 
 Use "UNDERVALUED", "FAIRLY VALUED", or "OVERVALUED" for verdict.
-If data is missing for score calculation, estimate and note it."""
+If data is missing, estimate from context and note it in the reason field.
+You MUST include every ticker — do not skip any."""
 
-    try:
         msg = _get_client().messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=800,
+            model="claude-haiku-4-5",
+            max_tokens=2500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -638,8 +642,27 @@ If data is missing for score calculation, estimate and note it."""
                 raw = raw[4:]
             raw = raw.strip()
         return _json.loads(raw)
-    except Exception as e:
-        return []
+
+    all_results = []
+    for i in range(0, len(tickers_blocks), BATCH_SIZE):
+        batch = tickers_blocks[i : i + BATCH_SIZE]
+        try:
+            results = _screen_batch(batch)
+            all_results.extend(results)
+        except Exception as e:
+            # Partial failure — add error entries so we know which batch failed
+            print(f"[Screener] Batch {i//BATCH_SIZE + 1} failed: {e}")
+            for ticker, _ in batch:
+                all_results.append({
+                    "ticker": ticker,
+                    "score": None,
+                    "verdict": "ERROR",
+                    "reason": f"Batch error: {e}"
+                })
+
+    # Sort: valid scores first (ascending), errors last
+    all_results.sort(key=lambda x: (x.get("score") is None, x.get("score") or 9999))
+    return all_results
 
 
 def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) -> str:

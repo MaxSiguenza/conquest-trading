@@ -1866,6 +1866,71 @@ async def before_paper_loop():
     await bot.wait_until_ready()
 
 
+# ── _post_screener_results — shared helper for weekly screener output ─────────
+
+async def _post_screener_results(channel, screen_results: list, date_obj):
+    """
+    Post weekly screener results to a channel.
+    Handles empty results, errors, and splits across multiple embeds
+    if there are more than 15 tickers (Discord embed description limit).
+    """
+    if not screen_results:
+        await channel.send(
+            "⚠️ Screener returned no results. This usually means the AI call failed or "
+            "data was unavailable for all tickers. Try `!runmorning` again."
+        )
+        return
+
+    valid   = [r for r in screen_results if r.get("verdict") != "ERROR"]
+    errors  = [r for r in screen_results if r.get("verdict") == "ERROR"]
+    undervalued = [r for r in valid if r.get("verdict") == "UNDERVALUED"]
+
+    date_str = date_obj.strftime("%b %d, %Y") if hasattr(date_obj, "strftime") else str(date_obj)
+
+    # Send in batches of 15 so we never overflow the embed description
+    CHUNK = 15
+    for batch_idx, start in enumerate(range(0, len(valid), CHUNK)):
+        chunk = valid[start : start + CHUNK]
+        lines = []
+        for r in chunk:
+            verdict = r.get("verdict", "?")
+            score   = r.get("score")
+            icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
+            score_s = f"{score:.2f}" if score is not None else "N/A"
+            lines.append(
+                f"{icon} **{r['ticker']}** — score {score_s}  _{verdict}_\n"
+                f"  {r.get('reason','')[:120]}"
+            )
+
+        part_label = f"Part {batch_idx + 1}" if len(valid) > CHUNK else date_str
+        embed = discord.Embed(
+            title=f"📊  Weekly Value/Growth Screen — {part_label}",
+            description="\n\n".join(lines),
+            color=COLOR_GREEN if undervalued else COLOR_DARK,
+            timestamp=_ts(),
+        )
+        if batch_idx == 0:
+            embed.add_field(
+                name=f"🟢 Undervalued picks ({len(undervalued)} names)",
+                value=(", ".join(f"**{r['ticker']}**" for r in undervalued[:10]) or "None this week"),
+                inline=False,
+            )
+            embed.add_field(
+                name="How to read",
+                value=(
+                    "Score = P/S ÷ Revenue Growth %.  Lower = more growth per dollar.\n"
+                    "Use `!watch TICKER` for a full AI thesis on any name."
+                ),
+                inline=False,
+            )
+        embed.set_footer(text=f"Conquest Weekly Screen  •  {len(valid)} tickers  •  Not financial advice")
+        await channel.send(embed=embed)
+
+    if errors:
+        err_tickers = ", ".join(r["ticker"] for r in errors[:10])
+        await channel.send(f"⚠️ Data unavailable for {len(errors)} tickers: {err_tickers}")
+
+
 # ── _post_full_brief — shared helper for both auto and manual morning brief ───
 
 async def _post_full_brief(channel, sections: dict, discord_summary: str,
@@ -2070,49 +2135,10 @@ async def morning_briefing_task():
                         return watchlist_screener(pairs)
 
                     screen_results = await _run_sync(_run_weekly_screen)
-
-                    if screen_results:
-                        undervalued = [r for r in screen_results if r.get("verdict") == "UNDERVALUED"]
-                        lines = []
-                        for r in screen_results[:15]:
-                            verdict = r.get("verdict", "?")
-                            score   = r.get("score")
-                            icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
-                            score_s = f"{score:.2f}" if score is not None else "N/A"
-                            lines.append(
-                                f"{icon} **{r['ticker']}** — score {score_s}  {verdict}\n"
-                                f"  *{r.get('reason','')[:90]}*"
-                            )
-
-                        screen_embed = discord.Embed(
-                            title=f"📊  Weekly Value/Growth Screen — {today.strftime('%b %d')}",
-                            description="\n\n".join(lines),
-                            color=COLOR_GREEN if undervalued else COLOR_DARK,
-                            timestamp=_ts(),
-                        )
-                        screen_embed.add_field(
-                            name=f"🟢 Undervalued ({len(undervalued)} names)",
-                            value=(
-                                ", ".join(f"**{r['ticker']}**" for r in undervalued[:8])
-                                or "None this week"
-                            ),
-                            inline=False,
-                        )
-                        screen_embed.add_field(
-                            name="How to read",
-                            value=(
-                                "Score = P/S ÷ Revenue Growth %. "
-                                "Lower = more growth per valuation dollar.\n"
-                                "Use `!watch TICKER` to get the full thesis on any name."
-                            ),
-                            inline=False,
-                        )
-                        screen_embed.set_footer(
-                            text="Conquest Weekly Screen  •  Every Monday  •  Not financial advice"
-                        )
-                        await screener_ch.send(embed=screen_embed)
-                        print(f"[Bot] Weekly screener posted: {len(screen_results)} tickers, {len(undervalued)} undervalued")
+                    await _post_screener_results(screener_ch, screen_results, today)
+                    print(f"[Bot] Weekly screener posted: {len(screen_results)} tickers")
             except Exception as e_sc:
+                await screener_ch.send(f"⚠️ Screener error: {e_sc}")
                 print(f"[Bot] Weekly screener error: {e_sc}")
 
     except Exception as e:
@@ -2214,7 +2240,7 @@ async def runmorning_cmd(ctx):
     try:
         screener_ch = await _get_channel("screener", "general")
         if screener_ch:
-            await screener_ch.send("📊 Running weekly value/growth screen across the universe...")
+            await screener_ch.send("📊 Running weekly value/growth screen across the universe — this takes ~60 seconds...")
 
             def _run_weekly_screen():
                 from scan_universe    import UNIVERSE, EXCLUDE_FROM_THESIS
@@ -2231,34 +2257,12 @@ async def runmorning_cmd(ctx):
                         pass
                 return watchlist_screener(pairs)
 
+            import datetime as _dt
             screen_results = await _run_sync(_run_weekly_screen)
-            if screen_results:
-                undervalued = [r for r in screen_results if r.get("verdict") == "UNDERVALUED"]
-                lines = []
-                for r in screen_results[:15]:
-                    verdict = r.get("verdict", "?")
-                    score   = r.get("score")
-                    icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
-                    score_s = f"{score:.2f}" if score is not None else "N/A"
-                    lines.append(
-                        f"{icon} **{r['ticker']}** — score {score_s}  {verdict}\n"
-                        f"  *{r.get('reason','')[:90]}*"
-                    )
-                screen_embed = discord.Embed(
-                    title=f"📊  Weekly Value/Growth Screen — Manual Run",
-                    description="\n\n".join(lines),
-                    color=COLOR_GREEN if undervalued else COLOR_DARK,
-                    timestamp=_ts(),
-                )
-                screen_embed.add_field(
-                    name=f"🟢 Undervalued ({len(undervalued)} names)",
-                    value=", ".join(f"**{r['ticker']}**" for r in undervalued[:8]) or "None this week",
-                    inline=False,
-                )
-                screen_embed.set_footer(text="Conquest Weekly Screen  •  Manual run  •  Not financial advice")
-                await screener_ch.send(embed=screen_embed)
-                print(f"[Bot] !runmorning — screener posted: {len(screen_results)} tickers")
+            await _post_screener_results(screener_ch, screen_results, _dt.date.today())
+            print(f"[Bot] !runmorning — screener posted: {len(screen_results)} tickers")
     except Exception as e:
+        await screener_ch.send(f"⚠️ Screener error: {e}")
         print(f"[Bot] !runmorning screener error: {e}")
 
     await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#screener`.", delete_after=30)
