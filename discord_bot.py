@@ -164,9 +164,15 @@ async def help_cmd(ctx):
         "`!macro` — quick Fed macro snapshot"
     ), inline=False)
     embed.add_field(name="⚙️  Settings & Diagnostics", value=(
-        "Go to the **Alerts** page to set your watchlist and\n"
-        "toggle the 9 AM auto-briefing on/off.\n"
-        "`!testchannels` — fire a test message to every channel to verify routing"
+        "Go to the **Alerts** page to toggle the 9 AM auto-briefing on/off.\n"
+        "`!testchannels` — verify all 11 channels are wired correctly\n\n"
+        "**What runs automatically (no commands needed):**\n"
+        "9:00 AM → Brief · Macro · Earnings Radar · (Screener on Mondays)\n"
+        "9:30 AM → Market Open Scan → `#watchlist`\n"
+        "10:00 AM → Auto-discovery: new entry signals get full AI thesis → `#watchlist`\n"
+        "9:35 AM → Paper trades generated\n"
+        "12:00 + 3:30 PM → Positions snapshot → `#live-positions`\n"
+        "4:05 PM → EOD wrap + Claude debrief + Stats"
     ), inline=False)
     embed.set_footer(text="Conquest Trading  •  Not financial advice  •  Always DYOR")
     await ctx.send(embed=embed)
@@ -1221,7 +1227,8 @@ async def testchannels_cmd(ctx):
         ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
         ("macro-worldview",  "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
         ("live-positions",   "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
-        ("status-dashboard", "🏆",  "Status Dashboard",            "Use !stats to post performance summary here."),
+        ("screener",         "📊",  "Screener",                    "Weekly value/growth screen auto-posts every Monday at 9:00 AM ET."),
+        ("status-dashboard", "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
     ]
 
     status_lines = []
@@ -1278,7 +1285,9 @@ _paper_generated_dates = set()  # dates paper trades were already generated
 _paper_notified_ids    = set()  # closed trade IDs already posted to Discord
 _paper_eod_dates       = set()  # dates EOD summary already posted
 _auto_scan_dates       = set()  # dates market-open watchlist scan was auto-posted
+_auto_discovery_dates  = set()  # dates auto-thesis discovery was run
 _positions_posted      = set()  # (date, label) tuples — "noon" and "preclose" positions updates
+_screener_dates        = set()  # Mondays the weekly screener was auto-posted
 
 
 async def _get_channel(primary: str, *fallbacks: str):
@@ -1327,7 +1336,7 @@ async def _get_alert_channel():
 @tasks.loop(minutes=15)
 async def paper_trading_loop():
     global _paper_generated_dates, _paper_notified_ids, _paper_eod_dates, \
-           _auto_scan_dates, _positions_posted
+           _auto_scan_dates, _auto_discovery_dates, _positions_posted
 
     try:
         import pytz
@@ -1410,7 +1419,93 @@ async def paper_trading_loop():
                 except Exception as e_scan:
                     print(f"[PaperLoop] Open scan error: {e_scan}")
 
-        # ── 0b. Positions update — noon (12:00) and pre-close (3:30 PM) ────────
+        # ── 0b. Auto-discovery — scan universe, auto-thesis any new signal (10:00–10:45 AM) ──
+        discovery_window = (h == 10 and m <= 45)
+        if discovery_window and today not in _auto_discovery_dates:
+            _auto_discovery_dates.add(today)
+            if ch_watchlist:
+                try:
+                    from scan_universe import UNIVERSE, EXCLUDE_FROM_THESIS, \
+                        MIN_MTF_SCORE, REQUIRE_ENTRY, MAX_ADDS_PER_DAY
+
+                    def _scan_universe():
+                        from alerts.scanner  import scan_watchlist
+                        from watchlist_engine import get_entry
+                        results = scan_watchlist(UNIVERSE)
+                        # Filter: real entry signals (or MACD if REQUIRE_ENTRY=False),
+                        # minimum MTF score, not already on watchlist, not an ETF
+                        candidates = []
+                        for r in results:
+                            if r.get("error"):
+                                continue
+                            ticker = r.get("ticker", "")
+                            if ticker in EXCLUDE_FROM_THESIS:
+                                continue
+                            if get_entry(ticker):          # already on watchlist
+                                continue
+                            has_signal = (
+                                r.get("entry_signal") if REQUIRE_ENTRY
+                                else (r.get("entry_signal") or r.get("macd_cross_up"))
+                            )
+                            if has_signal and r.get("mtf_score", 0) >= MIN_MTF_SCORE:
+                                candidates.append(r)
+                        # Sort by MTF score desc, then RSI closest to 50–60
+                        candidates.sort(
+                            key=lambda x: (
+                                -x.get("mtf_score", 0),
+                                abs(x.get("rsi", 50) - 55),
+                            )
+                        )
+                        return candidates[:MAX_ADDS_PER_DAY]
+
+                    top_candidates = await _run_sync(_scan_universe)
+
+                    if top_candidates:
+                        await ch_watchlist.send(
+                            embed=discord.Embed(
+                                title=f"🔍  Auto-Discovery: {len(top_candidates)} New Signal(s) Found",
+                                description=(
+                                    "Running full AI analysis on each. Cards will follow shortly.\n"
+                                    + "\n".join(
+                                        f"• **{r['ticker']}** — MTF {r['mtf_score']}/3  "
+                                        f"RSI {r['rsi']:.0f}  ADX {r['adx']:.0f}  "
+                                        f"{'✦ ENTRY' if r.get('entry_signal') else '↑ MACD'}"
+                                        for r in top_candidates
+                                    )
+                                ),
+                                color=COLOR_PURPLE,
+                                timestamp=_ts(),
+                            )
+                        )
+
+                        # Analyze and post each candidate (sequential — ~20s each)
+                        for r in top_candidates:
+                            ticker = r["ticker"]
+                            try:
+                                def _analyze(t=ticker):
+                                    from watchlist_engine import analyze_and_add
+                                    return analyze_and_add(t)
+
+                                entry = await _run_sync(_analyze)
+                                embed = _build_watchlist_embed(entry)
+                                # Tag as auto-discovered in footer
+                                embed.set_footer(
+                                    text="Auto-discovered by Conquest Scanner  •  Not financial advice"
+                                )
+                                await ch_watchlist.send(embed=embed)
+                                print(f"[AutoDiscover] Added {ticker} to watchlist")
+                            except Exception as e_t:
+                                print(f"[AutoDiscover] Failed for {ticker}: {e_t}")
+                                await ch_watchlist.send(
+                                    f"⚠ Auto-analysis failed for **{ticker}**: {str(e_t)[:100]}"
+                                )
+                    else:
+                        print(f"[AutoDiscover] No new signals above threshold today")
+
+                except Exception as e_disc:
+                    print(f"[PaperLoop] Auto-discovery error: {e_disc}")
+
+        # ── 0c. Positions update — noon (12:00) and pre-close (3:30 PM) ────────
         for label, h_check, m_min, m_max in [
             ("noon",     12, 0,  14),
             ("preclose", 15, 30, 44),
@@ -1679,6 +1774,55 @@ async def paper_trading_loop():
                     pnl_embed.set_footer(text="Conquest Trading  •  Paper Simulation")
                     await ch_pnl.send(embed=pnl_embed)
 
+                # Full stats → #status-dashboard
+                ch_status = await _get_channel("status-dashboard", "general")
+                if ch_status:
+                    wr_str = f"{stats['win_rate']*100:.1f}%" if stats["closed_count"] else "—"
+                    sh_str = str(stats["sharpe"]) if stats.get("sharpe") is not None else "—"
+                    pf_str = str(stats["profit_factor"]) if stats.get("profit_factor") else "—"
+                    status_embed = discord.Embed(
+                        title=f"🏆  Daily Stats — {today.strftime('%b %d')}",
+                        color=COLOR_GREEN if stats.get("total_pnl", 0) >= 0 else COLOR_RED,
+                        timestamp=_ts(),
+                    )
+                    status_embed.add_field(
+                        name="Performance",
+                        value=(
+                            f"**Win Rate:** {wr_str}\n"
+                            f"**Sharpe:** {sh_str}  |  **Profit Factor:** {pf_str}\n"
+                            f"**Total P&L:** ${stats.get('total_pnl', 0):+.2f}\n"
+                            f"**Trades:** {stats['total_trades']} "
+                            f"({stats['open_count']} open · {stats['closed_count']} closed)"
+                        ),
+                        inline=False,
+                    )
+                    if stats.get("by_type"):
+                        type_lines = []
+                        for tt, d in sorted(
+                            stats["by_type"].items(),
+                            key=lambda x: -x[1]["total_pnl"]
+                        ):
+                            icon = {
+                                "call_spread": "📈", "put_spread": "📉",
+                                "long_call": "🟢", "long_put": "🔴",
+                                "iron_condor": "🦅", "stock_long": "💹",
+                                "stock_short": "🔻",
+                            }.get(tt, "•")
+                            type_lines.append(
+                                f"{icon} {tt.replace('_',' ')} · "
+                                f"{d['count']}t · {d['win_rate']*100:.0f}% win · "
+                                f"avg ${d['avg_pnl']:+.2f}"
+                            )
+                        status_embed.add_field(
+                            name="By Type",
+                            value="\n".join(type_lines),
+                            inline=False,
+                        )
+                    status_embed.set_footer(
+                        text="Conquest Trading  •  Paper Simulation  •  Not financial advice"
+                    )
+                    await ch_status.send(embed=status_embed)
+
     except Exception as e:
         print(f"[PaperLoop] Error: {e}")
 
@@ -1693,7 +1837,7 @@ async def before_paper_loop():
 @tasks.loop(minutes=1)
 async def morning_briefing_task():
     """Fires every minute, posts briefing once at 9 AM ET on weekdays."""
-    global _briefing_sent_date
+    global _briefing_sent_date, _screener_dates
     try:
         import pytz
         now_et = datetime.now(pytz.timezone("America/New_York"))
@@ -1829,6 +1973,77 @@ async def morning_briefing_task():
                 print(f"[Bot] Macro snapshot posted to #{macro_ch.name}")
         except Exception as e_mac:
             print(f"[Bot] Auto-macro error: {e_mac}")
+
+        # ── Weekly screener — every Monday, screen universe for undervalued ────
+        is_monday = (now_et.weekday() == 0)
+        if is_monday and today not in _screener_dates:
+            _screener_dates.add(today)
+            try:
+                screener_ch = await _get_channel("screener", "general")
+                if screener_ch:
+                    await screener_ch.send("📊 Running weekly value/growth screen across the universe...")
+
+                    def _run_weekly_screen():
+                        from scan_universe       import UNIVERSE, EXCLUDE_FROM_THESIS
+                        from watchlist_engine    import fetch_ticker_data, build_data_block
+                        from conquest_brain      import watchlist_screener
+                        # Screen stocks only — no ETFs
+                        tickers = [t for t in UNIVERSE if t not in EXCLUDE_FROM_THESIS][:40]
+                        pairs   = []
+                        for t in tickers:
+                            try:
+                                d = fetch_ticker_data(t)
+                                b = build_data_block(d)
+                                pairs.append((t, b))
+                            except Exception:
+                                pass
+                        return watchlist_screener(pairs)
+
+                    screen_results = await _run_sync(_run_weekly_screen)
+
+                    if screen_results:
+                        undervalued = [r for r in screen_results if r.get("verdict") == "UNDERVALUED"]
+                        lines = []
+                        for r in screen_results[:15]:
+                            verdict = r.get("verdict", "?")
+                            score   = r.get("score")
+                            icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
+                            score_s = f"{score:.2f}" if score is not None else "N/A"
+                            lines.append(
+                                f"{icon} **{r['ticker']}** — score {score_s}  {verdict}\n"
+                                f"  *{r.get('reason','')[:90]}*"
+                            )
+
+                        screen_embed = discord.Embed(
+                            title=f"📊  Weekly Value/Growth Screen — {today.strftime('%b %d')}",
+                            description="\n\n".join(lines),
+                            color=COLOR_GREEN if undervalued else COLOR_DARK,
+                            timestamp=_ts(),
+                        )
+                        screen_embed.add_field(
+                            name=f"🟢 Undervalued ({len(undervalued)} names)",
+                            value=(
+                                ", ".join(f"**{r['ticker']}**" for r in undervalued[:8])
+                                or "None this week"
+                            ),
+                            inline=False,
+                        )
+                        screen_embed.add_field(
+                            name="How to read",
+                            value=(
+                                "Score = P/S ÷ Revenue Growth %. "
+                                "Lower = more growth per valuation dollar.\n"
+                                "Use `!watch TICKER` to get the full thesis on any name."
+                            ),
+                            inline=False,
+                        )
+                        screen_embed.set_footer(
+                            text="Conquest Weekly Screen  •  Every Monday  •  Not financial advice"
+                        )
+                        await screener_ch.send(embed=screen_embed)
+                        print(f"[Bot] Weekly screener posted: {len(screen_results)} tickers, {len(undervalued)} undervalued")
+            except Exception as e_sc:
+                print(f"[Bot] Weekly screener error: {e_sc}")
 
     except Exception as e:
         print(f"[Bot] Auto-briefing task error: {e}")
