@@ -1293,7 +1293,10 @@ _screener_dates        = set()  # Mondays the weekly screener was auto-posted
 async def _get_channel(primary: str, *fallbacks: str):
     """
     Find a Discord text channel by name.
-    Tries `primary` first, then each fallback in order, then gives up.
+    Priority order:
+      1. Saved channel ID for this specific channel (ch_morning_briefing, etc.)
+      2. Exact name match across all guilds (primary, then each fallback)
+      3. bot_alerts_channel_id — only used as last resort if ALL names fail
 
     Usage:
         ch = await _get_channel("morning-briefing", "general")
@@ -1301,11 +1304,11 @@ async def _get_channel(primary: str, *fallbacks: str):
     """
     s = _load_settings()
 
-    # 1. Check settings for a saved channel ID matching the primary name
+    # 1. Check settings for a saved channel ID specific to this channel only
     id_key = f"ch_{primary.replace('-', '_')}"  # e.g. "ch_morning_briefing"
-    saved_id = s.get(id_key) or s.get("bot_alerts_channel_id")
-    if saved_id:
-        ch = bot.get_channel(int(saved_id))
+    specific_id = s.get(id_key)
+    if specific_id:
+        ch = bot.get_channel(int(specific_id))
         if ch:
             return ch
 
@@ -1316,6 +1319,13 @@ async def _get_channel(primary: str, *fallbacks: str):
             for ch in guild.text_channels:
                 if ch.name.lower() == name.lower():
                     return ch
+
+    # 3. Last resort: generic bot_alerts_channel_id (only if no named channel found)
+    generic_id = s.get("bot_alerts_channel_id")
+    if generic_id:
+        ch = bot.get_channel(int(generic_id))
+        if ch:
+            return ch
 
     return None
 
