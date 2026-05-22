@@ -1080,3 +1080,284 @@ Be direct. No padding."""
         return msg.content[0].text.strip()
     except Exception as e:
         return f"[Debrief unavailable: {e}]"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FULL STOCK ANALYSIS — 5-Dimension Deep Intelligence Report
+# ══════════════════════════════════════════════════════════════════════════════
+
+def full_stock_analysis(ticker: str) -> dict:
+    """
+    5-dimension deep analysis on any ticker:
+      1. Valuation      — P/E, P/S, P/B, EV/EBITDA, PEG vs sector
+      2. Technicals     — MTF score, RSI, ADX, MACD, squeeze, levels
+      3. Catalysts      — earnings, analyst changes, guidance, sector
+      4. Risk           — HV, beta, drawdown, Kelly sizing
+      5. Options Flow   — P/C ratio, top OI, IV pct, unusual activity
+      6. Synthesis      — overall verdict, entry, stop, target
+
+    Returns a structured dict. All heavy lifting in one Claude Sonnet call.
+    Suitable for Discord !deepdive, web dashboard, and dev session analysis.
+    """
+    import json as _json
+
+    # ── 1. Fetch raw data ────────────────────────────────────────────────────
+    try:
+        import yfinance as yf
+        import numpy as np
+
+        tk   = yf.Ticker(ticker)
+        info = tk.info or {}
+        hist = tk.history(period="6mo", interval="1d", auto_adjust=True)
+    except Exception as e:
+        return {"error": f"Data fetch failed: {e}", "ticker": ticker}
+
+    # Live price
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+    if not price and not hist.empty:
+        price = float(hist["Close"].iloc[-1])
+
+    # Valuation metrics
+    val_metrics = {
+        "forward_pe":     info.get("forwardPE"),
+        "trailing_pe":    info.get("trailingPE"),
+        "price_to_sales": info.get("priceToSalesTrailing12Months"),
+        "price_to_book":  info.get("priceToBook"),
+        "ev_to_ebitda":   info.get("enterpriseToEbitda"),
+        "peg_ratio":      info.get("pegRatio"),
+        "sector":         info.get("sector", "Unknown"),
+        "market_cap":     info.get("marketCap"),
+        "revenue_growth": info.get("revenueGrowth"),
+        "earnings_growth":info.get("earningsGrowth"),
+    }
+
+    # Technicals from scanner
+    scan = {}
+    try:
+        from alerts.scanner import scan_ticker
+        scan = scan_ticker(ticker) or {}
+    except Exception:
+        pass
+
+    # Historical volatility
+    hv30 = hv60 = hv90 = beta = max_dd = 0.0
+    try:
+        if len(hist) >= 20:
+            rets  = hist["Close"].pct_change().dropna()
+            hv30  = float(rets.tail(21).std() * (252**0.5))
+            hv60  = float(rets.tail(42).std() * (252**0.5))
+            hv90  = float(rets.tail(63).std() * (252**0.5))
+            beta  = float(info.get("beta", 0) or 0)
+            # Max drawdown (6-month)
+            roll_max = hist["Close"].cummax()
+            dd       = (hist["Close"] - roll_max) / roll_max
+            max_dd   = float(dd.min())
+    except Exception:
+        pass
+
+    # Kelly position size suggestion
+    kelly_pct = 0.0
+    try:
+        win_rate = 0.55   # conservative assumption
+        avg_win  = abs(STK_PROFIT if "STK_PROFIT" in dir() else 0.05)
+        avg_loss = abs(STK_STOP   if "STK_STOP"   in dir() else 0.03)
+        kelly_pct = max(0, (win_rate / avg_loss) - ((1 - win_rate) / avg_win)) * 0.25
+    except Exception:
+        kelly_pct = 0.02
+
+    # 52-week range
+    w52_low  = info.get("fiftyTwoWeekLow",  price * 0.7)
+    w52_high = info.get("fiftyTwoWeekHigh", price * 1.3)
+    pct_from_high = (price - w52_high) / w52_high if w52_high else 0
+
+    # Next earnings
+    earnings_date = "Unknown"
+    try:
+        cal = tk.calendar
+        if cal is not None and not (hasattr(cal, "empty") and cal.empty):
+            if hasattr(cal, "get"):
+                ed = cal.get("Earnings Date")
+                if ed and len(ed) > 0:
+                    earnings_date = str(ed[0])[:10]
+    except Exception:
+        pass
+
+    # Analyst consensus
+    analyst_reco  = info.get("recommendationKey", "none").upper()
+    analyst_count = info.get("numberOfAnalystOpinions", 0)
+    target_mean   = info.get("targetMeanPrice", 0)
+    target_upside = ((target_mean - price) / price * 100) if target_mean and price else 0
+
+    # ── 2. Options flow ──────────────────────────────────────────────────────
+    pc_ratio = call_oi = put_oi = iv_avg = 0.0
+    top_calls_str = top_puts_str = "N/A"
+    try:
+        exps = tk.options
+        if exps:
+            chain  = tk.option_chain(exps[0])
+            calls  = chain.calls
+            puts   = chain.puts
+            call_oi = float(calls["openInterest"].fillna(0).sum())
+            put_oi  = float(puts["openInterest"].fillna(0).sum())
+            pc_ratio = round(put_oi / max(call_oi, 1), 3)
+            iv_avg   = float(calls["impliedVolatility"].fillna(0).mean())
+
+            top3c = calls.nlargest(3, "openInterest")[
+                ["strike","openInterest","impliedVolatility"]
+            ].to_dict("records")
+            top3p = puts.nlargest(3, "openInterest")[
+                ["strike","openInterest","impliedVolatility"]
+            ].to_dict("records")
+
+            top_calls_str = " | ".join(
+                f"${r['strike']:.0f} ({int(r['openInterest']):,} OI, IV {r['impliedVolatility']:.0%})"
+                for r in top3c
+            )
+            top_puts_str = " | ".join(
+                f"${r['strike']:.0f} ({int(r['openInterest']):,} OI, IV {r['impliedVolatility']:.0%})"
+                for r in top3p
+            )
+    except Exception:
+        pass
+
+    # ── 3. Build analysis prompt ─────────────────────────────────────────────
+    mtf_score = scan.get("mtf_score", 0)
+    rsi       = scan.get("rsi", 50)
+    adx       = scan.get("adx", 20)
+    hv_rank   = scan.get("hv_rank", 50)
+    daily     = scan.get("daily",   "?")
+    weekly    = scan.get("weekly",  "?")
+    monthly   = scan.get("monthly", "?")
+    sqz_fired = scan.get("sqz_fired", False)
+    sqz_mom   = scan.get("sqz_momentum", 0.0)
+    macd_x    = scan.get("macd_cross_up", False)
+    entry_sig = scan.get("entry_signal", False)
+
+    prompt = f"""You are conducting a full 5-dimension investment analysis on {ticker}.
+Current price: ${price:.2f}
+
+━━ VALUATION DATA ━━
+Forward P/E:     {val_metrics['forward_pe']}
+Trailing P/E:    {val_metrics['trailing_pe']}
+P/S (TTM):       {val_metrics['price_to_sales']}
+P/B:             {val_metrics['price_to_book']}
+EV/EBITDA:       {val_metrics['ev_to_ebitda']}
+PEG Ratio:       {val_metrics['peg_ratio']}
+Revenue Growth:  {val_metrics['revenue_growth']}
+Earnings Growth: {val_metrics['earnings_growth']}
+Market Cap:      ${(val_metrics['market_cap'] or 0)/1e9:.1f}B
+Sector:          {val_metrics['sector']}
+
+━━ TECHNICAL DATA ━━
+MTF Score:       {mtf_score}/3 (Monthly:{monthly} / Weekly:{weekly} / Daily:{daily})
+RSI (14):        {rsi:.1f}
+ADX:             {adx:.1f}
+HV Rank:         {hv_rank:.0f}/100
+Squeeze Fired:   {sqz_fired}  (Momentum: {sqz_mom:+.3f})
+MACD Cross Up:   {macd_x}
+Entry Signal:    {entry_sig}
+52W Low/High:    ${w52_low:.2f} / ${w52_high:.2f}  ({pct_from_high:+.1%} from high)
+
+━━ CATALYST DATA ━━
+Next Earnings:   {earnings_date}
+Analyst Reco:    {analyst_reco} ({analyst_count} analysts)
+Mean Price Target: ${target_mean:.2f} ({target_upside:+.1f}% upside)
+
+━━ RISK DATA ━━
+HV30/60/90:      {hv30:.1%} / {hv60:.1%} / {hv90:.1%}
+Beta:            {beta:.2f}
+Max Drawdown (6mo): {max_dd:.1%}
+Kelly Size:      {kelly_pct:.1%} of portfolio
+
+━━ OPTIONS FLOW DATA ━━
+Put/Call Ratio:  {pc_ratio:.3f}  (call OI {call_oi:,.0f} / put OI {put_oi:,.0f})
+Avg Call IV:     {iv_avg:.1%}
+Top Call Strikes: {top_calls_str}
+Top Put Strikes:  {top_puts_str}
+
+---
+
+Analyze this stock across all 5 dimensions. Be specific and reference the actual numbers.
+Write like a senior analyst at a top hedge fund, not a generic stock report generator.
+When the data is ambiguous, say so. When conviction is clear, show it.
+
+Output ONLY this JSON — no markdown, no fences:
+{{
+  "valuation": {{
+    "verdict": "OVERVALUED|FAIRLY_VALUED|UNDERVALUED",
+    "analysis": "3-4 sentences. Reference the actual multiples. Compare to sector. Is the growth rate justifying the premium or not?"
+  }},
+  "technicals": {{
+    "verdict": "BULLISH|BEARISH|NEUTRAL",
+    "signals": {{
+      "trend": "MTF score interpretation",
+      "momentum": "RSI + MACD interpretation",
+      "strength": "ADX interpretation",
+      "squeeze": "squeeze fired or not"
+    }},
+    "analysis": "3-4 sentences. Key levels, what needs to happen to confirm, what breaks the setup."
+  }},
+  "catalysts": {{
+    "verdict": "POSITIVE|NEGATIVE|MIXED",
+    "analysis": "3-4 sentences. Earnings timing, analyst positioning, what the consensus is getting right or wrong."
+  }},
+  "risk": {{
+    "verdict": "HIGH|MEDIUM|LOW",
+    "analysis": "3-4 sentences. Volatility profile, beta context, max drawdown concern, position sizing guidance."
+  }},
+  "options_flow": {{
+    "verdict": "BULLISH|BEARISH|NEUTRAL",
+    "analysis": "3-4 sentences. P/C ratio interpretation, where the big bets are positioned, what institutional options activity signals about the next move."
+  }},
+  "synthesis": {{
+    "overall": "BUY|WATCH|HOLD|AVOID",
+    "conviction": "HIGH|MEDIUM|LOW",
+    "thesis": "2-3 sentence core investment thesis combining all 5 dimensions. The most important cross-dimensional insight.",
+    "entry_zone": "$XX–$XX",
+    "stop": "$XX",
+    "target_6m": "$XX",
+    "target_12m": "$XX",
+    "best_structure": "stock_long | call_spread | long_call | iron_condor | stock_short | put_spread — and why this structure fits the setup"
+  }}
+}}"""
+
+    # ── 4. Call Claude Sonnet ────────────────────────────────────────────────
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        result = _json.loads(raw)
+        result["ticker"] = ticker
+        result["price"]  = round(price, 2)
+        result["raw_metrics"] = {
+            "valuation": val_metrics,
+            "hv30": round(hv30, 4),
+            "beta": round(beta, 2),
+            "pc_ratio": round(pc_ratio, 3),
+            "mtf_score": mtf_score,
+            "rsi": round(rsi, 1),
+            "adx": round(adx, 1),
+            "hv_rank": round(hv_rank, 0),
+            "earnings_date": earnings_date,
+        }
+        return result
+
+    except _json.JSONDecodeError:
+        return {
+            "ticker": ticker,
+            "price":  round(price, 2),
+            "error":  "JSON parse failed",
+            "raw":    locals().get("raw", ""),
+        }
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}

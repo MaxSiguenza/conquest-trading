@@ -952,46 +952,116 @@ async def watch_cmd(ctx, ticker: str = ""):
 
 @bot.command(name="deepdive", aliases=["dd", "research"])
 async def deepdive_cmd(ctx, ticker: str = ""):
-    """Full 6-prompt deep research on a ticker."""
+    """5-dimension deep analysis: valuation, technicals, catalysts, risk, options flow."""
     if not ticker:
         await ctx.send("Usage: `!deepdive NVDA`")
         return
 
     ticker   = ticker.upper()
     thinking = await ctx.send(
-        f"🔬  Running full deep dive on **{ticker}** — "
-        f"thesis + scenarios + risks + business model... (~35 seconds)"
+        f"🔬  Running 5-dimension analysis on **{ticker}** — "
+        f"valuation · technicals · catalysts · risk · options flow… (~30s)"
     )
 
     def _run():
-        from watchlist_engine import deep_dive
-        return deep_dive(ticker)
+        from conquest_brain import full_stock_analysis
+        return full_stock_analysis(ticker)
 
     try:
-        entry, deep_text = await _run_sync(_run)
+        report = await _run_sync(_run)
     except Exception as e:
         await thinking.delete()
-        await ctx.send(f"⚠ Deep dive failed for **{ticker}**: {str(e)[:200]}")
+        await ctx.send(f"⚠ Analysis failed for **{ticker}**: {str(e)[:200]}")
         return
 
     await thinking.delete()
 
-    # Watchlist embed
-    embed = _build_watchlist_embed(entry)
+    if report.get("error"):
+        await ctx.send(f"⚠ **{ticker}**: {report['error']}")
+        return
 
-    # Deep dive text — split if too long for Discord
-    dd_embed = discord.Embed(
-        title=f"🔬  {ticker} — Deep Research Report",
-        description=deep_text[:4000],
-        color=COLOR_PURPLE,
+    price = report.get("price", 0)
+
+    def _verdict_icon(v: str) -> str:
+        v = (v or "").upper()
+        if v in ("BULLISH","BUY","POSITIVE","UNDERVALUED","LOW"):   return "✅"
+        if v in ("BEARISH","AVOID","NEGATIVE","OVERVALUED","HIGH"): return "🔴"
+        return "⚠️"
+
+    def _section(name: str, key: str) -> discord.Embed:
+        d       = report.get(key, {})
+        verdict = d.get("verdict", "—")
+        icon    = _verdict_icon(verdict)
+        text    = d.get("analysis", "")
+
+        # technicals: fold in signal sub-keys
+        if key == "technicals" and "signals" in d:
+            sigs = d["signals"]
+            text = (
+                f"**Trend:** {sigs.get('trend','—')}\n"
+                f"**Momentum:** {sigs.get('momentum','—')}\n"
+                f"**Strength:** {sigs.get('strength','—')}\n"
+                f"**Squeeze:** {sigs.get('squeeze','—')}\n\n"
+                + text
+            )
+
+        emb = discord.Embed(
+            title=f"{icon}  {name}  —  {verdict}",
+            description=text[:1800],
+            color=COLOR_GREEN if icon == "✅" else (COLOR_RED if icon == "🔴" else COLOR_YELLOW),
+            timestamp=_ts(),
+        )
+        return emb
+
+    COLOR_YELLOW = 0xF59E0B
+
+    # Build all 5 section embeds
+    embeds = [
+        _section("💰 VALUATION",     "valuation"),
+        _section("📈 TECHNICALS",    "technicals"),
+        _section("⚡ CATALYSTS",     "catalysts"),
+        _section("🛡️ RISK",          "risk"),
+        _section("🌊 OPTIONS FLOW",  "options_flow"),
+    ]
+
+    # Synthesis embed
+    syn   = report.get("synthesis", {})
+    overall    = syn.get("overall", "—")
+    conviction = syn.get("conviction", "—")
+    thesis     = syn.get("thesis", "")
+    entry_z    = syn.get("entry_zone", "—")
+    stop       = syn.get("stop", "—")
+    tgt6       = syn.get("target_6m", "—")
+    tgt12      = syn.get("target_12m", "—")
+    structure  = syn.get("best_structure", "—")
+
+    syn_color  = COLOR_GREEN if overall == "BUY" else (COLOR_RED if overall == "AVOID" else COLOR_PURPLE)
+    syn_embed  = discord.Embed(
+        title=f"🎯  SYNTHESIS  —  {overall}  ({conviction} conviction)",
+        description=thesis[:1000],
+        color=syn_color,
         timestamp=_ts(),
     )
-    dd_embed.set_footer(text="Conquest Research  •  Not financial advice")
+    syn_embed.add_field(name="Entry Zone",      value=entry_z,   inline=True)
+    syn_embed.add_field(name="Stop",            value=stop,      inline=True)
+    syn_embed.add_field(name="Target 6M / 12M", value=f"{tgt6} / {tgt12}", inline=True)
+    syn_embed.add_field(name="Best Structure",  value=structure, inline=False)
+    syn_embed.set_footer(text=f"{ticker} @ ${price:.2f}  •  Conquest Intelligence  •  Not financial advice")
 
     wl_channel = await _get_channel("stocks", "general")
     dest = wl_channel if wl_channel else ctx.channel
-    await dest.send(embed=embed)
-    await dest.send(embed=dd_embed)
+
+    # Header
+    header = discord.Embed(
+        title=f"📊  {ticker}  —  5-Dimension Deep Analysis",
+        description=f"**${price:.2f}**  •  Full intelligence report across all dimensions",
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+    await dest.send(embed=header)
+    for emb in embeds:
+        await dest.send(embed=emb)
+    await dest.send(embed=syn_embed)
 
     if dest != ctx.channel:
         await ctx.send(
