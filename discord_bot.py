@@ -1866,6 +1866,94 @@ async def before_paper_loop():
     await bot.wait_until_ready()
 
 
+# ── _post_full_brief — shared helper for both auto and manual morning brief ───
+
+async def _post_full_brief(channel, sections: dict, discord_summary: str,
+                           snapshot: dict, sectors: list, title_suffix: str = ""):
+    """
+    Post the full Morning Intelligence Brief to a Discord channel.
+    Sends:
+      1. Header embed — market snapshot numbers + sector rotation + summary
+      2. One text message per brief section (Macro, Overnight, Data vs Consensus,
+         Sector Positioning, Portfolio Implications, What to Watch)
+    """
+    title = f"⚔️  Conquest Intelligence Brief" + (f"  —  {title_suffix}" if title_suffix else "")
+
+    # ── Embed 1: market snapshot + sector rotation + top-line summary ─────────
+    description = discord_summary or (sections.get("macro_regime", "")[:500] + "…") or \
+                  "Morning brief generated — full analysis below."
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+
+    mkt_lines = []
+    for key, label in [("SPY","SPY"),("QQQ","QQQ"),("DIA","DIA"),
+                        ("^VIX","VIX"),("^TNX","10Y Yld"),("^IRX","2Y Yld"),
+                        ("UUP","Dollar"),("GLD","Gold"),("CL=F","Oil"),("HYG","HYG")]:
+        s_data = snapshot.get(key, {})
+        if s_data:
+            sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
+            mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
+    if mkt_lines:
+        mid = len(mkt_lines) // 2
+        embed.add_field(
+            name="📊 Market Snapshot",
+            value="  ".join(mkt_lines[:mid]) + "\n" + "  ".join(mkt_lines[mid:]),
+            inline=False,
+        )
+
+    if sectors:
+        top3 = "  ".join(
+            f"{'▲' if d['ret5'] > 0 else '▼'} **{d['name']}** {d['ret5']:+.1f}%"
+            for d in sectors[:3]
+        )
+        bot3 = "  ".join(
+            f"▼ **{d['name']}** {d['ret5']:+.1f}%"
+            for d in sectors[-3:]
+        )
+        embed.add_field(name="🟢 Leading Sectors (5d)", value=top3, inline=True)
+        embed.add_field(name="🔴 Lagging Sectors (5d)", value=bot3, inline=True)
+
+    embed.set_footer(text="Conquest Intelligence Desk  •  Not financial advice")
+    await channel.send(embed=embed)
+
+    # ── Messages 2–7: one per section, full prose ─────────────────────────────
+    SECTION_HEADERS = [
+        ("macro_regime",          "**MACRO REGIME ASSESSMENT**"),
+        ("overnight",             "**OVERNIGHT & PRE-MARKET DEVELOPMENTS**"),
+        ("data_vs_consensus",     "**WHAT THE DATA IS TELLING YOU VS. WHAT CONSENSUS BELIEVES**"),
+        ("sector_positioning",    "**SECTOR POSITIONING RATIONALE**"),
+        ("portfolio_implications","**PORTFOLIO IMPLICATIONS**"),
+        ("what_to_watch",         "**WHAT TO WATCH TODAY**"),
+    ]
+
+    for key, header in SECTION_HEADERS:
+        text = sections.get(key, "").strip()
+        if not text:
+            continue
+        # Discord message limit is 2000 chars; split if needed
+        full = f"{header}\n\n{text}"
+        # Send in chunks of 1900 chars to stay under limit
+        while full:
+            chunk = full[:1900]
+            # Try to break at a sentence boundary
+            if len(full) > 1900:
+                last_period = chunk.rfind(". ")
+                if last_period > 1200:
+                    chunk = full[:last_period + 1]
+            await channel.send(chunk)
+            full = full[len(chunk):].lstrip()
+
+    await channel.send(
+        "─────────────────────────────────────\n"
+        "Full brief with charts at `/brief` on the web app."
+    )
+
+
 # ── Auto morning briefing ─────────────────────────────────────────────────────
 
 @tasks.loop(minutes=1)
@@ -1907,56 +1995,7 @@ async def morning_briefing_task():
         snapshot        = brief.get("snapshot", {})
         sectors         = brief.get("sector_rotation", [])
 
-        description = discord_summary
-        if not description and sections.get("macro_regime"):
-            description = sections["macro_regime"][:800]
-        if not description:
-            description = "Morning brief generated — check /brief for full details."
-
-        embed = discord.Embed(
-            title="⚔️  Conquest Intelligence Brief  —  Auto 9 AM ET",
-            description=description,
-            color=COLOR_PURPLE,
-            timestamp=_ts(),
-        )
-
-        # Key numbers
-        mkt_lines = []
-        for key, label in [("SPY","SPY"),("QQQ","QQQ"),("^VIX","VIX"),
-                            ("^TNX","10Y"),("CL=F","Oil"),("UUP","Dollar")]:
-            s_data = snapshot.get(key, {})
-            if s_data:
-                sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
-                mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
-        if mkt_lines:
-            half = len(mkt_lines) // 2
-            embed.add_field(
-                name="Market",
-                value=("  ".join(mkt_lines[:half]) + "\n" + "  ".join(mkt_lines[half:])).strip(),
-                inline=False,
-            )
-
-        # Sector rotation
-        if sectors:
-            top = "  ".join(
-                f"{'▲' if d['ret5'] > 0 else '▼'} {d['name']} {d['ret5']:+.1f}%"
-                for d in sectors[:3]
-            )
-            bot = "  ".join(
-                f"▼ {d['name']} {d['ret5']:+.1f}%"
-                for d in sectors[-3:]
-            )
-            embed.add_field(name="🟢 Leading (5d)", value=top, inline=True)
-            embed.add_field(name="🔴 Lagging (5d)", value=bot, inline=True)
-
-        if sections.get("what_to_watch"):
-            watch_short = sections["what_to_watch"].split(".")[0] + "."
-            embed.add_field(name="👁 Watch Today", value=watch_short[:300], inline=False)
-
-        embed.set_footer(
-            text=f"Conquest Intelligence Desk  •  Full brief at /brief  •  Not financial advice"
-        )
-        await channel.send(embed=embed)
+        await _post_full_brief(channel, sections, discord_summary, snapshot, sectors, title_suffix="Auto 9 AM ET")
         print(f"[Bot] Auto morning brief posted at {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
         # ── Earnings radar — post to #earnings-radar if any watchlist names report this week ──
@@ -2116,41 +2155,7 @@ async def runmorning_cmd(ctx):
             snapshot        = brief.get("snapshot", {})
             sectors         = brief.get("sector_rotation", [])
 
-            description = discord_summary
-            if not description and sections.get("macro_regime"):
-                description = sections["macro_regime"][:800]
-            if not description:
-                description = "Morning brief generated — check /brief for full details."
-
-            embed = discord.Embed(
-                title="⚔️  Conquest Intelligence Brief  —  Manual Run",
-                description=description,
-                color=COLOR_PURPLE,
-                timestamp=_ts(),
-            )
-            mkt_lines = []
-            for key, label in [("SPY","SPY"),("QQQ","QQQ"),("^VIX","VIX"),
-                                ("^TNX","10Y"),("CL=F","Oil"),("UUP","Dollar")]:
-                s_data = snapshot.get(key, {})
-                if s_data:
-                    sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
-                    mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
-            if mkt_lines:
-                half = len(mkt_lines) // 2
-                embed.add_field(
-                    name="Market",
-                    value=("  ".join(mkt_lines[:half]) + "\n" + "  ".join(mkt_lines[half:])).strip(),
-                    inline=False,
-                )
-            if sectors:
-                top = "  ".join(f"{'▲' if d['ret5'] > 0 else '▼'} {d['name']} {d['ret5']:+.1f}%" for d in sectors[:3])
-                bot_s = "  ".join(f"▼ {d['name']} {d['ret5']:+.1f}%" for d in sectors[-3:])
-                embed.add_field(name="🟢 Leading (5d)", value=top, inline=True)
-                embed.add_field(name="🔴 Lagging (5d)", value=bot_s, inline=True)
-            if sections.get("what_to_watch"):
-                embed.add_field(name="👁 Watch Today", value=(sections["what_to_watch"].split(".")[0] + ".")[:300], inline=False)
-            embed.set_footer(text="Conquest Intelligence Desk  •  Manual run  •  Not financial advice")
-            await channel.send(embed=embed)
+            await _post_full_brief(channel, sections, discord_summary, snapshot, sectors, title_suffix="Manual Run")
             _briefing_sent_date = datetime.now(pytz.timezone("America/New_York")).date()
             print("[Bot] !runmorning — morning brief posted")
     except Exception as e:

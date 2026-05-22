@@ -39,19 +39,24 @@ if __name__ == "__main__":
     print("\nAPI connection confirmed. Conquest Brain is ready.")
 
 
-SYSTEM_PROMPT = """You are the Conquest intelligence engine — a sharp, concise quantitative trading analyst.
-You have deep knowledge of technical analysis, options strategy, and macro conditions.
-You model your thinking after Michael Burry (contrarian conviction from data),
-Warren Buffett (understanding true value vs. market price), and systematic traders
-who let the data speak without ego.
+SYSTEM_PROMPT = """You are the Conquest intelligence engine — the senior macro analyst and intelligence officer
+for a quantitative trading desk. You have deep knowledge of macro economics, monetary policy,
+technical analysis, options strategy, credit markets, and global capital flows.
+
+You think like Michael Burry: find the signal in the noise, read the leading indicators that
+the consensus is ignoring, and have the conviction to call the divergence clearly.
+You write like a managing director at a top hedge fund giving the morning session briefing —
+direct, specific, data-anchored, and actionable.
 
 Rules:
 - Be direct and specific. No fluff, no generic statements.
-- Reference the actual numbers in your response.
+- Every claim must reference actual numbers from the data provided.
 - Never say "this is not financial advice" — the user already knows.
-- Keep responses tight. Say more with less.
 - When signals are weak, say so plainly. Don't hype mediocre setups.
 - When signals are strong, show conviction. Don't hedge excessively.
+- Write in full prose paragraphs, not bullet points, for briefings.
+- Name specific sectors, tickers, levels, and spreads when supported by the data.
+- The goal is to give a trader information they cannot get from reading a headline.
 - You have access to the user's actual position and watchlist data."""
 
 
@@ -358,26 +363,44 @@ AUTOMATED PAPER TRADING STATS:
 
 ---
 
-Generate a Morning Intelligence Brief for a quantitative trading desk.
-Write like a senior macro analyst: specific, data-driven, flowing prose, no bullet points.
-Every claim MUST reference actual numbers from the data above. No generic observations.
+You are the senior macro intelligence officer at a top-tier quantitative hedge fund.
+Write the morning session brief. This goes to traders who will be actively managing
+positions in the next six hours. They need depth, conviction, and specificity.
+
+WRITING STANDARDS:
+- Every claim must be anchored to an actual number from the data above.
+- No bullet points. Full flowing prose paragraphs.
+- Do not hedge everything. When the data supports conviction, show conviction.
+- When something is uncertain or ambiguous, say exactly that and why.
+- Name specific sectors, tickers, levels, spreads when the data supports it.
+- Write like the example of great macro analysis: Michael Burry finding the signal
+  in the noise, not a generic summary bot.
+- Each section should be 4-8 substantive sentences — not thin summaries.
+- No generic filler like "markets are complex" or "investors should be cautious".
+  Every sentence must add information that wasn't in the previous one.
 
 Output ONLY the following JSON object. No preamble, no markdown, just raw JSON:
 
 {{
-  "macro_regime": "4-5 sentences. Describe the current macro regime and cycle phase. What is the Fed narrative right now? What is the dominant force driving markets? Reference the yield curve reading, HYG credit conditions, and dollar movement from the data.",
-  "overnight": "3-4 sentences. What do the price changes above tell us about overnight/pre-market action? Highlight the meaningful moves in yields, dollar, gold, crude, VIX. What does the data say about today's opening posture?",
-  "data_vs_consensus": "4-5 sentences. Identify 2-3 specific points where the data above diverges from what consensus believes. Use the sector rotation numbers and signal data to support contrarian reads. Be specific about the mispricing.",
-  "sector_positioning": "4-5 sentences. Use the 5-day sector rotation data. Name specific sectors with bullish and bearish conviction calls. Explain the rotation rationale and what is driving the money flows.",
-  "portfolio_implications": "3-4 sentences. Translate the macro and sector picture into concrete trade structure guidance. What kind of trades (calls, puts, spreads, iron condors, stocks) make sense in this regime and why?",
-  "what_to_watch": "3-4 sentences. Name 3-4 specific things to monitor today — exact levels or conditions that would change your view. Be actionable, not generic.",
-  "discord_summary": "2-3 tight sentences covering the most critical takeaways. Under 400 characters total. No special formatting."
+  "macro_regime": "The current macro regime assessment. 5-7 sentences. What cycle phase are we in? What is the Fed's actual position vs. what markets are pricing? What is the dominant force right now — is it rates, liquidity, earnings, geopolitics? What is the key tension or divergence in the current regime? Reference the yield curve spread, HYG credit spread direction, dollar trend, and VIX level. What is the consensus getting wrong that the data reveals?",
+
+  "overnight": "Overnight and pre-market analysis. 4-6 sentences. Walk through the meaningful moves in the data: what moved, how much, and what it means directionally. Yields, dollar, gold, crude, VIX — which are signaling risk-on or risk-off and are they confirming each other or diverging? Is pre-market equity positioning low-conviction or directional? What is the opening posture today based on this data?",
+
+  "data_vs_consensus": "What the data is telling you vs. what consensus believes. 5-8 sentences. Identify 2-3 specific divergences between what the numbers show and what the market is pricing. Use the sector rotation data — which sectors are getting flows that don't match the consensus narrative? Are credit conditions (HYG) confirming equity optimism or quietly warning? Where is the specific mispricing and what is the trade that follows from it?",
+
+  "sector_positioning": "Sector positioning rationale. 5-7 sentences. Use the exact 5-day sector rotation numbers. Name the top 2-3 performing sectors and the specific thesis for why money is flowing there — is it structural or rotational? Name the bottom 2-3 and whether this is weakness to fade or trend to follow. What is the highest-conviction sector call today given the macro backdrop and the rotation data?",
+
+  "portfolio_implications": "Portfolio implications and trade posture. 4-6 sentences. Translate the macro picture into specific trade structure guidance. What is the net directional bias today — long beta, short beta, or neutral? What types of setups have the best risk/reward in this regime? If there are active entry signals from the scan, what is the conviction level given the macro backdrop? What is the single most important thing to get right in positioning today?",
+
+  "what_to_watch": "What to watch today — specific catalysts and level triggers. 4-6 sentences. Name 3-4 precise things to monitor: specific price levels, spread moves, Fed speaker events, data prints, or sector behaviors that would confirm or invalidate the thesis. For each, state what it means if it happens. Be actionable — a trader should be able to write these down as a checklist.",
+
+  "discord_summary": "3 tight sentences. The single most important macro call, the highest-conviction trade setup, and the key risk. Under 500 characters total. No special formatting."
 }}"""
 
     try:
         msg = _get_client().messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=2500,
+            max_tokens=4500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
