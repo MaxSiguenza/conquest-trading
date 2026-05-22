@@ -815,24 +815,39 @@ _paper_notified_ids    = set()  # closed trade IDs already posted to Discord
 _paper_eod_dates       = set()  # dates EOD summary already posted
 
 
-async def _get_alert_channel():
+async def _get_channel(primary: str, *fallbacks: str):
     """
-    Find the Discord channel to post automated alerts in.
-    Checks bot_alerts_channel_id in settings first, then falls back to
-    common channel name matches.
+    Find a Discord text channel by name.
+    Tries `primary` first, then each fallback in order, then gives up.
+
+    Usage:
+        ch = await _get_channel("morning-briefing", "general")
+        ch = await _get_channel("trade-log", "trade-alerts")
     """
     s = _load_settings()
-    channel_id = s.get("bot_alerts_channel_id")
-    if channel_id:
-        ch = bot.get_channel(int(channel_id))
+
+    # 1. Check settings for a saved channel ID matching the primary name
+    id_key = f"ch_{primary.replace('-', '_')}"  # e.g. "ch_morning_briefing"
+    saved_id = s.get(id_key) or s.get("bot_alerts_channel_id")
+    if saved_id:
+        ch = bot.get_channel(int(saved_id))
         if ch:
             return ch
-    for guild in bot.guilds:
-        for ch in guild.text_channels:
-            if ch.name.lower() in ("trade-alerts", "trading-alerts",
-                                   "conquest", "conquest-alerts", "general"):
-                return ch
+
+    # 2. Search all guilds by exact channel name (primary, then fallbacks)
+    names_to_try = [primary] + list(fallbacks)
+    for name in names_to_try:
+        for guild in bot.guilds:
+            for ch in guild.text_channels:
+                if ch.name.lower() == name.lower():
+                    return ch
+
     return None
+
+
+# Legacy alias so any code that still calls _get_alert_channel() still works
+async def _get_alert_channel():
+    return await _get_channel("trade-alerts", "conquest-alerts", "general")
 
 
 # ── Fully-automated paper trading loop ────────────────────────────────────────
@@ -863,7 +878,11 @@ async def paper_trading_loop():
         if not (after_open and before_close):
             return
 
-        channel = await _get_alert_channel()
+        # Route each message type to its dedicated channel
+        ch_trades   = await _get_channel("trade-alerts",    "general")
+        ch_log      = await _get_channel("trade-log",       "trade-alerts", "general")
+        ch_eod      = await _get_channel("evening-debrief", "daily-pnl",    "general")
+        ch_pnl      = await _get_channel("daily-pnl",       "evening-debrief", "general")
 
         # ── 1. Generate today's trades (9:35–10:00 AM window) ─────────────────
         if today not in _paper_generated_dates and (h == 9 and m >= 35 or h >= 10):
@@ -875,7 +894,7 @@ async def paper_trading_loop():
 
             new_trades = await _run_sync(_gen)
 
-            if new_trades and channel:
+            if new_trades and ch_trades:
                 type_counts: dict = {}
                 for t in new_trades:
                     tt = t["trade_type"]
@@ -890,7 +909,7 @@ async def paper_trading_loop():
                     description=(
                         f"**{len(new_trades)} trades** placed across the universe.\n"
                         f"{breakdown}\n\n"
-                        "I'll check every 15 min and close anything that hits a target or stop.\n"
+                        "Checked every 15 min — closes anything that hits a target or stop.\n"
                         "Use `!trades` to see the full list."
                     ),
                     color=COLOR_GOLD,
@@ -899,7 +918,7 @@ async def paper_trading_loop():
                 embed.set_footer(
                     text="Auto-closes: options +50%/−75% · stocks +5%/−3% · max 5 days"
                 )
-                await channel.send(embed=embed)
+                await ch_trades.send(embed=embed)
 
         # ── 2. Mark-to-market + close check (every tick during market hours) ──
         def _run_close():
@@ -919,7 +938,7 @@ async def paper_trading_loop():
         # Post a notification for every newly closed trade
         for t in newly_closed:
             _paper_notified_ids.add(t.get("id", ""))
-            if not channel:
+            if not ch_log:
                 continue
 
             pnl    = t.get("pnl", 0)
@@ -960,7 +979,7 @@ async def paper_trading_loop():
             embed.set_footer(
                 text="Conquest Trading  •  paper simulation  •  not financial advice"
             )
-            await channel.send(embed=embed)
+            await ch_log.send(embed=embed)
 
         # ── 3. EOD summary (4:05–4:20 PM) ─────────────────────────────────────
         if h == 16 and 5 <= m <= 20 and today not in _paper_eod_dates:
@@ -983,14 +1002,16 @@ async def paper_trading_loop():
 
             stats, today_closed, today_pnl = await _run_sync(_get_stats)
 
-            if channel:
+            if ch_eod or ch_pnl:
                 color = COLOR_GREEN if today_pnl >= 0 else COLOR_RED
-                embed = discord.Embed(
+
+                # Full EOD wrap → #evening-debrief
+                eod_embed = discord.Embed(
                     title=f"📊  Paper Trading EOD Wrap  —  {today.strftime('%b %d')}",
                     color=color,
                     timestamp=_ts(),
                 )
-                embed.add_field(
+                eod_embed.add_field(
                     name="Today",
                     value=(
                         f"Closed {len(today_closed)} trades\n"
@@ -998,7 +1019,7 @@ async def paper_trading_loop():
                     ),
                     inline=True,
                 )
-                embed.add_field(
+                eod_embed.add_field(
                     name="All-Time",
                     value=(
                         f"{stats['closed_count']} closed · "
@@ -1018,15 +1039,32 @@ async def paper_trading_loop():
                             f"{sign} **{t['ticker']}** {t['trade_type'].replace('_',' ')} "
                             f"${t.get('pnl',0):+.2f} · {t.get('close_reason','').replace('_',' ')}"
                         )
-                    embed.add_field(
+                    eod_embed.add_field(
                         name="Today's Closed Trades",
                         value="\n".join(lines) or "None",
                         inline=False,
                     )
-                embed.set_footer(
+                eod_embed.set_footer(
                     text="Next batch generates tomorrow at 9:35 AM ET  •  Conquest Trading"
                 )
-                await channel.send(embed=embed)
+                if ch_eod:
+                    await ch_eod.send(embed=eod_embed)
+
+                # Short P&L line → #daily-pnl (separate channel)
+                if ch_pnl and ch_pnl != ch_eod:
+                    sign = "▲" if today_pnl >= 0 else "▼"
+                    pnl_embed = discord.Embed(
+                        title=f"{sign}  Daily P&L  —  {today.strftime('%b %d')}",
+                        description=(
+                            f"**Today:** ${today_pnl:+.2f}  ({len(today_closed)} trades closed)\n"
+                            f"**All-Time:** ${stats['total_pnl']:+.2f}  "
+                            f"({stats['win_rate']*100:.1f}% win rate)"
+                        ),
+                        color=color,
+                        timestamp=_ts(),
+                    )
+                    pnl_embed.set_footer(text="Conquest Trading  •  Paper Simulation")
+                    await ch_pnl.send(embed=pnl_embed)
 
     except Exception as e:
         print(f"[PaperLoop] Error: {e}")
@@ -1060,10 +1098,10 @@ async def morning_briefing_task():
 
         _briefing_sent_date = today
 
-        channel = await _get_alert_channel()
+        channel = await _get_channel("morning-briefing", "general")
         if not channel:
             print("[Bot] Auto-briefing: no channel found. "
-                  "Set bot_alerts_channel_id in alerts_settings.json.")
+                  "Create a #morning-briefing channel or set bot_alerts_channel_id.")
             return
 
         watchlist = s.get("watchlist", "").split()
