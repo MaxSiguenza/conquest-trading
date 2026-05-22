@@ -638,6 +638,23 @@ Return JSON only: {{"decision":"PROCEED|SKIP","conviction":0.0-1.0,"reasoning":"
     except Exception:
         pass
 
+    # If PM vetoed — log to missed-trades cache for Discord to read
+    if pm_decision == "SKIP":
+        global _vetoed_trades
+        _vetoed_trades.append({
+            "ticker":        td.ticker,
+            "price":         td.price,
+            "sector":        td.info.get("sector", "?"),
+            "initial_conf":  consensus.get("confidence", 0),
+            "agent_count":   consensus.get("agreeing_count", 0),
+            "bull_case":     bull_case,
+            "bull_strength": bull_strength,
+            "bear_case":     bear_case,
+            "bear_weakness": bear_weakness,
+            "pm_reasoning":  pm_reasoning,
+            "suggested_type":consensus.get("suggested_type", ""),
+        })
+
     return {
         **consensus,
         "should_trade":   pm_decision == "PROCEED",
@@ -837,6 +854,7 @@ class ConquestAgentSystem:
         existing_tickers = existing_tickers or set()
         ts = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
 
+        _clear_vetoed_trades()   # reset cache for this run
         print(f"[AgentSystem] Analyzing {len(universe)} tickers with 6-agent swarm…")
 
         # Parallel ticker analysis (8 workers — one per ticker group)
@@ -979,6 +997,22 @@ class ConquestAgentSystem:
                     "total_logged": len(log)}
         except Exception as e:
             return {"error": str(e), "weights": self.weights}
+
+
+# ── Missed-trade cache (PM debate vetoes) ─────────────────────────────────────
+# Populated when _run_debate_round returns pm_decision == "SKIP".
+# Discord bot reads this after trade generation to post to #missed-trades.
+_vetoed_trades: list = []   # list of dicts: ticker, price, bull_case, bear_case, pm_reasoning
+
+
+def get_vetoed_trades() -> list:
+    """Return vetoed trades from the most recent generate_trades() run."""
+    return list(_vetoed_trades)
+
+
+def _clear_vetoed_trades():
+    global _vetoed_trades
+    _vetoed_trades = []
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────────

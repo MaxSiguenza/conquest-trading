@@ -1341,6 +1341,8 @@ async def testchannels_cmd(ctx):
         ("status-dashboard", "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
         ("agent-brain",      "🤖",  "Agent Brain",                 "Agent weight updates and learning events post here automatically after trades close."),
         ("agent-debate",     "🗣",  "Agent Debate",                "Full bull/bear debate transcript posts here for every paper trade. See what the bull advocate argued, what the bear punched holes in, and the Portfolio Manager's final verdict."),
+        ("missed-trades",    "🚫",  "Missed Trades",               "Trades the PM debate vetoed — shows what the system almost took and exactly why it said no. Learn from skipped setups."),
+        ("sector-rotation",  "🔄",  "Sector Rotation",             "Daily sector ETF performance and rotation signal posts here each morning at 9:00 AM ET alongside the briefing."),
     ]
 
     status_lines = []
@@ -1908,6 +1910,57 @@ async def paper_trading_loop():
                             except Exception as _de_err:
                                 print(f"[PaperLoop] Debate channel post failed: {_de_err}")
 
+            # ── Post vetoed trades to #missed-trades ──────────────────────────
+            ch_missed = await _get_channel("missed-trades")
+            if ch_missed:
+                try:
+                    def _get_vetoed():
+                        from conquest_agents import get_vetoed_trades
+                        return get_vetoed_trades()
+                    vetoed = await _run_sync(_get_vetoed)
+                    if vetoed:
+                        missed_header = discord.Embed(
+                            title=f"🚫  Missed Trades  —  {today.strftime('%b %d')}  ({len(vetoed)} vetoed)",
+                            description=(
+                                "These tickers reached initial 4+/6 agent consensus but the "
+                                "PM debate said **no**. Study these — sometimes the best trade is the one you skip."
+                            ),
+                            color=COLOR_ORANGE,
+                            timestamp=_ts(),
+                        )
+                        await ch_missed.send(embed=missed_header)
+                        for v in vetoed[:8]:   # cap at 8 per day
+                            b_str = v.get("bull_strength", 0)
+                            bw    = v.get("bear_weakness", 0)
+                            bull_bar = "█" * round(b_str * 8) + "░" * (8 - round(b_str * 8))
+                            bear_bar = "█" * round(bw * 8)    + "░" * (8 - round(bw * 8))
+                            tt = v.get("suggested_type","").replace("_"," ").title()
+                            ve = discord.Embed(
+                                title=f"🚫  {v['ticker']}  {tt}  —  PM VETOED",
+                                description=f"Initial consensus: **{v['agent_count']}/6 agents** at **{v['initial_conf']:.0%}** conf",
+                                color=COLOR_RED,
+                                timestamp=_ts(),
+                            )
+                            ve.add_field(
+                                name=f"🐂 Bull Case  `{bull_bar}` {b_str:.0%}",
+                                value=v.get("bull_case","")[:600],
+                                inline=False,
+                            )
+                            ve.add_field(
+                                name=f"🐻 Bear Case  `{bear_bar}` {bw:.0%}",
+                                value=v.get("bear_case","")[:600],
+                                inline=False,
+                            )
+                            ve.add_field(
+                                name="⚖️ PM Decision",
+                                value=f"*\"{v.get('pm_reasoning','')}\"*",
+                                inline=False,
+                            )
+                            ve.set_footer(text="Conquest  •  Missed Trades  •  Studying skips is how you improve")
+                            await ch_missed.send(embed=ve)
+                except Exception as _mv_err:
+                    print(f"[PaperLoop] Missed-trades post failed: {_mv_err}")
+
             # ── Post pre-screener summary to #screener ─────────────────────────
             ch_screener = await _get_channel("screener")
             if ch_screener:
@@ -2465,6 +2518,31 @@ async def morning_briefing_task():
         except Exception as e_mac:
             print(f"[Bot] Auto-macro error: {e_mac}")
 
+        # ── Sector rotation — ETF heat map to #sector-rotation ───────────────
+        try:
+            sector_ch = await _get_channel("sector-rotation", "macro-worldview", "general")
+            if sector_ch and sectors:
+                lines = []
+                for s_item in sectors:
+                    name   = s_item.get("sector", s_item.get("name","?"))
+                    chg    = s_item.get("change_pct", s_item.get("chg_pct", 0)) or 0
+                    signal = s_item.get("signal", s_item.get("trend",""))
+                    icon   = "🟢" if chg > 1 else ("🔴" if chg < -1 else "⚪")
+                    lines.append(f"{icon} **{name}** {chg:+.1f}%  {signal}")
+                if not lines:
+                    lines = ["Sector data unavailable — check macro dashboard manually."]
+                sec_embed = discord.Embed(
+                    title=f"🔄  Sector Rotation  —  {today.strftime('%b %d')}",
+                    description="\n".join(lines[:12]),
+                    color=COLOR_PURPLE,
+                    timestamp=_ts(),
+                )
+                sec_embed.set_footer(text="Conquest  •  Sector ETF heat map  •  Not financial advice")
+                await sector_ch.send(embed=sec_embed)
+                print(f"[Bot] Sector rotation posted to #{sector_ch.name}")
+        except Exception as e_sec:
+            print(f"[Bot] Sector rotation error: {e_sec}")
+
         # ── Weekly screener — every Monday, screen universe for undervalued ────
         is_monday = (now_et.weekday() == 0)
         if is_monday and today not in _screener_dates:
@@ -2652,17 +2730,20 @@ Never give specific personalized financial advice ("you should buy X") — keep 
 # Conquest-specific channels are included so you can ask questions anywhere
 # in your server without switching to a dedicated AI channel.
 _AI_CHAT_CHANNELS = {
-    # dedicated AI channels
+    # ── dedicated AI channels ──────────────────────────────────────────────
     "conquest-ai", "ask-conquest", "ai-chat",
-    # active discussion channels
+    # ── active discussion / general ───────────────────────────────────────
     "general", "stocks", "trading", "options", "charts",
-    "trade-alerts", "trade-log",
-    # agent system channels — ask follow-up questions right there
+    "trade-alerts", "trade-log", "options-watchlist",
+    # ── agent system ──────────────────────────────────────────────────────
     "agent-debate", "agent-brain",
-    # research / watchlist
+    # ── research & intelligence ───────────────────────────────────────────
     "watchlist", "earnings-radar", "screener",
-    # morning content channels
     "morning-briefing", "macro-worldview",
+    "congressional-tracker", "economic-calendar",
+    "sector-rotation", "missed-trades",
+    # ── performance ───────────────────────────────────────────────────────
+    "evening-debrief", "daily-pnl", "status-dashboard", "live-positions",
 }
 
 
