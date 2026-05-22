@@ -537,6 +537,21 @@ def _run_morning_briefing_job():
             print(f"[Scheduler] Morning briefing job failed: {e}")
 
 
+def _run_brief_generation_job():
+    """APScheduler job: collect all data and pre-generate the morning brief at 8:45 AM ET."""
+    with app.app_context():
+        try:
+            from morning_brief import generate_brief
+            import pytz
+            s         = _load_settings()
+            watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
+            brief     = generate_brief(watchlist=watchlist, force=True)
+            print(f"[Scheduler] Morning Intelligence Brief generated at "
+                  f"{brief.get('generated_at', '')[:16]}")
+        except Exception as e:
+            print(f"[Scheduler] Brief generation job failed: {e}")
+
+
 def _run_paper_generate_job():
     """APScheduler job: generate 10 paper trades at 9:35 AM ET weekdays."""
     with app.app_context():
@@ -567,6 +582,15 @@ def _start_scheduler():
 
         scheduler = BackgroundScheduler()
 
+        # Morning Intelligence Brief — 8:45 AM ET (ready before Discord posts at 9 AM)
+        scheduler.add_job(
+            _run_brief_generation_job,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=45,
+                        timezone="America/New_York"),
+            id="morning_brief",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
         # Morning briefing — 9:00 AM ET
         scheduler.add_job(
             _run_morning_briefing_job,
@@ -596,7 +620,8 @@ def _start_scheduler():
         )
 
         scheduler.start()
-        print("✓ Scheduler running — briefing 9:00 AM · paper trades 9:35 AM / 4:05 PM ET (Mon–Fri)")
+        print("✓ Scheduler running — brief 8:45 AM · briefing 9:00 AM · "
+              "paper trades 9:35 AM / 4:05 PM ET (Mon–Fri)")
         return scheduler
     except Exception as e:
         print(f"  Scheduler not started: {e}")
@@ -646,6 +671,49 @@ def paper_stats_close():
     stats = get_paper_stats()
     return render_template("paper_stats.html", stats=stats,
                            flash_ok=flash_ok, flash_err=flash_err)
+
+
+# ── Morning Intelligence Brief ────────────────────────────────────────────────
+
+@app.route("/brief")
+def brief_page():
+    from morning_brief import generate_brief
+    from datetime import datetime
+    import pytz
+
+    s         = _load_settings()
+    watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
+    brief     = generate_brief(watchlist=watchlist)
+
+    # Format generated_at → human-readable ET time
+    gen_at = brief.get("generated_at", "")
+    if gen_at:
+        try:
+            dt = datetime.fromisoformat(gen_at)
+            et = dt.astimezone(pytz.timezone("America/New_York"))
+            brief["generated_at_display"] = et.strftime("%I:%M %p ET").lstrip("0")
+        except Exception:
+            brief["generated_at_display"] = gen_at[:16]
+    else:
+        brief["generated_at_display"] = ""
+
+    # Format market_date → "May 21, 2026"
+    md = brief.get("market_date", "")
+    try:
+        brief["market_date_display"] = datetime.strptime(md, "%Y-%m-%d").strftime("%B %d, %Y")
+    except Exception:
+        brief["market_date_display"] = md
+
+    return render_template("brief.html", brief=brief)
+
+
+@app.route("/brief/generate", methods=["POST"])
+def brief_generate():
+    from morning_brief import generate_brief
+    s         = _load_settings()
+    watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
+    generate_brief(watchlist=watchlist, force=True)
+    return redirect(url_for("brief_page"))
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────

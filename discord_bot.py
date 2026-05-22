@@ -409,49 +409,87 @@ async def pnl_cmd(ctx):
 
 @bot.command(name="briefing", aliases=["brief", "morning", "b"])
 async def briefing_cmd(ctx):
+    """Fetch (or generate) today's Morning Intelligence Brief."""
     s         = _load_settings()
     watchlist = s.get("watchlist", "").split()
 
-    if not watchlist:
-        await ctx.send(
-            "No watchlist configured. Set one on the Alerts page first.\n"
-            "http://localhost:5000/alerts"
-        )
-        return
-
     thinking = await ctx.send(
-        f"⚔️ Scanning **{len(watchlist)}** tickers + pulling FRED macro data + "
-        f"writing briefing... (~15 seconds)"
+        "⚔️ Pulling market data, FRED macro, and generating intelligence brief... (~20 seconds)"
     )
 
-    def _do_briefing():
-        from alerts.scanner import scan_watchlist
-        from conquest_brain  import morning_briefing
-        results     = scan_watchlist(watchlist)
-        macro_notes = ""
-        try:
-            from macro.fred_data import fetch_fred_macro, fred_macro_context
-            macro_notes = fred_macro_context(fetch_fred_macro())
-        except Exception:
-            pass
-        text = morning_briefing(results, macro_notes=macro_notes)
-        return results, text
+    def _do_brief():
+        from morning_brief import generate_brief
+        return generate_brief(watchlist=watchlist)
 
-    results, text = await _run_sync(_do_briefing)
-    entries = [r for r in results if r.get("entry_signal") and not r.get("error")]
-    crosses = [r for r in results if r.get("macd_cross_up") and not r.get("entry_signal") and not r.get("error")]
+    brief = await _run_sync(_do_brief)
 
+    await thinking.delete()
+
+    sections        = brief.get("sections", {})
+    discord_summary = brief.get("discord_summary", "")
+    snapshot        = brief.get("snapshot", {})
+    sectors         = brief.get("sector_rotation", [])
+
+    # Description: use discord_summary, or fall back to first section
+    description = discord_summary
+    if not description and sections.get("macro_regime"):
+        description = sections["macro_regime"][:800]
+    if not description:
+        description = "Brief generated — see sections below."
+
+    color = COLOR_PURPLE
     embed = discord.Embed(
-        title="⚔️  Conquest Morning Briefing",
-        description=text,
-        color=COLOR_PURPLE,
+        title="⚔️  Conquest Morning Intelligence Brief",
+        description=description,
+        color=color,
         timestamp=_ts(),
     )
+
+    # Key market numbers
+    spy = snapshot.get("SPY", {})
+    qqq = snapshot.get("QQQ", {})
+    vix = snapshot.get("^VIX", {})
+    tny = snapshot.get("^TNX", {})
+    oil = snapshot.get("CL=F", {})
+    uup = snapshot.get("UUP", {})
+
+    mkt_lines = []
+    for label, s_data in [("SPY", spy), ("QQQ", qqq), ("VIX", vix),
+                           ("10Y", tny), ("Oil", oil), ("Dollar", uup)]:
+        if s_data:
+            sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
+            mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
+
+    if mkt_lines:
+        embed.add_field(
+            name="Market",
+            value="  ".join(mkt_lines[:3]) + "\n" + "  ".join(mkt_lines[3:]),
+            inline=False,
+        )
+
+    # Sector rotation — top 3 and bottom 3
+    if sectors:
+        top = "  ".join(
+            f"{'▲' if d['ret5'] > 0 else '▼'} {d['name']} {d['ret5']:+.1f}%"
+            for d in sectors[:3]
+        )
+        bot = "  ".join(
+            f"▼ {d['name']} {d['ret5']:+.1f}%"
+            for d in sectors[-3:]
+        )
+        embed.add_field(name="🟢 Leading (5d)",  value=top, inline=True)
+        embed.add_field(name="🔴 Lagging (5d)",  value=bot, inline=True)
+
+    # What to watch section (if we have it)
+    if sections.get("what_to_watch"):
+        # First sentence only for Discord
+        watch_short = sections["what_to_watch"].split(".")[0] + "."
+        embed.add_field(name="👁 Watch Today", value=watch_short[:300], inline=False)
+
+    gen_at = brief.get("generated_at", "")[:16].replace("T", " ")
     embed.set_footer(
-        text=f"Conquest Intelligence Desk  •  {len(entries)} entries  •  "
-             f"{len(crosses)} MACD crosses  •  {len(watchlist)} tickers"
+        text=f"Conquest Intelligence Desk  •  {gen_at} UTC  •  Full brief at /brief"
     )
-    await thinking.delete()
     await ctx.send(embed=embed)
 
 
@@ -1029,40 +1067,71 @@ async def morning_briefing_task():
             return
 
         watchlist = s.get("watchlist", "").split()
-        if not watchlist:
-            return
 
-        await channel.send("⚔️ Running automated morning scan...")
+        await channel.send("⚔️ Generating morning intelligence brief...")
 
         def _do_auto_briefing():
-            from alerts.scanner import scan_watchlist
-            from conquest_brain  import morning_briefing
-            results     = scan_watchlist(watchlist)
-            macro_notes = ""
-            try:
-                from macro.fred_data import fetch_fred_macro, fred_macro_context
-                macro_notes = fred_macro_context(fetch_fred_macro())
-            except Exception:
-                pass
-            text = morning_briefing(results, macro_notes=macro_notes)
-            return results, text
+            from morning_brief import generate_brief
+            return generate_brief(watchlist=watchlist)
 
-        results, text = await _run_sync(_do_auto_briefing)
-        entries = [r for r in results if r.get("entry_signal") and not r.get("error")]
-        crosses = [r for r in results if r.get("macd_cross_up") and not r.get("entry_signal") and not r.get("error")]
+        brief = await _run_sync(_do_auto_briefing)
+
+        sections        = brief.get("sections", {})
+        discord_summary = brief.get("discord_summary", "")
+        snapshot        = brief.get("snapshot", {})
+        sectors         = brief.get("sector_rotation", [])
+
+        description = discord_summary
+        if not description and sections.get("macro_regime"):
+            description = sections["macro_regime"][:800]
+        if not description:
+            description = "Morning brief generated — check /brief for full details."
 
         embed = discord.Embed(
-            title="⚔️  Conquest Morning Briefing  —  Auto 9 AM ET",
-            description=text,
+            title="⚔️  Conquest Intelligence Brief  —  Auto 9 AM ET",
+            description=description,
             color=COLOR_PURPLE,
             timestamp=_ts(),
         )
+
+        # Key numbers
+        mkt_lines = []
+        for key, label in [("SPY","SPY"),("QQQ","QQQ"),("^VIX","VIX"),
+                            ("^TNX","10Y"),("CL=F","Oil"),("UUP","Dollar")]:
+            s_data = snapshot.get(key, {})
+            if s_data:
+                sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
+                mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
+        if mkt_lines:
+            half = len(mkt_lines) // 2
+            embed.add_field(
+                name="Market",
+                value=("  ".join(mkt_lines[:half]) + "\n" + "  ".join(mkt_lines[half:])).strip(),
+                inline=False,
+            )
+
+        # Sector rotation
+        if sectors:
+            top = "  ".join(
+                f"{'▲' if d['ret5'] > 0 else '▼'} {d['name']} {d['ret5']:+.1f}%"
+                for d in sectors[:3]
+            )
+            bot = "  ".join(
+                f"▼ {d['name']} {d['ret5']:+.1f}%"
+                for d in sectors[-3:]
+            )
+            embed.add_field(name="🟢 Leading (5d)", value=top, inline=True)
+            embed.add_field(name="🔴 Lagging (5d)", value=bot, inline=True)
+
+        if sections.get("what_to_watch"):
+            watch_short = sections["what_to_watch"].split(".")[0] + "."
+            embed.add_field(name="👁 Watch Today", value=watch_short[:300], inline=False)
+
         embed.set_footer(
-            text=f"Conquest Intelligence Desk  •  {len(entries)} entries  •  "
-                 f"{len(crosses)} MACD crosses  •  {len(watchlist)} tickers"
+            text=f"Conquest Intelligence Desk  •  Full brief at /brief  •  Not financial advice"
         )
         await channel.send(embed=embed)
-        print(f"[Bot] Auto morning briefing posted at {now_et.strftime('%Y-%m-%d %H:%M ET')}")
+        print(f"[Bot] Auto morning brief posted at {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
     except Exception as e:
         print(f"[Bot] Auto-briefing task error: {e}")

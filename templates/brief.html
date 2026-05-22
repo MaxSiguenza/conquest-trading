@@ -1,0 +1,454 @@
+{% extends "base.html" %}
+{% block title %}Morning Intelligence Brief — Conquest{% endblock %}
+
+{% block extra_style %}
+
+/* ── Page header ─────────────────────────────────────────────── */
+.brief-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.brief-header h1 {
+  margin-bottom: 6px;
+  font-size: 22px;
+}
+
+.brief-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.session-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: #1a2a3a;
+  color: #60a5fa;
+  padding: 3px 10px;
+  border-radius: 99px;
+  border: 1px solid #2d3f5a;
+}
+
+.brief-date {
+  font-size: 13px;
+  color: #475569;
+}
+
+.regen-btn {
+  background: #1e2133;
+  color: #94a3b8;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.regen-btn:hover {
+  background: #2d3148;
+  color: #e2e8f0;
+  border-color: #7c6af7;
+}
+
+/* ── Quick stats strip ────────────────────────────────────────── */
+.quick-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+
+.stat-chip {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 10px 16px;
+  min-width: 100px;
+  text-align: center;
+  flex: 1 1 90px;
+  max-width: 140px;
+}
+
+.chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #64748b;
+  margin-bottom: 3px;
+}
+
+.chip-price {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin-bottom: 2px;
+}
+
+.chip-chg {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chip-green .chip-chg { color: #4ade80; }
+.chip-red   .chip-chg { color: #f87171; }
+.chip-neutral .chip-chg { color: #94a3b8; }
+.chip-green { border-color: #1a3a2a; }
+.chip-red   { border-color: #3a1a1a; }
+
+/* ── Two-column layout ────────────────────────────────────────── */
+.brief-layout {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .brief-layout { grid-template-columns: 1fr; }
+  .brief-sidebar { order: -1; }
+}
+
+/* ── Narrative sections ───────────────────────────────────────── */
+.section-block {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-left: 3px solid #7c6af7;
+  border-radius: 0 12px 12px 0;
+  padding: 20px 22px;
+  margin-bottom: 14px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #7c6af7;
+  margin-bottom: 10px;
+}
+
+.section-text {
+  font-size: 14px;
+  color: #cbd5e1;
+  line-height: 1.75;
+  margin: 0;
+}
+
+.no-brief-msg {
+  background: #1a1d27;
+  border: 1px dashed #2d3148;
+  border-radius: 12px;
+  padding: 40px 28px;
+  text-align: center;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.error-msg {
+  background: #1a0f0f;
+  border: 1px solid #3a1a1a;
+  border-radius: 12px;
+  padding: 20px;
+  color: #f87171;
+  font-size: 13px;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────── */
+.brief-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sidebar-card {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.sidebar-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #64748b;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2d3148;
+}
+
+/* Market snapshot rows */
+.market-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid #1e2133;
+  font-size: 12.5px;
+}
+
+.market-row:last-child { border-bottom: none; }
+
+.mkt-name  { color: #94a3b8; flex: 1; }
+.mkt-price { color: #f1f5f9; font-weight: 600; margin: 0 12px; }
+.mkt-chg   { font-weight: 600; min-width: 52px; text-align: right; font-size: 12px; }
+
+/* Sector rotation rows */
+.sector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12.5px;
+  border-bottom: 1px solid #1e2133;
+}
+
+.sector-row:last-child { border-bottom: none; }
+.sector-name { color: #94a3b8; }
+.sector-ret  { font-weight: 600; font-size: 12px; }
+
+/* FRED rows */
+.fred-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12.5px;
+  border-bottom: 1px solid #1e2133;
+  color: #94a3b8;
+}
+
+.fred-row:last-child { border-bottom: none; }
+.fred-row span:last-child { font-weight: 600; color: #e2e8f0; }
+
+/* Colour helpers */
+.pct-pos { color: #4ade80; }
+.pct-neg { color: #f87171; }
+.pct-neu { color: #94a3b8; }
+
+{% endblock %}
+
+
+{% block content %}
+
+{# ── Page header ──────────────────────────────────────────────────────────── #}
+<div class="brief-header">
+  <div>
+    <h1>⚔️ Morning Intelligence Brief</h1>
+    <div class="brief-meta">
+      {% if brief.generated_at_display %}
+        <span class="session-badge">Generated {{ brief.generated_at_display }}</span>
+      {% else %}
+        <span class="session-badge" style="background:#2a1a1a;color:#f87171;border-color:#3a2020;">Not yet generated</span>
+      {% endif %}
+      <span class="brief-date">{{ brief.market_date_display }}</span>
+    </div>
+  </div>
+  <form method="post" action="/brief/generate">
+    <button type="submit" class="regen-btn">🔄 Regenerate</button>
+  </form>
+</div>
+
+{# ── Quick stats strip ────────────────────────────────────────────────────── #}
+{% set snap = brief.get("snapshot", {}) %}
+{% if snap %}
+<div class="quick-stats">
+  {% for key, label in [("SPY","S&P 500"),("QQQ","QQQ"),("^VIX","VIX"),("^TNX","10Y Yield"),("UUP","Dollar"),("CL=F","Oil")] %}
+    {% set s = snap.get(key, {}) %}
+    {% if s %}
+      {% if s.chg > 0 %}
+        {% set chipclass = "chip-green" %}
+      {% elif s.chg < 0 %}
+        {% set chipclass = "chip-red" %}
+      {% else %}
+        {% set chipclass = "chip-neutral" %}
+      {% endif %}
+      <div class="stat-chip {{ chipclass }}">
+        <div class="chip-label">{{ label }}</div>
+        <div class="chip-price">{{ s.price }}</div>
+        <div class="chip-chg">{{ "{:+.2f}".format(s.chg) }}%</div>
+      </div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── Two-column layout ─────────────────────────────────────────────────────── #}
+<div class="brief-layout">
+
+  {# ── Narrative sections (left) ─────────────────────────────────────────── #}
+  <div class="brief-sections">
+
+    {% set sections = brief.get("sections", {}) %}
+
+    {% if not sections %}
+      <div class="no-brief-msg">
+        <p style="font-size:28px;margin-bottom:12px;">📋</p>
+        <p>No brief generated yet for today.</p>
+        <p>Click <strong style="color:#e2e8f0;">Regenerate</strong> above to generate now (~15 seconds).</p>
+      </div>
+
+    {% elif sections.get("error") %}
+      <div class="error-msg">
+        <strong>Brief generation failed:</strong> {{ sections.get("error") }}
+      </div>
+
+    {% elif sections.get("full_text") %}
+      {# Fallback: JSON parsing failed but raw text exists #}
+      <div class="section-block">
+        <div class="section-label">⚔️ Morning Intelligence Brief</div>
+        <pre style="white-space:pre-wrap;font-size:13.5px;color:#cbd5e1;background:none;border:none;padding:0;font-family:inherit;line-height:1.75;">{{ sections.full_text }}</pre>
+      </div>
+
+    {% else %}
+      {# Happy path — six sections #}
+      {% set section_defs = [
+        ("macro_regime",            "🌐 Macro Regime Assessment"),
+        ("overnight",               "🌙 Overnight & Pre-Market"),
+        ("data_vs_consensus",       "📊 Data vs. Consensus"),
+        ("sector_positioning",      "🎯 Sector Positioning"),
+        ("portfolio_implications",  "💼 Portfolio Implications"),
+        ("what_to_watch",           "👁 What to Watch Today"),
+      ] %}
+      {% for key, label in section_defs %}
+        {% if sections.get(key) %}
+          <div class="section-block">
+            <div class="section-label">{{ label }}</div>
+            <p class="section-text">{{ sections[key] }}</p>
+          </div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+
+  </div>{# end .brief-sections #}
+
+  {# ── Sidebar (right) ───────────────────────────────────────────────────── #}
+  <div class="brief-sidebar">
+
+    {# Market Snapshot #}
+    {% if snap %}
+    <div class="sidebar-card">
+      <div class="sidebar-title">📈 Market Snapshot</div>
+      {% for key, label in [
+        ("SPY",  "S&P 500"),
+        ("QQQ",  "Nasdaq 100"),
+        ("DIA",  "Dow Jones"),
+        ("^VIX", "VIX"),
+        ("^TNX", "10Y Yield"),
+        ("^IRX", "2Y Yield"),
+        ("UUP",  "Dollar"),
+        ("GLD",  "Gold"),
+        ("CL=F", "WTI Crude"),
+        ("HG=F", "Copper"),
+        ("HYG",  "HYG Credit"),
+      ] %}
+        {% set s = snap.get(key, {}) %}
+        {% if s %}
+          <div class="market-row">
+            <span class="mkt-name">{{ label }}</span>
+            <span class="mkt-price">{{ s.price }}</span>
+            <span class="mkt-chg {% if s.chg > 0 %}pct-pos{% elif s.chg < 0 %}pct-neg{% else %}pct-neu{% endif %}">
+              {{ "{:+.2f}".format(s.chg) }}%
+            </span>
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# Sector Rotation #}
+    {% set sectors = brief.get("sector_rotation", []) %}
+    {% if sectors %}
+    <div class="sidebar-card">
+      <div class="sidebar-title">🔄 Sector Rotation (5d)</div>
+      {% for d in sectors %}
+        <div class="sector-row">
+          <span class="sector-name">{{ d.name }}</span>
+          <span class="sector-ret {% if d.ret5 > 0 %}pct-pos{% elif d.ret5 < 0 %}pct-neg{% else %}pct-neu{% endif %}">
+            {{ "{:+.1f}".format(d.ret5) }}%
+          </span>
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# FRED Macro #}
+    {% set fd = brief.get("fred", {}) %}
+    {% if fd %}
+    <div class="sidebar-card">
+      <div class="sidebar-title">🏛 FRED Macro</div>
+
+      {% set fedfunds = fd.get("FEDFUNDS", {}) %}
+      {% if fedfunds.get("latest") is not none and not fedfunds.get("error") %}
+      <div class="fred-row">
+        <span>Fed Funds Rate</span>
+        <span>{{ "%.2f" | format(fedfunds.latest) }}%</span>
+      </div>
+      {% endif %}
+
+      {% set cpi = fd.get("CPIAUCSL", {}) %}
+      {% if cpi.get("yoy") is not none and not cpi.get("error") %}
+      <div class="fred-row">
+        <span>CPI (YoY)</span>
+        <span>{{ "%+.1f" | format(cpi.yoy) }}%</span>
+      </div>
+      {% endif %}
+
+      {% set yc = fd.get("T10Y2Y", {}) %}
+      {% if yc.get("latest") is not none and not yc.get("error") %}
+      <div class="fred-row">
+        <span>Yield Curve</span>
+        <span class="{% if yc.latest >= 0 %}pct-pos{% else %}pct-neg{% endif %}">
+          {{ "%+.2f" | format(yc.latest) }}%
+          {% if yc.latest < 0 %}<span style="font-size:10px;color:#f87171;"> INV</span>{% endif %}
+        </span>
+      </div>
+      {% endif %}
+
+      {% set ur = fd.get("UNRATE", {}) %}
+      {% if ur.get("latest") is not none and not ur.get("error") %}
+      <div class="fred-row">
+        <span>Unemployment</span>
+        <span>{{ "%.1f" | format(ur.latest) }}%</span>
+      </div>
+      {% endif %}
+
+      {% set sent = fd.get("UMCSENT", {}) %}
+      {% if sent.get("latest") is not none and not sent.get("error") %}
+      <div class="fred-row">
+        <span>Consumer Sentiment</span>
+        <span>{{ "%.1f" | format(sent.latest) }}</span>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# Errors (debug) #}
+    {% set errs = brief.get("errors", []) %}
+    {% if errs %}
+    <div class="sidebar-card" style="border-color:#3a2020;">
+      <div class="sidebar-title" style="color:#f87171;">⚠ Data Warnings</div>
+      {% for e in errs %}
+        <div style="font-size:11.5px;color:#64748b;padding:3px 0;">{{ e }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  </div>{# end .brief-sidebar #}
+
+</div>{# end .brief-layout #}
+
+{% endblock %}

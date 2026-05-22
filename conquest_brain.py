@@ -229,6 +229,180 @@ PORTFOLIO: Cost basis ${total_cost:.0f} | Total P&L {total_pnl:+.0f}"""
         return f"[Could not answer: {e}]"
 
 
+def intelligence_brief(data: dict) -> tuple:
+    """
+    Generate the full Morning Intelligence Brief from collected market data.
+    Outputs six narrative sections as a JSON object for reliable parsing.
+
+    Args:
+        data: dict from morning_brief.collect_brief_data()
+
+    Returns:
+        (sections_dict, discord_summary_str)
+    """
+    import json as _json
+
+    snapshot = data.get("snapshot", {})
+    fred     = data.get("fred", {})
+    scan     = data.get("scan", [])
+    paper    = data.get("paper_stats", {})
+    sectors  = data.get("sector_rotation", [])
+
+    # ── Build market data block ───────────────────────────────────────────────
+    mkt_lines = []
+    for key, label in [
+        ("SPY",    "S&P 500 (SPY)"),
+        ("QQQ",    "Nasdaq 100 (QQQ)"),
+        ("DIA",    "Dow Jones (DIA)"),
+        ("^VIX",   "VIX"),
+        ("^TNX",   "10Y Yield"),
+        ("^IRX",   "2Y Yield"),
+        ("UUP",    "US Dollar Index"),
+        ("GLD",    "Gold"),
+        ("CL=F",   "WTI Crude"),
+        ("HG=F",   "Copper"),
+        ("HYG",    "HYG Credit"),
+    ]:
+        s = snapshot.get(key, {})
+        if s:
+            mkt_lines.append(
+                f"  {label}: {s['price']} ({s['chg']:+.2f}% 1d, {s['ret5']:+.2f}% 5d)"
+            )
+    market_block = "\n".join(mkt_lines) or "  Market data unavailable"
+
+    # ── Sector rotation block ─────────────────────────────────────────────────
+    if sectors:
+        sector_lines = [
+            f"  {d['name']}: {d['ret5']:+.2f}% 5d ({d['chg']:+.2f}% 1d)"
+            for d in sectors
+        ]
+        sector_block = "\n".join(sector_lines)
+    else:
+        sector_block = "  Sector data unavailable"
+
+    # ── FRED block ────────────────────────────────────────────────────────────
+    fred_parts = []
+    for sid, r in fred.items():
+        if r.get("error") or r.get("latest") is None:
+            continue
+        val = r["latest"]
+        if sid == "GDPC1":
+            qoq = r.get("qoq") or 0
+            fred_parts.append(f"  Real GDP: ${val:,.0f}B ({qoq:+.1f}% ann.)")
+        elif sid == "CPIAUCSL":
+            yoy = r.get("yoy") or 0
+            fred_parts.append(f"  CPI Index: {val:.1f} ({yoy:+.1f}% YoY)")
+        elif sid == "FEDFUNDS":
+            fred_parts.append(f"  Fed Funds Rate: {val:.2f}%")
+        elif sid == "DGS10":
+            fred_parts.append(f"  10Y Treasury (FRED): {val:.2f}%")
+        elif sid == "T10Y2Y":
+            status = "normal" if val >= 0 else "INVERTED"
+            fred_parts.append(f"  Yield Curve (10Y-2Y): {val:+.2f}% ({status})")
+        elif sid == "UNRATE":
+            fred_parts.append(f"  Unemployment: {val:.1f}%")
+        elif sid == "UMCSENT":
+            fred_parts.append(f"  Consumer Sentiment: {val:.1f}")
+    fred_block = "\n".join(fred_parts) or "  FRED data unavailable"
+
+    # ── Signal scan block ─────────────────────────────────────────────────────
+    entries = [r for r in scan if r.get("entry_signal") and not r.get("error")]
+    crosses = [r for r in scan if r.get("macd_cross_up") and not r.get("entry_signal") and not r.get("error")]
+    signal_lines = []
+    for r in entries[:5]:
+        signal_lines.append(
+            f"  ENTRY: {r['ticker']} ${r['price']:.2f} "
+            f"({r.get('today_chg_pct', 0):+.1f}%) "
+            f"MTF {r['mtf_score']}/3 RSI {r['rsi']:.0f} HVR {r['hv_rank']:.0f}"
+        )
+    for r in crosses[:4]:
+        signal_lines.append(
+            f"  MACD CROSS: {r['ticker']} ${r['price']:.2f} MTF {r['mtf_score']}/3"
+        )
+    signal_block = (
+        "\n".join(signal_lines) if signal_lines
+        else f"  No active entry signals ({len(scan)} tickers scanned)."
+    )
+
+    # ── Paper trading block ───────────────────────────────────────────────────
+    if paper.get("total_trades", 0) > 0:
+        paper_block = (
+            f"  Trades: {paper['total_trades']} "
+            f"({paper.get('open_count', 0)} open, {paper.get('closed_count', 0)} closed)\n"
+            f"  Win Rate: {paper.get('win_rate', 0) * 100:.1f}%  "
+            f"Total P&L: ${paper.get('total_pnl', 0):+.2f}\n"
+            f"  Sharpe: {paper.get('sharpe') or 'N/A'}  "
+            f"Profit Factor: {paper.get('profit_factor') or 'N/A'}"
+        )
+    else:
+        paper_block = "  No paper trade data yet."
+
+    date_str = data.get("market_date", "today")
+
+    prompt = f"""DATE: {date_str}
+
+LIVE MARKET DATA:
+{market_block}
+
+SECTOR ROTATION — 5-DAY PERFORMANCE (best to worst):
+{sector_block}
+
+FEDERAL RESERVE / FRED MACRO DATA:
+{fred_block}
+
+QUANTITATIVE SIGNAL SCAN:
+{signal_block}
+
+AUTOMATED PAPER TRADING STATS:
+{paper_block}
+
+---
+
+Generate a Morning Intelligence Brief for a quantitative trading desk.
+Write like a senior macro analyst: specific, data-driven, flowing prose, no bullet points.
+Every claim MUST reference actual numbers from the data above. No generic observations.
+
+Output ONLY the following JSON object. No preamble, no markdown, just raw JSON:
+
+{{
+  "macro_regime": "4-5 sentences. Describe the current macro regime and cycle phase. What is the Fed narrative right now? What is the dominant force driving markets? Reference the yield curve reading, HYG credit conditions, and dollar movement from the data.",
+  "overnight": "3-4 sentences. What do the price changes above tell us about overnight/pre-market action? Highlight the meaningful moves in yields, dollar, gold, crude, VIX. What does the data say about today's opening posture?",
+  "data_vs_consensus": "4-5 sentences. Identify 2-3 specific points where the data above diverges from what consensus believes. Use the sector rotation numbers and signal data to support contrarian reads. Be specific about the mispricing.",
+  "sector_positioning": "4-5 sentences. Use the 5-day sector rotation data. Name specific sectors with bullish and bearish conviction calls. Explain the rotation rationale and what is driving the money flows.",
+  "portfolio_implications": "3-4 sentences. Translate the macro and sector picture into concrete trade structure guidance. What kind of trades (calls, puts, spreads, iron condors, stocks) make sense in this regime and why?",
+  "what_to_watch": "3-4 sentences. Name 3-4 specific things to monitor today — exact levels or conditions that would change your view. Be actionable, not generic.",
+  "discord_summary": "2-3 tight sentences covering the most critical takeaways. Under 400 characters total. No special formatting."
+}}"""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+
+        # Strip markdown code fences if Claude wrapped the JSON
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        parsed   = _json.loads(raw)
+        discord_summary = parsed.pop("discord_summary", "")
+        return parsed, discord_summary
+
+    except _json.JSONDecodeError:
+        # JSON parsing failed — store the raw text so the page can still display it
+        raw_text = locals().get("raw", "")
+        return {"full_text": raw_text} if raw_text else {"error": "JSON parse failed"}, ""
+    except Exception as e:
+        return {"error": str(e)}, f"Brief unavailable: {e}"
+
+
 def position_debrief(positions: list, portfolio: dict) -> str:
     """
     Evening debrief — summary of all positions and what to do next.
