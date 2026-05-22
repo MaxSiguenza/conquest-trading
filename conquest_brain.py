@@ -815,6 +815,158 @@ Be direct and specific. No disclaimers."""
         return f"[Reasoning unavailable: {e}]"
 
 
+def send_eod_email(stats: dict, closed_today: list, debrief_text: str) -> bool:
+    """
+    Send an HTML end-of-day summary email via Gmail SMTP.
+
+    Required Railway env vars:
+      GMAIL_USER         — sender address (e.g. you@gmail.com)
+      GMAIL_APP_PASSWORD — 16-char Gmail App Password (not your account password)
+      ALERT_EMAIL        — recipient address (can be same as GMAIL_USER)
+
+    Returns True if sent successfully, False otherwise.
+    """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from datetime import date
+
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    alert_to   = os.getenv("ALERT_EMAIL", gmail_user)
+
+    if not gmail_user or not gmail_pass:
+        print("[Email] GMAIL_USER / GMAIL_APP_PASSWORD not set — skipping EOD email.")
+        return False
+
+    today       = date.today().strftime("%B %d, %Y")
+    total_pnl   = stats.get("total_pnl", 0)
+    win_rate    = stats.get("win_rate", 0) * 100
+    closed_cnt  = stats.get("closed_count", 0)
+    open_cnt    = stats.get("open_count", 0)
+    sharpe      = stats.get("sharpe") or "N/A"
+    pf          = stats.get("profit_factor") or "N/A"
+
+    today_pnl   = sum(t.get("pnl", 0) for t in closed_today)
+    pnl_color   = "#16a34a" if today_pnl >= 0 else "#dc2626"
+    total_color = "#16a34a" if total_pnl >= 0 else "#dc2626"
+
+    # Build trade rows
+    rows = ""
+    for t in sorted(closed_today, key=lambda x: x.get("pnl", 0), reverse=True):
+        pnl   = t.get("pnl", 0)
+        color = "#16a34a" if pnl >= 0 else "#dc2626"
+        rows += (
+            f"<tr>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #e5e7eb'>{t['ticker']}</td>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #e5e7eb'>{t['trade_type'].replace('_',' ')}</td>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #e5e7eb;color:{color};font-weight:600'>"
+            f"${pnl:+.2f}</td>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #e5e7eb'>"
+            f"{t.get('close_reason','').replace('_',' ')}</td>"
+            f"</tr>"
+        )
+
+    trades_table = f"""
+    <table style='width:100%;border-collapse:collapse;font-size:13px;margin-top:8px'>
+      <thead>
+        <tr style='background:#f3f4f6'>
+          <th style='padding:8px 10px;text-align:left'>Ticker</th>
+          <th style='padding:8px 10px;text-align:left'>Type</th>
+          <th style='padding:8px 10px;text-align:left'>P&amp;L</th>
+          <th style='padding:8px 10px;text-align:left'>Closed By</th>
+        </tr>
+      </thead>
+      <tbody>{rows if rows else "<tr><td colspan='4' style='padding:8px 10px;color:#6b7280'>No trades closed today.</td></tr>"}</tbody>
+    </table>""" if closed_today else "<p style='color:#6b7280;font-size:13px'>No trades closed today.</p>"
+
+    debrief_html = debrief_text.replace("\n", "<br>") if debrief_text else ""
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<body style='font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f9fafb;margin:0;padding:20px'>
+  <div style='max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)'>
+
+    <!-- Header -->
+    <div style='background:#0f172a;padding:24px 28px'>
+      <h1 style='color:#fff;margin:0;font-size:20px;font-weight:700'>📈 Conquest Trading</h1>
+      <p style='color:#94a3b8;margin:4px 0 0;font-size:13px'>End-of-Day Summary — {today}</p>
+    </div>
+
+    <!-- Today snapshot -->
+    <div style='padding:24px 28px;border-bottom:1px solid #e5e7eb'>
+      <h2 style='margin:0 0 16px;font-size:15px;color:#374151;text-transform:uppercase;letter-spacing:.05em'>Today</h2>
+      <div style='display:flex;gap:24px;flex-wrap:wrap'>
+        <div>
+          <div style='font-size:11px;color:#6b7280;margin-bottom:2px'>TODAY P&amp;L</div>
+          <div style='font-size:26px;font-weight:700;color:{pnl_color}'>${today_pnl:+.2f}</div>
+        </div>
+        <div>
+          <div style='font-size:11px;color:#6b7280;margin-bottom:2px'>TRADES CLOSED</div>
+          <div style='font-size:26px;font-weight:700;color:#111827'>{len(closed_today)}</div>
+        </div>
+      </div>
+      {trades_table}
+    </div>
+
+    <!-- All-time stats -->
+    <div style='padding:24px 28px;border-bottom:1px solid #e5e7eb'>
+      <h2 style='margin:0 0 16px;font-size:15px;color:#374151;text-transform:uppercase;letter-spacing:.05em'>All-Time</h2>
+      <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:16px'>
+        <div style='background:#f8fafc;border-radius:8px;padding:14px'>
+          <div style='font-size:11px;color:#6b7280'>TOTAL P&amp;L</div>
+          <div style='font-size:20px;font-weight:700;color:{total_color}'>${total_pnl:+.2f}</div>
+        </div>
+        <div style='background:#f8fafc;border-radius:8px;padding:14px'>
+          <div style='font-size:11px;color:#6b7280'>WIN RATE</div>
+          <div style='font-size:20px;font-weight:700;color:#111827'>{win_rate:.1f}%</div>
+        </div>
+        <div style='background:#f8fafc;border-radius:8px;padding:14px'>
+          <div style='font-size:11px;color:#6b7280'>CLOSED / OPEN</div>
+          <div style='font-size:20px;font-weight:700;color:#111827'>{closed_cnt} / {open_cnt}</div>
+        </div>
+        <div style='background:#f8fafc;border-radius:8px;padding:14px'>
+          <div style='font-size:11px;color:#6b7280'>SHARPE</div>
+          <div style='font-size:20px;font-weight:700;color:#111827'>{sharpe}</div>
+        </div>
+        <div style='background:#f8fafc;border-radius:8px;padding:14px'>
+          <div style='font-size:11px;color:#6b7280'>PROFIT FACTOR</div>
+          <div style='font-size:20px;font-weight:700;color:#111827'>{pf}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Claude debrief -->
+    {"<div style='padding:24px 28px;border-bottom:1px solid #e5e7eb'><h2 style='margin:0 0 12px;font-size:15px;color:#374151;text-transform:uppercase;letter-spacing:.05em'>Wolf's Take</h2><p style='font-size:14px;line-height:1.7;color:#374151;margin:0'>" + debrief_html + "</p></div>" if debrief_html else ""}
+
+    <!-- Footer -->
+    <div style='padding:16px 28px;background:#f8fafc'>
+      <p style='margin:0;font-size:12px;color:#9ca3af'>Conquest Trading · Automated Paper Trading Engine · conquest-trading.up.railway.app</p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Conquest EOD — {today}  |  Today: ${today_pnl:+.2f}  |  All-time: ${total_pnl:+.2f}"
+        msg["From"]    = gmail_user
+        msg["To"]      = alert_to
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, alert_to, msg.as_string())
+
+        print(f"[Email] EOD summary sent to {alert_to}")
+        return True
+
+    except Exception as e:
+        print(f"[Email] send_eod_email failed: {e}")
+        return False
+
+
 def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) -> str:
     """
     Claude-narrated end-of-day wrap for automated paper trading.

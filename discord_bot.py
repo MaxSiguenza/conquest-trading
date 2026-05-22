@@ -1858,6 +1858,16 @@ async def paper_trading_loop():
                     except Exception as e_narr:
                         print(f"[PaperLoop] Narrative debrief error: {e_narr}")
 
+                # Gmail EOD digest
+                try:
+                    def _send_email():
+                        from conquest_brain import send_eod_email
+                        _narr = narrative if "narrative" in locals() else ""
+                        return send_eod_email(stats, today_closed, _narr)
+                    await _run_sync(_send_email)
+                except Exception as e_email:
+                    print(f"[PaperLoop] EOD email skipped: {e_email}")
+
                 # Short P&L line → #daily-pnl (separate channel)
                 if ch_pnl and ch_pnl != ch_eod:
                     sign = "▲" if today_pnl >= 0 else "▼"

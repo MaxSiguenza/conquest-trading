@@ -570,6 +570,15 @@ def generate_daily_trades(n: int = 10) -> list:
     all_trades.extend(new_trades)
     save_trades(all_trades)
 
+    # Log each new trade to Notion Trade Journal
+    try:
+        from notion_journal import log_trade_open
+        logged = sum(1 for t in new_trades if log_trade_open(t))
+        if logged:
+            print(f"[PaperTrader] Logged {logged} trades to Notion.")
+    except Exception as e:
+        print(f"[PaperTrader] Notion open-logging skipped: {e}")
+
     summary = {}
     for t in new_trades:
         summary[t["trade_type"]] = summary.get(t["trade_type"], 0) + 1
@@ -628,6 +637,18 @@ def run_daily_close() -> dict:
             closed_count += 1
 
     save_trades(trades)
+
+    # Log all closed trades to Notion
+    try:
+        from notion_journal import log_trade_close
+        closed_trades = [t for t in trades if t.get("status") == "closed"
+                         and t.get("date_closed", "").startswith(now_str[:10])]
+        for t in closed_trades:
+            log_trade_close(t)
+        if closed_trades:
+            print(f"[PaperTrader] Notion close-log: {len(closed_trades)} trades updated.")
+    except Exception as e:
+        print(f"[PaperTrader] Notion close-logging skipped: {e}")
     result = {
         "total_open":  len(open_trades),
         "closed":      closed_count,

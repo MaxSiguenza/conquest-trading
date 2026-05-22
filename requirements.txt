@@ -34,3 +34,6 @@ py_vollib==1.0.1
 
 # Database (PostgreSQL for Railway persistence)
 psycopg2-binary==2.9.10
+
+# Notion trade journal
+notion-client>=2.2.1
