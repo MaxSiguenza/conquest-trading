@@ -2088,6 +2088,187 @@ async def before_morning_briefing():
     await bot.wait_until_ready()
 
 
+# ── !runmorning — manually fire the 9 AM bundle for testing ──────────────────
+
+@bot.command(name="runmorning", aliases=["rm", "testmorning", "forcemorning"])
+async def runmorning_cmd(ctx):
+    """Manually fire all 9 AM auto-posts: brief → earnings radar → macro → screener (if Monday)."""
+    import pytz
+    global _briefing_sent_date, _screener_dates
+
+    await ctx.send("⚔️ Firing all 9 AM auto-posts now — check each channel...", delete_after=10)
+
+    s = _load_settings()
+    if not s.get("auto_briefing"):
+        await ctx.send(
+            "⚠️ Auto-briefing is **OFF** in settings. Go to /alerts and enable it first, "
+            "then run `!runmorning` again.",
+            delete_after=20,
+        )
+        return
+
+    # ── 1. Morning brief ───────────────────────────────────────────────────────
+    try:
+        channel = await _get_channel("morning-briefing", "general")
+        if not channel:
+            await ctx.send("❌ Can't find `#morning-briefing` channel.", delete_after=15)
+        else:
+            watchlist = s.get("watchlist", "").split()
+            await channel.send("⚔️ Generating morning intelligence brief...")
+
+            def _do_brief():
+                from morning_brief import generate_brief
+                return generate_brief(watchlist=watchlist)
+
+            brief = await _run_sync(_do_brief)
+            sections        = brief.get("sections", {})
+            discord_summary = brief.get("discord_summary", "")
+            snapshot        = brief.get("snapshot", {})
+            sectors         = brief.get("sector_rotation", [])
+
+            description = discord_summary
+            if not description and sections.get("macro_regime"):
+                description = sections["macro_regime"][:800]
+            if not description:
+                description = "Morning brief generated — check /brief for full details."
+
+            embed = discord.Embed(
+                title="⚔️  Conquest Intelligence Brief  —  Manual Run",
+                description=description,
+                color=COLOR_PURPLE,
+                timestamp=_ts(),
+            )
+            mkt_lines = []
+            for key, label in [("SPY","SPY"),("QQQ","QQQ"),("^VIX","VIX"),
+                                ("^TNX","10Y"),("CL=F","Oil"),("UUP","Dollar")]:
+                s_data = snapshot.get(key, {})
+                if s_data:
+                    sign = "▲" if s_data["chg"] > 0 else ("▼" if s_data["chg"] < 0 else "–")
+                    mkt_lines.append(f"{sign} **{label}** {s_data['price']} ({s_data['chg']:+.2f}%)")
+            if mkt_lines:
+                half = len(mkt_lines) // 2
+                embed.add_field(
+                    name="Market",
+                    value=("  ".join(mkt_lines[:half]) + "\n" + "  ".join(mkt_lines[half:])).strip(),
+                    inline=False,
+                )
+            if sectors:
+                top = "  ".join(f"{'▲' if d['ret5'] > 0 else '▼'} {d['name']} {d['ret5']:+.1f}%" for d in sectors[:3])
+                bot_s = "  ".join(f"▼ {d['name']} {d['ret5']:+.1f}%" for d in sectors[-3:])
+                embed.add_field(name="🟢 Leading (5d)", value=top, inline=True)
+                embed.add_field(name="🔴 Lagging (5d)", value=bot_s, inline=True)
+            if sections.get("what_to_watch"):
+                embed.add_field(name="👁 Watch Today", value=(sections["what_to_watch"].split(".")[0] + ".")[:300], inline=False)
+            embed.set_footer(text="Conquest Intelligence Desk  •  Manual run  •  Not financial advice")
+            await channel.send(embed=embed)
+            _briefing_sent_date = datetime.now(pytz.timezone("America/New_York")).date()
+            print("[Bot] !runmorning — morning brief posted")
+    except Exception as e:
+        await ctx.send(f"❌ Morning brief error: {e}", delete_after=20)
+        print(f"[Bot] !runmorning brief error: {e}")
+
+    # ── 2. Earnings radar ──────────────────────────────────────────────────────
+    try:
+        def _check_earnings():
+            from watchlist_engine import get_upcoming_earnings
+            return get_upcoming_earnings(7)
+
+        upcoming_earnings = await _run_sync(_check_earnings)
+        er_channel = await _get_channel("earnings-radar", "morning-briefing", "general")
+        if er_channel and upcoming_earnings:
+            lines = []
+            for e in upcoming_earnings:
+                d       = e["days_to"]
+                icon    = _conviction_icon(e.get("conviction", "MEDIUM"))
+                urgency = "🔴 " if d <= 2 else ("🟡 " if d <= 4 else "🟢 ")
+                label   = "TODAY" if d == 0 else ("TOMORROW" if d == 1 else f"in {d}d ({e['earnings_date']})")
+                lines.append(
+                    f"{urgency}{icon} **{e['ticker']}** — {label}\n"
+                    f"  *{e.get('thesis','')[:100]}{'...' if len(e.get('thesis','')) > 100 else ''}*"
+                )
+            er_embed = discord.Embed(
+                title=f"📅  Earnings This Week — {len(upcoming_earnings)} watchlist name(s)",
+                description="\n\n".join(lines),
+                color=COLOR_GOLD,
+                timestamp=_ts(),
+            )
+            er_embed.add_field(
+                name="Reminder",
+                value="Consider reducing size before the print. IV crush hits hard after earnings.",
+                inline=False,
+            )
+            er_embed.set_footer(text="Conquest Earnings Radar  •  Verify dates before trading")
+            await er_channel.send(embed=er_embed)
+            print(f"[Bot] !runmorning — earnings radar posted: {len(upcoming_earnings)} name(s)")
+        elif er_channel and not upcoming_earnings:
+            await er_channel.send("📅 No earnings for watchlist names in the next 7 days.")
+            print("[Bot] !runmorning — earnings radar: no upcoming earnings")
+    except Exception as e:
+        print(f"[Bot] !runmorning earnings error: {e}")
+
+    # ── 3. Macro worldview ────────────────────────────────────────────────────
+    try:
+        macro_ch = await _get_channel("macro-worldview", "general")
+        if macro_ch:
+            await _post_macro_embed(macro_ch)
+            print(f"[Bot] !runmorning — macro posted to #{macro_ch.name}")
+    except Exception as e:
+        print(f"[Bot] !runmorning macro error: {e}")
+
+    # ── 4. Weekly screener (run regardless of day when triggered manually) ────
+    try:
+        screener_ch = await _get_channel("screener", "general")
+        if screener_ch:
+            await screener_ch.send("📊 Running weekly value/growth screen across the universe...")
+
+            def _run_weekly_screen():
+                from scan_universe    import UNIVERSE, EXCLUDE_FROM_THESIS
+                from watchlist_engine import fetch_ticker_data, build_data_block
+                from conquest_brain   import watchlist_screener
+                tickers = [t for t in UNIVERSE if t not in EXCLUDE_FROM_THESIS][:40]
+                pairs = []
+                for t in tickers:
+                    try:
+                        d = fetch_ticker_data(t)
+                        b = build_data_block(d)
+                        pairs.append((t, b))
+                    except Exception:
+                        pass
+                return watchlist_screener(pairs)
+
+            screen_results = await _run_sync(_run_weekly_screen)
+            if screen_results:
+                undervalued = [r for r in screen_results if r.get("verdict") == "UNDERVALUED"]
+                lines = []
+                for r in screen_results[:15]:
+                    verdict = r.get("verdict", "?")
+                    score   = r.get("score")
+                    icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
+                    score_s = f"{score:.2f}" if score is not None else "N/A"
+                    lines.append(
+                        f"{icon} **{r['ticker']}** — score {score_s}  {verdict}\n"
+                        f"  *{r.get('reason','')[:90]}*"
+                    )
+                screen_embed = discord.Embed(
+                    title=f"📊  Weekly Value/Growth Screen — Manual Run",
+                    description="\n\n".join(lines),
+                    color=COLOR_GREEN if undervalued else COLOR_DARK,
+                    timestamp=_ts(),
+                )
+                screen_embed.add_field(
+                    name=f"🟢 Undervalued ({len(undervalued)} names)",
+                    value=", ".join(f"**{r['ticker']}**" for r in undervalued[:8]) or "None this week",
+                    inline=False,
+                )
+                screen_embed.set_footer(text="Conquest Weekly Screen  •  Manual run  •  Not financial advice")
+                await screener_ch.send(embed=screen_embed)
+                print(f"[Bot] !runmorning — screener posted: {len(screen_results)} tickers")
+    except Exception as e:
+        print(f"[Bot] !runmorning screener error: {e}")
+
+    await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#screener`.", delete_after=30)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
