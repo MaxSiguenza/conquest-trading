@@ -155,9 +155,10 @@ async def help_cmd(ctx):
         "`!briefing` — morning briefing with FRED macro data\n"
         "`!macro` — quick Fed macro snapshot"
     ), inline=False)
-    embed.add_field(name="⚙️  Settings", value=(
+    embed.add_field(name="⚙️  Settings & Diagnostics", value=(
         "Go to the **Alerts** page to set your watchlist and\n"
-        "toggle the 9 AM auto-briefing on/off."
+        "toggle the 9 AM auto-briefing on/off.\n"
+        "`!testchannels` — fire a test message to every channel to verify routing"
     ), inline=False)
     embed.set_footer(text="Conquest Trading  •  Not financial advice  •  Always DYOR")
     await ctx.send(embed=embed)
@@ -804,6 +805,70 @@ async def generate_cmd(ctx):
     )
     embed.set_footer(text="Conquest Trading  •  Black-Scholes simulation  •  Not financial advice")
     await ctx.send(embed=embed)
+
+
+# ── !testchannels ─────────────────────────────────────────────────────────────
+
+@bot.command(name="testchannels", aliases=["tc", "techchannels"])
+async def testchannels_cmd(ctx):
+    """Fire a test message to every dedicated channel to verify routing."""
+
+    CHANNEL_MAP = [
+        ("morning-briefing", "🗞",  "Morning Intelligence Brief",  "Auto-posts the daily macro brief at 9:00 AM ET."),
+        ("trade-alerts",     "🧪",  "Trade Alerts",                "New paper trades post here at 9:35 AM ET."),
+        ("trade-log",        "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
+        ("evening-debrief",  "📊",  "Evening Debrief",             "Full EOD wrap with today's closed trades at 4:05 PM ET."),
+        ("daily-pnl",        "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
+        ("watchlist",        "📡",  "Watchlist Signals",           "Use !scan to post scan results here."),
+        ("macro-worldview",  "🌍",  "Macro Worldview",             "Use !macro to post the macro snapshot here."),
+        ("live-positions",   "📈",  "Live Positions",              "Use !trades to see live paper positions."),
+        ("status-dashboard", "🏆",  "Status Dashboard",            "Use !stats to post performance summary here."),
+    ]
+
+    status_lines = []
+    found_count  = 0
+
+    for channel_name, icon, label, description in CHANNEL_MAP:
+        ch = await _get_channel(channel_name)
+
+        if ch:
+            found_count += 1
+            status_lines.append(f"✅  **#{channel_name}** — found")
+            try:
+                test_embed = discord.Embed(
+                    title=f"{icon}  Channel Test — {label}",
+                    description=(
+                        f"{description}\n\n"
+                        f"✅ **Routing confirmed.** This channel is correctly wired to Conquest Bot."
+                    ),
+                    color=COLOR_GREEN,
+                    timestamp=_ts(),
+                )
+                test_embed.set_footer(text="Conquest Trading  •  Channel routing test  •  !testchannels")
+                await ch.send(embed=test_embed)
+            except discord.Forbidden:
+                status_lines[-1] = f"⚠️  **#{channel_name}** — found but **no permission to post**"
+        else:
+            status_lines.append(f"❌  **#{channel_name}** — not found (create this channel)")
+
+    # Summary back to whoever ran the command
+    color   = COLOR_GREEN if found_count == len(CHANNEL_MAP) else (COLOR_ORANGE if found_count > 0 else COLOR_RED)
+    summary = discord.Embed(
+        title=f"⚔️  Channel Routing Test — {found_count}/{len(CHANNEL_MAP)} found",
+        description="\n".join(status_lines),
+        color=color,
+        timestamp=_ts(),
+    )
+    summary.add_field(
+        name="What to do if a channel shows ❌",
+        value=(
+            "Create that channel in your Discord server with the exact name shown.\n"
+            "The bot finds channels by name automatically — no IDs or webhooks needed."
+        ),
+        inline=False,
+    )
+    summary.set_footer(text="Conquest Trading  •  Check each channel for a test message")
+    await ctx.send(embed=summary)
 
 
 # ── Auto morning briefing — 9:00 AM ET, Mon–Fri ───────────────────────────────
