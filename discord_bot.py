@@ -502,22 +502,20 @@ async def briefing_cmd(ctx):
     await ctx.send(embed=embed)
 
 
-# ── !macro ────────────────────────────────────────────────────────────────────
+# ── Macro helper (shared by !macro command and auto morning task) ─────────────
 
-@bot.command(name="macro", aliases=["m", "fed"])
-async def macro_cmd(ctx):
-    thinking = await ctx.send("⏳ Fetching FRED macro data...")
-
-    def _do_macro():
+async def _post_macro_embed(channel):
+    """Fetch FRED macro data and post the macro snapshot embed to `channel`."""
+    def _do():
         from macro.fred_data import fetch_fred_macro
         from macro.fetcher   import fetch_macro_data, macro_health_score, sector_rotation_phase
-        fred              = fetch_fred_macro()
-        mkt               = fetch_macro_data()
-        score, max_score  = macro_health_score(mkt)
-        phase, desc, secs = sector_rotation_phase(mkt)
+        fred             = fetch_fred_macro()
+        mkt              = fetch_macro_data()
+        score, max_score = macro_health_score(mkt)
+        phase, desc, secs= sector_rotation_phase(mkt)
         return fred, score, max_score, phase, desc, secs
 
-    fred, score, max_score, phase, desc, secs = await _run_sync(_do_macro)
+    fred, score, max_score, phase, desc, secs = await _run_sync(_do)
 
     bar   = "█" * score + "░" * (max_score - score)
     grade = "FAVORABLE" if score >= 4 else ("NEUTRAL" if score >= 2 else "CAUTION")
@@ -562,8 +560,16 @@ async def macro_cmd(ctx):
         inline=False,
     )
     embed.set_footer(text="Conquest Trading  •  Data: Federal Reserve FRED  •  Not financial advice")
+    await channel.send(embed=embed)
+
+
+# ── !macro ────────────────────────────────────────────────────────────────────
+
+@bot.command(name="macro", aliases=["m", "fed"])
+async def macro_cmd(ctx):
+    thinking = await ctx.send("⏳ Fetching FRED macro data...")
     await thinking.delete()
-    await ctx.send(embed=embed)
+    await _post_macro_embed(ctx.channel)
 
 
 # ── !stats ────────────────────────────────────────────────────────────────────
@@ -1211,10 +1217,10 @@ async def testchannels_cmd(ctx):
         ("trade-log",        "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
         ("evening-debrief",  "📊",  "Evening Debrief",             "Claude-narrated EOD wrap with paper trading summary at 4:05 PM ET."),
         ("daily-pnl",        "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
-        ("watchlist",        "👁",  "Watchlist",                   "New !watch and !deepdive analysis cards post here."),
-        ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning."),
-        ("macro-worldview",  "🌍",  "Macro Worldview",             "Use !macro to post the macro snapshot here."),
-        ("live-positions",   "📈",  "Live Positions",              "Use !trades to see live paper positions."),
+        ("watchlist",        "👁",  "Watchlist",                   "Auto-scan results post here at market open (9:30 AM). !watch and !deepdive cards also post here."),
+        ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
+        ("macro-worldview",  "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
+        ("live-positions",   "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
         ("status-dashboard", "🏆",  "Status Dashboard",            "Use !stats to post performance summary here."),
     ]
 
@@ -1271,6 +1277,8 @@ _briefing_sent_date    = None   # date of last auto morning briefing
 _paper_generated_dates = set()  # dates paper trades were already generated
 _paper_notified_ids    = set()  # closed trade IDs already posted to Discord
 _paper_eod_dates       = set()  # dates EOD summary already posted
+_auto_scan_dates       = set()  # dates market-open watchlist scan was auto-posted
+_positions_posted      = set()  # (date, label) tuples — "noon" and "preclose" positions updates
 
 
 async def _get_channel(primary: str, *fallbacks: str):
@@ -1318,7 +1326,8 @@ async def _get_alert_channel():
 
 @tasks.loop(minutes=15)
 async def paper_trading_loop():
-    global _paper_generated_dates, _paper_notified_ids, _paper_eod_dates
+    global _paper_generated_dates, _paper_notified_ids, _paper_eod_dates, \
+           _auto_scan_dates, _positions_posted
 
     try:
         import pytz
@@ -1341,6 +1350,129 @@ async def paper_trading_loop():
         ch_log      = await _get_channel("trade-log",       "trade-alerts", "general")
         ch_eod      = await _get_channel("evening-debrief", "daily-pnl",    "general")
         ch_pnl      = await _get_channel("daily-pnl",       "evening-debrief", "general")
+        ch_watchlist= await _get_channel("watchlist",        "general")
+        ch_positions= await _get_channel("live-positions",   "general")
+
+        # ── 0a. Auto-scan at market open (9:30–10:15 AM, once per day) ─────────
+        open_window = (h == 9 and m >= 30) or (h == 10 and m <= 15)
+        if open_window and today not in _auto_scan_dates:
+            _auto_scan_dates.add(today)
+            s_cfg = _load_settings()
+            wl_tickers = s_cfg.get("watchlist", "").split()
+            if wl_tickers and ch_watchlist:
+                try:
+                    def _do_open_scan():
+                        from alerts.scanner import scan_watchlist
+                        return scan_watchlist(wl_tickers)
+
+                    scan_res  = await _run_sync(_do_open_scan)
+                    entries   = [r for r in scan_res if r.get("entry_signal")  and not r.get("error")]
+                    crosses   = [r for r in scan_res if r.get("macd_cross_up") and not r.get("entry_signal") and not r.get("error")]
+
+                    if entries or crosses:
+                        color = COLOR_GREEN if entries else COLOR_ORANGE
+                        title = (f"✦  {len(entries)} Entry Signal(s) at Open"
+                                 if entries else
+                                 f"↑  {len(crosses)} MACD Cross(es) at Open")
+                        lines = []
+                        for r in entries + crosses:
+                            sig = "✦ **ENTRY**" if r.get("entry_signal") else "↑ MACD"
+                            sqz = " 🔥SQZ" if r.get("sqz_fired") else (" ⚡SQZ" if r.get("sqz_on") else "")
+                            chg = r.get("today_chg_pct", 0)
+                            lines.append(
+                                f"**{r['ticker']}** `${r['price']:.2f}` {chg:+.1f}%  "
+                                f"MTF {r['mtf_score']}/3  RSI {r['rsi']:.0f}  ADX {r['adx']:.0f}  {sig}{sqz}"
+                            )
+                        embed = discord.Embed(
+                            title=title,
+                            description="\n".join(lines),
+                            color=color,
+                            timestamp=_ts(),
+                        )
+                        embed.set_footer(
+                            text=f"Market Open Scan  •  {len(wl_tickers)} tickers  •  Conquest Trading"
+                        )
+                        await ch_watchlist.send(embed=embed)
+                    else:
+                        # Quiet open — post a brief "no signals" note so you know it ran
+                        await ch_watchlist.send(
+                            embed=discord.Embed(
+                                title="✓  Market Open Scan — No Fresh Signals",
+                                description=(
+                                    f"Scanned {len(wl_tickers)} tickers at open. "
+                                    "No entry signals or MACD crosses today. Wait for the setup."
+                                ),
+                                color=COLOR_DARK,
+                                timestamp=_ts(),
+                            )
+                        )
+                    print(f"[PaperLoop] Open scan done: {len(entries)} entries, {len(crosses)} MACD crosses")
+                except Exception as e_scan:
+                    print(f"[PaperLoop] Open scan error: {e_scan}")
+
+        # ── 0b. Positions update — noon (12:00) and pre-close (3:30 PM) ────────
+        for label, h_check, m_min, m_max in [
+            ("noon",     12, 0,  14),
+            ("preclose", 15, 30, 44),
+        ]:
+            pos_key = (today, label)
+            if h == h_check and m_min <= m <= m_max and pos_key not in _positions_posted:
+                _positions_posted.add(pos_key)
+                if ch_positions:
+                    try:
+                        def _get_pos():
+                            from paper_trader import load_trades, get_paper_stats
+                            import yfinance as yf
+                            open_t = [t for t in load_trades() if t.get("status") == "open"]
+                            stats  = get_paper_stats()
+                            total_cost = sum(abs(t.get("cost_basis", 0)) for t in open_t)
+                            total_pnl  = sum(t.get("pnl", 0) for t in open_t)
+                            return open_t, stats, total_cost, total_pnl
+
+                        open_trades, stats, total_cost, total_pnl = await _run_sync(_get_pos)
+
+                        if open_trades:
+                            pct   = (total_pnl / total_cost * 100) if total_cost else 0
+                            color = COLOR_GREEN if total_pnl >= 0 else COLOR_RED
+                            label_display = "Midday" if label == "noon" else "Pre-Close"
+
+                            lines = []
+                            for t in sorted(open_trades, key=lambda x: x.get("pnl", 0), reverse=True):
+                                pnl  = t.get("pnl", 0)
+                                ppct = t.get("pnl_pct", 0) * 100
+                                dot  = "🟢" if pnl >= 0 else "🔴"
+                                tt   = t["trade_type"].replace("_", " ").title()
+                                lines.append(
+                                    f"{dot} **{t['ticker']}** ({tt}) | "
+                                    f"{ppct:+.1f}% | day {t.get('days_held', 0)}"
+                                )
+
+                            pos_embed = discord.Embed(
+                                title=(
+                                    f"📈  {label_display} Positions  —  "
+                                    f"${total_pnl:+.2f} ({pct:+.1f}%)"
+                                ),
+                                description="\n".join(lines),
+                                color=color,
+                                timestamp=_ts(),
+                            )
+                            pos_embed.add_field(
+                                name="Summary",
+                                value=(
+                                    f"**{len(open_trades)}** open  •  "
+                                    f"Cost basis ${total_cost:,.0f}  •  "
+                                    f"All-time P&L **${stats.get('total_pnl', 0):+.2f}**  •  "
+                                    f"Win rate {stats.get('win_rate', 0)*100:.1f}%"
+                                ),
+                                inline=False,
+                            )
+                            pos_embed.set_footer(
+                                text=f"Conquest Trading  •  {label_display} Update  •  Paper simulation"
+                            )
+                            await ch_positions.send(embed=pos_embed)
+                            print(f"[PaperLoop] {label_display} positions posted ({len(open_trades)} open)")
+                    except Exception as e_pos:
+                        print(f"[PaperLoop] Positions update error ({label}): {e_pos}")
 
         # ── 1. Generate today's trades (9:35–10:00 AM window) ─────────────────
         if today not in _paper_generated_dates and (h == 9 and m >= 35 or h >= 10):
@@ -1688,6 +1820,15 @@ async def morning_briefing_task():
                     print(f"[Bot] Earnings radar posted: {len(upcoming_earnings)} name(s)")
         except Exception as e_er:
             print(f"[Bot] Earnings radar error: {e_er}")
+
+        # ── Macro worldview — post FRED snapshot to #macro-worldview ──────────
+        try:
+            macro_ch = await _get_channel("macro-worldview", "general")
+            if macro_ch:
+                await _post_macro_embed(macro_ch)
+                print(f"[Bot] Macro snapshot posted to #{macro_ch.name}")
+        except Exception as e_mac:
+            print(f"[Bot] Auto-macro error: {e_mac}")
 
     except Exception as e:
         print(f"[Bot] Auto-briefing task error: {e}")
