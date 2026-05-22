@@ -1429,27 +1429,51 @@ async def paper_trading_loop():
                         MIN_MTF_SCORE, REQUIRE_ENTRY, MAX_ADDS_PER_DAY
 
                     def _scan_universe():
-                        from alerts.scanner  import scan_watchlist
+                        from alerts.scanner   import scan_watchlist
                         from watchlist_engine import get_entry
+                        from scan_universe    import (
+                            STOCK_MIN_PRICE, STOCK_MIN_ADX,
+                            STOCK_MIN_MTF_SCORE, REQUIRE_ENTRY_SIGNAL,
+                        )
                         results = scan_watchlist(UNIVERSE)
-                        # Filter: real entry signals (or MACD if REQUIRE_ENTRY=False),
-                        # minimum MTF score, not already on watchlist, not an ETF
                         candidates = []
                         for r in results:
                             if r.get("error"):
                                 continue
                             ticker = r.get("ticker", "")
+
+                            # Skip ETFs / non-thesis tickers
                             if ticker in EXCLUDE_FROM_THESIS:
                                 continue
-                            if get_entry(ticker):          # already on watchlist
+
+                            # Skip if already on watchlist
+                            if get_entry(ticker):
                                 continue
+
+                            # ── Stock-quality filters ──────────────────────
+                            # Price floor — no sub-$15 stocks
+                            if r.get("price", 0) < STOCK_MIN_PRICE:
+                                continue
+
+                            # Trend strength — ADX must confirm a real trend
+                            if r.get("adx", 0) < STOCK_MIN_ADX:
+                                continue
+
+                            # Signal quality
                             has_signal = (
-                                r.get("entry_signal") if REQUIRE_ENTRY
+                                r.get("entry_signal") if REQUIRE_ENTRY_SIGNAL
                                 else (r.get("entry_signal") or r.get("macd_cross_up"))
                             )
-                            if has_signal and r.get("mtf_score", 0) >= MIN_MTF_SCORE:
-                                candidates.append(r)
-                        # Sort by MTF score desc, then RSI closest to 50–60
+                            if not has_signal:
+                                continue
+
+                            # MTF score
+                            if r.get("mtf_score", 0) < STOCK_MIN_MTF_SCORE:
+                                continue
+
+                            candidates.append(r)
+
+                        # Best setups first: highest MTF, then RSI closest to 55
                         candidates.sort(
                             key=lambda x: (
                                 -x.get("mtf_score", 0),

@@ -408,13 +408,19 @@ def watchlist_thesis(ticker: str, data_block: str) -> dict:
     Prompts 1 + 2 + 3 combined.
     Returns a dict with thesis, narrative_hook, fundamentals,
     price targets, conviction, waiting_for, entry_zone, hard_stop.
+
+    All analysis is framed for STOCK BUYING (long equity) — not options.
     """
     import json as _json
 
     prompt = f"""{data_block}
 
 ---
-Using the data above, generate a watchlist entry for {ticker}. Apply three analytical lenses:
+Using the data above, generate a watchlist entry for {ticker}. Apply three analytical lenses.
+
+IMPORTANT: This analysis is for BUYING SHARES (long equity position) ONLY.
+Do NOT mention options, calls, puts, spreads, or any derivatives.
+All trade parameters (entry, stop, targets) are for purchasing stock directly.
 
 LENS 1 — NARRATIVE (what is driving the stock):
 Cover the dominant narrative (social media, retail sentiment), the actual catalyst
@@ -427,22 +433,23 @@ Is the stock trading above, at, or below its fundamental fair value?
 Show the math using the valuation data. Compare forward P/E and P/Sales to sector averages.
 Comment on balance sheet health and any dilution risk. One paragraph max.
 
-LENS 3 — SCENARIOS (where it can go):
-Build a price target framework. Show the math (multiple × EPS or revenue).
-Name the specific entry zone, trim levels, and hard stop where the thesis breaks.
+LENS 3 — STOCK TRADE SETUP (where to buy, where to stop, where to sell):
+Build a price target framework for buying shares. Show the math (multiple × EPS or revenue).
+Name the specific buy zone, trim/sell levels, and the hard stop price where the thesis breaks.
+All prices are stock prices, not option strikes.
 
 Output ONLY this JSON — no preamble, no markdown:
 {{
-  "thesis": "2-3 sentences combining narrative and fundamental view. Direct and specific.",
+  "thesis": "2-3 sentences combining narrative and fundamental view. Direct and specific. No options language.",
   "narrative_hook": "The stock is moving because X, but Y is the part nobody is talking about.",
   "fundamentals": "One paragraph. Fair value assessment with math. Above/at/below?",
-  "bear_target": "$XX — if catalyst disappoints (3-6 months)",
-  "base_target": "$XX — execution holds (6-12 months)",
-  "bull_target": "$XX — everything works (12-18 months)",
-  "entry_zone": "$XX–$XX",
-  "hard_stop": "$XX — one sentence describing the thesis break condition",
+  "bear_target": "$XX — stock price if catalyst disappoints (3-6 months)",
+  "base_target": "$XX — stock price if execution holds (6-12 months)",
+  "bull_target": "$XX — stock price if everything works (12-18 months)",
+  "entry_zone": "$XX–$XX (buy shares in this range)",
+  "hard_stop": "$XX — close position if stock closes below this price",
   "conviction": "HIGH or MEDIUM or LOW",
-  "waiting_for": "One specific, concrete condition that must be true before entering"
+  "waiting_for": "One specific, concrete condition before buying shares"
 }}"""
 
     try:
@@ -476,22 +483,23 @@ def watchlist_risks(ticker: str, data_block: str) -> dict:
     prompt = f"""{data_block}
 
 ---
-Act as a skeptic. Write a bear case for {ticker}.
+Act as a skeptic evaluating {ticker} as a stock to BUY AND HOLD.
+This is for long equity only — not options trading.
 
-3-point risk assessment — be specific to the data above:
-1. Accounting irregularities or revenue quality concerns (check margins, cash vs reported earnings)
-2. Customer concentration risk (over-reliance on single customers/contracts)
-3. Competitive threats and moat erosion (who is eating their lunch and how fast)
-
-Reference actual numbers from the data where they reveal risk.
+3-point risk assessment for a stock buyer — be specific to the data above:
+1. Downside risk: what could cause the stock price to fall significantly from here?
+   Reference valuation metrics and any overextension in the data.
+2. Business risk: revenue quality, customer concentration, or balance sheet concerns
+   that could impair earnings — use actual numbers.
+3. Competitive threats: who is taking market share and how fast — name the competitors.
 
 Output ONLY this JSON:
 {{
-  "risks": "2-3 sentence overall bear thesis. Hard-hitting and specific.",
+  "risks": "2-3 sentence overall bear thesis for a stock buyer. What could go wrong with buying shares here?",
   "risk_flags": [
-    "Specific flag 1 with numbers",
-    "Specific flag 2 with numbers",
-    "Specific flag 3 with numbers"
+    "Specific downside risk with numbers",
+    "Specific business/revenue risk with numbers",
+    "Specific competitive threat with names"
   ]
 }}"""
 
