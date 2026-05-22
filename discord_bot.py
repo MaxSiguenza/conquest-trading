@@ -144,7 +144,8 @@ async def help_cmd(ctx):
     embed.add_field(name="🧪  Paper Trading Stats", value=(
         "`!stats` — win rate, P&L, Sharpe, by-type breakdown\n"
         "`!trades` — today's 10 auto-generated paper trades\n"
-        "`!generate` — manually trigger today's 10 trades"
+        "`!generate` — manually trigger today's 10 trades\n"
+        "`!agents` — view multi-agent brain weights & learning progress"
     ), inline=False)
     embed.add_field(name="👁  Watchlist & Research", value=(
         "`!watch TICKER` — add to watchlist with thesis, conviction, price targets\n"
@@ -819,6 +820,81 @@ async def generate_cmd(ctx):
         inline=False,
     )
     embed.set_footer(text="Conquest Trading  •  Black-Scholes simulation  •  Not financial advice")
+    await ctx.send(embed=embed)
+
+
+# ── !agents ───────────────────────────────────────────────────────────────────
+
+@bot.command(name="agents", aliases=["agentweights", "brains", "swarm"])
+async def agents_cmd(ctx):
+    """Show the multi-agent trading brain: current weights, vote counts, learning state."""
+    thinking = await ctx.send("⚡ Loading agent system status…")
+
+    def _get():
+        from conquest_agents import get_agent_system
+        return get_agent_system().get_status()
+
+    status = await _run_sync(_get)
+    await thinking.delete()
+
+    if status.get("error"):
+        await ctx.send(f"⚠ Agent system error: {status['error']}")
+        return
+
+    weights      = status.get("weights", {})
+    per_agent    = status.get("per_agent", {})
+    total_logged = status.get("total_logged", 0)
+
+    AGENT_ICONS = {
+        "market_scanner": "📡",
+        "valuation":       "💰",
+        "technicals":      "📈",
+        "catalysts":       "⚡",
+        "risk":            "🛡️",
+        "options_flow":    "🌊",
+    }
+
+    lines = []
+    for name, data in per_agent.items():
+        w     = data.get("weight", 1.0)
+        votes = data.get("votes", 0)
+        icon  = AGENT_ICONS.get(name, "•")
+        # Visual weight bar (range 0.4–2.2 mapped to 10 blocks)
+        filled = int(max(0, min(10, (w - 0.40) / (2.20 - 0.40) * 10)))
+        bar    = "█" * filled + "░" * (10 - filled)
+        trend  = "▲" if w > 1.05 else ("▼" if w < 0.95 else "–")
+        lines.append(
+            f"{icon} **{name.replace('_', ' ').title()}**\n"
+            f"  `{bar}` **{w:.2f}**  {trend}  ·  {votes} votes logged"
+        )
+
+    embed = discord.Embed(
+        title="⚡  Conquest Multi-Agent Brain",
+        description=(
+            f"**6 specialist agents** run in parallel on every ticker.\n"
+            f"Weights shift after each trade closes — correct agents earn trust, wrong ones lose it.\n"
+            f"**{total_logged}** trades in memory."
+        ),
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+    embed.add_field(
+        name="Agent Weights  (default 1.0  ·  range 0.4 – 2.2)",
+        value="\n".join(lines) or "No data yet — generate trades to start learning.",
+        inline=False,
+    )
+    embed.add_field(
+        name="How It Works",
+        value=(
+            "• Needs **4 of 6** agents agreeing + weighted confidence ≥ 0.62 to trade\n"
+            "• 🛡️ Risk agent can **veto** any trade if confidence < 0.30\n"
+            "• Win → correct agents gain **+0.08** weight\n"
+            "• Loss → incorrect agents lose **−0.08** weight\n"
+            "• Over time: agents that read the market correctly dominate the vote"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Conquest Multi-Agent System  •  Ruflo-inspired architecture  •  Learning in real-time")
     await ctx.send(embed=embed)
 
 
@@ -1688,9 +1764,24 @@ async def paper_trading_loop():
                     f"{tt.replace('_',' ')} ×{cnt}"
                     for tt, cnt in sorted(type_counts.items())
                 )
+                # Check if agent system was used (agent-generated trades have agent_consensus)
+                agent_count = sum(1 for t in new_trades if t.get("agent_consensus"))
+                if agent_count > 0:
+                    avg_conf = sum(
+                        t.get("agent_confidence", 0) for t in new_trades
+                        if t.get("agent_consensus")
+                    ) / agent_count
+                    source_line = (
+                        f"🤖 **6-Agent Swarm**: {agent_count} AI-selected trades  "
+                        f"(avg confidence {avg_conf:.0%})\n"
+                    )
+                else:
+                    source_line = "📡 Signal-based generation\n"
+
                 embed = discord.Embed(
                     title=f"🧪  Paper Trades Generated  —  {today.strftime('%b %d')}",
                     description=(
+                        f"{source_line}"
                         f"**{len(new_trades)} trades** placed across the universe.\n"
                         f"{breakdown}"
                     ),
@@ -1751,13 +1842,26 @@ async def paper_trading_loop():
                             value=f"Entry: **${price:.2f}**  |  Shares: {t.get('shares','?')}",
                             inline=True,
                         )
-                    trade_embed.add_field(
-                        name="Signals",
-                        value=(
+                    # Signals field — show agent consensus if available
+                    if t.get("agent_consensus"):
+                        votes_str = "  ".join(
+                            f"{k}: {v}" for k, v in
+                            list(t.get("agent_votes", {}).items())[:3]
+                        )
+                        signals_text = (
+                            f"🤖 {t['agent_consensus']}  {t.get('agent_confidence',0):.0%}  "
+                            f"({t.get('agent_count',0)}/6 agree)\n"
+                            f"{votes_str}"
+                        )
+                    else:
+                        signals_text = (
                             f"MTF {t.get('mtf_score','?')}/3  ·  "
                             f"RSI {t.get('rsi_entry','?')}  ·  "
                             f"ADX {t.get('adx_entry', t.get('adx','?'))}"
-                        ),
+                        )
+                    trade_embed.add_field(
+                        name="Signals",
+                        value=signals_text,
                         inline=True,
                     )
                     trade_embed.set_footer(text="Conquest Paper Trading  •  Simulation only")

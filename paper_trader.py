@@ -466,13 +466,13 @@ def _should_close(t: dict) -> Optional[str]:
 
 def generate_daily_trades(n: int = 10) -> list:
     """
-    Scan PAPER_UNIVERSE, build exactly n paper trades, save to log.
+    Generate n paper trades using the ConquestAgentSystem (6 parallel AI agents).
+    Falls back to signal-based generation for any slots the agent system can't fill.
     Safe to call multiple times — skips if today's batch already exists.
     Returns list of new trades added (empty if already ran today).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     sys.path.insert(0, APP_DIR)
-    from alerts.scanner import scan_ticker
 
     today_str = datetime.now(ET).strftime("%Y-%m-%d")
     all_trades = load_trades()
@@ -484,69 +484,87 @@ def generate_daily_trades(n: int = 10) -> list:
         print(f"[PaperTrader] Already have {len(already_today)} trades for {today_str}.")
         return []
 
-    print(f"[PaperTrader] Scanning {len(PAPER_UNIVERSE)} tickers …")
-    scans = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futs = {pool.submit(scan_ticker, t): t for t in PAPER_UNIVERSE}
-        for fut in as_completed(futs):
-            r = fut.result()
-            if not r.get("error") and (r.get("price") or 0) > 0:
-                scans.append(r)
-
-    # Sort: squeeze fires first, then entry signals, then MTF score
-    scans.sort(key=lambda s: (
-        -int(s.get("sqz_fired",     False)),
-        -int(s.get("entry_signal",  False)),
-        -s.get("mtf_score", 0),
-    ))
-
     used_tickers = {t["ticker"] for t in already_today}
     ts           = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
     new_trades   = []
     type_counts  = {tt: 0 for tt in _TYPE_WEIGHTS}
 
-    # ── First pass: top-signal tickers ────────────────────────────────────────
-    for scan in scans:
-        if len(new_trades) >= n:
-            break
-        if scan["ticker"] in used_tickers:
-            continue
+    # ── Primary path: ConquestAgentSystem (6-agent swarm) ─────────────────────
+    try:
+        from conquest_agents import get_agent_system
+        print(f"[PaperTrader] Launching 6-agent swarm across {len(PAPER_UNIVERSE)} tickers …")
+        agent_trades = get_agent_system().generate_trades(
+            PAPER_UNIVERSE, n=n, existing_tickers=used_tickers
+        )
+        new_trades   = agent_trades
+        for t in new_trades:
+            type_counts[t["trade_type"]] = type_counts.get(t["trade_type"], 0) + 1
+            used_tickers.add(t["ticker"])
+        print(f"[PaperTrader] Agent system produced {len(new_trades)} high-conviction trades.")
+    except Exception as e:
+        print(f"[PaperTrader] Agent system unavailable ({e}), using signal scanner.")
+        new_trades = []
 
-        trade_type = _assign_trade_type(scan)
-
-        # Cap each type at 3 so we get variety
-        if type_counts.get(trade_type, 0) >= 3:
-            pool_candidates = [
-                tt for tt in _TYPE_WEIGHTS
-                if type_counts.get(tt, 0) < 3
-            ]
-            if not pool_candidates:
-                break
-            # Pick least-used type
-            trade_type = min(pool_candidates, key=lambda tt: type_counts.get(tt, 0))
-
-        trade = _build_trade(scan, trade_type, ts)
-        if trade:
-            trade["adx_entry"] = round(scan.get("adx", 0), 1)
-            new_trades.append(trade)
-            type_counts[trade_type] = type_counts.get(trade_type, 0) + 1
-            used_tickers.add(scan["ticker"])
-
-    # ── Second pass: fill remaining slots with iron condors on leftover tickers
+    # ── Fallback / fill: signal-based for any remaining slots ─────────────────
     if len(new_trades) < n:
-        remaining = [s for s in scans if s["ticker"] not in used_tickers]
-        fallback_types = ["iron_condor", "call_spread", "put_spread",
-                          "long_call", "long_put", "stock_long"]
-        fi = 0
-        for scan in remaining:
+        remaining_needed = n - len(new_trades)
+        print(f"[PaperTrader] Filling {remaining_needed} slot(s) via signal scanner …")
+        from alerts.scanner import scan_ticker
+
+        scans = []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(scan_ticker, t): t
+                    for t in PAPER_UNIVERSE if t not in used_tickers}
+            for fut in as_completed(futs):
+                r = fut.result()
+                if not r.get("error") and (r.get("price") or 0) > 0:
+                    scans.append(r)
+
+        scans.sort(key=lambda s: (
+            -int(s.get("sqz_fired",    False)),
+            -int(s.get("entry_signal", False)),
+            -s.get("mtf_score", 0),
+        ))
+
+        # First pass: top-signal tickers
+        for scan in scans:
             if len(new_trades) >= n:
                 break
-            tt    = fallback_types[fi % len(fallback_types)]
-            fi   += 1
-            trade = _build_trade(scan, tt, ts)
+            if scan["ticker"] in used_tickers:
+                continue
+
+            trade_type = _assign_trade_type(scan)
+
+            if type_counts.get(trade_type, 0) >= 3:
+                pool_candidates = [tt for tt in _TYPE_WEIGHTS
+                                   if type_counts.get(tt, 0) < 3]
+                if not pool_candidates:
+                    break
+                trade_type = min(pool_candidates,
+                                 key=lambda tt: type_counts.get(tt, 0))
+
+            trade = _build_trade(scan, trade_type, ts)
             if trade:
+                trade["adx_entry"] = round(scan.get("adx", 0), 1)
                 new_trades.append(trade)
+                type_counts[trade_type] = type_counts.get(trade_type, 0) + 1
                 used_tickers.add(scan["ticker"])
+
+        # Second pass: iron condors on leftovers
+        if len(new_trades) < n:
+            remaining = [s for s in scans if s["ticker"] not in used_tickers]
+            fallback_types = ["iron_condor", "call_spread", "put_spread",
+                              "long_call", "long_put", "stock_long"]
+            fi = 0
+            for scan in remaining:
+                if len(new_trades) >= n:
+                    break
+                tt    = fallback_types[fi % len(fallback_types)]
+                fi   += 1
+                trade = _build_trade(scan, tt, ts)
+                if trade:
+                    new_trades.append(trade)
+                    used_tickers.add(scan["ticker"])
 
     # ── Generate entry reasoning for every new trade ──────────────────────────
     if new_trades:
@@ -634,6 +652,12 @@ def run_daily_close() -> dict:
                 )
             except Exception:
                 trades[i]["close_reasoning"] = "Reasoning unavailable."
+            # Update agent weights so the swarm learns from this outcome
+            try:
+                from conquest_agents import get_agent_system
+                get_agent_system().update_weights_from_trade(trades[i])
+            except Exception as _aw_err:
+                pass   # weight learning is best-effort
             closed_count += 1
 
     save_trades(trades)
