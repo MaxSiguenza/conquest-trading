@@ -489,12 +489,20 @@ def generate_daily_trades(n: int = 10) -> list:
     new_trades   = []
     type_counts  = {tt: 0 for tt in _TYPE_WEIGHTS}
 
+    # ── Pre-screen: expand from 20 to 120-ticker universe, pick top 40 ──────────
+    try:
+        from universe_screener import pre_screen
+        scan_universe = pre_screen(n=40)
+    except Exception as _ps_err:
+        print(f"[PaperTrader] Pre-screener unavailable ({_ps_err}), using base universe.")
+        scan_universe = PAPER_UNIVERSE
+
     # ── Primary path: ConquestAgentSystem (6-agent swarm) ─────────────────────
     try:
         from conquest_agents import get_agent_system
-        print(f"[PaperTrader] Launching 6-agent swarm across {len(PAPER_UNIVERSE)} tickers …")
+        print(f"[PaperTrader] Launching 6-agent swarm across {len(scan_universe)} candidates …")
         agent_trades = get_agent_system().generate_trades(
-            PAPER_UNIVERSE, n=n, existing_tickers=used_tickers
+            scan_universe, n=n, existing_tickers=used_tickers
         )
         new_trades   = agent_trades
         for t in new_trades:
@@ -514,7 +522,7 @@ def generate_daily_trades(n: int = 10) -> list:
         scans = []
         with ThreadPoolExecutor(max_workers=8) as pool:
             futs = {pool.submit(scan_ticker, t): t
-                    for t in PAPER_UNIVERSE if t not in used_tickers}
+                    for t in scan_universe if t not in used_tickers}
             for fut in as_completed(futs):
                 r = fut.result()
                 if not r.get("error") and (r.get("price") or 0) > 0:

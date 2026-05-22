@@ -606,11 +606,70 @@ class ConquestAgentSystem:
 
     # ── Trade generation ──────────────────────────────────────────────────────
 
+    # ── Correlation helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _price_returns(ticker: str, days: int = 30) -> list:
+        """30-day daily returns for pairwise correlation checks."""
+        try:
+            import yfinance as yf
+            hist = yf.download(ticker, period=f"{days}d", interval="1d",
+                               auto_adjust=True, progress=False)
+            if len(hist) < 10:
+                return []
+            return list(hist["Close"].pct_change().dropna())
+        except Exception:
+            return []
+
+    @staticmethod
+    def _pearson(a: list, b: list) -> float:
+        """Pearson correlation between two return series."""
+        try:
+            import numpy as np
+            n = min(len(a), len(b))
+            if n < 10:
+                return 0.0
+            va = np.array(a[-n:])
+            vb = np.array(b[-n:])
+            if va.std() < 1e-10 or vb.std() < 1e-10:
+                return 0.0
+            return float(np.corrcoef(va, vb)[0, 1])
+        except Exception:
+            return 0.0
+
+    def _too_correlated(self, ticker: str, selected_returns: dict,
+                        threshold: float = 0.78) -> bool:
+        """
+        True if `ticker` has correlation > threshold with ANY already-selected trade.
+        Fetches returns lazily (cached in selected_returns dict).
+        threshold=0.78 means "very similar price action" — lower = stricter.
+        """
+        new_ret = self._price_returns(ticker)
+        if not new_ret:
+            return False   # can't check → allow it
+        for sel_ticker, sel_ret in selected_returns.items():
+            if not sel_ret:
+                continue
+            corr = self._pearson(new_ret, sel_ret)
+            if corr > threshold:
+                print(f"[AgentSystem] ⚠ {ticker} corr={corr:.2f} with {sel_ticker} "
+                      f"— skipping (too correlated, protects from sector concentration)")
+                return True
+        selected_returns[ticker] = new_ret   # cache for future comparisons
+        return False
+
+    # ── Trade generation ──────────────────────────────────────────────────────
+
     def generate_trades(self, universe: list, n: int = 10,
                         existing_tickers: set = None) -> list:
         """
         Autonomous trade generation. Analyzes every ticker in universe,
         selects the highest-conviction consensus trades up to n.
+
+        Includes two diversification guards:
+          1. Type cap: no more than 3 trades of the same structure
+          2. Correlation filter: blocks trades that move in lockstep
+             with already-selected positions (>0.78 Pearson, 30-day returns)
 
         Returns list of trade dicts in the same format as paper_trader.py
         so the rest of the system works unchanged.
@@ -638,8 +697,9 @@ class ConquestAgentSystem:
 
         print(f"[AgentSystem] {len(tradeable)}/{len(results)} tickers passed consensus.")
 
-        new_trades = []
-        type_counts: dict = {}
+        new_trades    = []
+        type_counts:  dict = {}
+        sel_returns:  dict = {}   # ticker → returns list (correlation cache)
 
         for r in tradeable:
             if len(new_trades) >= n:
@@ -651,7 +711,7 @@ class ConquestAgentSystem:
             signals    = r.get("signals", [])
             trade_type = consensus.get("suggested_type", "call_spread")
 
-            # Cap each type at 3 for variety
+            # ── Guard 1: cap each trade type at 3 ────────────────────────────
             if type_counts.get(trade_type, 0) >= 3:
                 alts = [tt for tt in [
                     "call_spread","put_spread","long_call","long_put",
@@ -660,6 +720,15 @@ class ConquestAgentSystem:
                 if not alts:
                     break
                 trade_type = min(alts, key=lambda tt: type_counts.get(tt, 0))
+
+            # ── Guard 2: correlation filter — no sector concentration ─────────
+            # Skip if this ticker moves too similarly to an already-selected one.
+            # ETFs are exempt (SPY/QQQ are useful even when correlated).
+            is_etf = ticker in ("SPY", "QQQ", "IWM", "XLF", "XLE", "XLK",
+                                 "XLV", "GLD", "TLT", "XLI", "XLY", "XLP")
+            if not is_etf and len(new_trades) > 0:
+                if self._too_correlated(ticker, sel_returns):
+                    continue   # skip — try next best candidate
 
             # Build scan dict for paper_trader's _build_trade
             scan = r["td"].scan if td else {}
