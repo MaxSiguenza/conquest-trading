@@ -272,29 +272,27 @@ BUSINESS SUMMARY:
 
 def load_watchlist() -> list:
     """Return all watchlist entries (newest first)."""
-    try:
-        with open(DATA_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return []
+    from db import kv_get
+    data = kv_get("watchlist")
+    return data if isinstance(data, list) else []
 
 
 def save_entry(entry: dict):
     """Insert or replace a watchlist entry by ticker."""
+    from db import kv_set
     entries = load_watchlist()
     entries = [e for e in entries if e.get("ticker") != entry.get("ticker")]
     entries.insert(0, entry)
-    with open(DATA_FILE, "w") as f:
-        json.dump(entries, f, indent=2)
+    kv_set("watchlist", entries)
 
 
 def remove_entry(ticker: str) -> bool:
     """Remove a ticker. Returns True if it was found and removed."""
+    from db import kv_set
     entries  = load_watchlist()
     filtered = [e for e in entries if e.get("ticker", "").upper() != ticker.upper()]
     if len(filtered) < len(entries):
-        with open(DATA_FILE, "w") as f:
-            json.dump(filtered, f, indent=2)
+        kv_set("watchlist", filtered)
         return True
     return False
 

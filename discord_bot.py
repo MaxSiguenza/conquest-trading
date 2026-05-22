@@ -54,19 +54,14 @@ COLOR_DARK   = 0x2d3148
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _load_settings() -> dict:
-    try:
-        with open(SETTINGS_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    from db import kv_get
+    data = kv_get("settings")
+    return data if isinstance(data, dict) else {}
 
 
 def _save_settings(data: dict):
-    try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+    from db import kv_set
+    kv_set("settings", data)
 
 
 def _get_token() -> str:

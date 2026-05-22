@@ -50,18 +50,14 @@ IC_STOP      =  2.00   # close iron condor when position costs 2× credit (loss)
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_trades() -> list:
-    if not os.path.exists(TRADE_LOG):
-        return []
-    try:
-        with open(TRADE_LOG, encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return []
+    from db import kv_get
+    data = kv_get("paper_trades")
+    return data if isinstance(data, list) else []
 
 
 def save_trades(trades: list) -> None:
-    with open(TRADE_LOG, "w", encoding="utf-8") as f:
-        json.dump(trades, f, indent=2, default=str)
+    from db import kv_set
+    kv_set("paper_trades", trades)
 
 
 # ── Pricing helpers ────────────────────────────────────────────────────────────

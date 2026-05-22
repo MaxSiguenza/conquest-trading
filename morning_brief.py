@@ -177,9 +177,9 @@ def collect_brief_data(watchlist: list = None) -> dict:
 def load_cached_brief() -> dict:
     """Return today's cached brief dict, or {} if stale/missing."""
     try:
-        with open(CACHE_FILE) as f:
-            cached = json.load(f)
-        if cached.get("market_date") == str(_date.today()) and cached.get("sections"):
+        from db import kv_get
+        cached = kv_get("morning_brief")
+        if isinstance(cached, dict) and cached.get("market_date") == str(_date.today()) and cached.get("sections"):
             return cached
     except Exception:
         pass
@@ -188,8 +188,8 @@ def load_cached_brief() -> dict:
 
 def _save_cache(brief: dict):
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(brief, f, indent=2)
+        from db import kv_set
+        kv_set("morning_brief", brief)
     except Exception:
         pass
 

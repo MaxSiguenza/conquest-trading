@@ -31,3 +31,6 @@ discord.py==2.7.1
 
 # Options pricing
 py_vollib==1.0.1
+
+# Database (PostgreSQL for Railway persistence)
+psycopg2-binary==2.9.10

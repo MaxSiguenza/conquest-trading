@@ -21,20 +21,28 @@ from flask import Flask, render_template, request, redirect, url_for
 app = Flask(__name__)
 
 SETTINGS_FILE = os.path.join(APP_DIR, "alerts_settings.json")
+
+# ── One-time migration: seed PostgreSQL from local JSON files on first deploy ─
+try:
+    from db import migrate_files_to_db, db_available
+    if db_available():
+        migrate_files_to_db()
+except Exception as _db_err:
+    print(f"[DB] Startup migration skipped: {_db_err}")
 DEFAULT_WATCHLIST = "AAPL NVDA MSFT GOOGL AMZN META TSLA JPM XOM WMT COP SPY QQQ"
 
 
 def _load_settings() -> dict:
-    try:
-        with open(SETTINGS_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"webhook_url": "", "watchlist": DEFAULT_WATCHLIST, "auto_briefing": False}
+    from db import kv_get
+    data = kv_get("settings")
+    if not isinstance(data, dict):
+        return {"webhook_url": "", "watchlist": DEFAULT_WATCHLIST, "auto_briefing": True}
+    return data
 
 
 def _save_settings(data: dict):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    from db import kv_set
+    kv_set("settings", data)
 
 
 def capture(func, *args, **kwargs):
