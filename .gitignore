@@ -17,6 +17,7 @@ positions.json
 alerts_settings.json
 paper_trades.json
 morning_brief.json
+watchlist.json
 
 # OS junk
 .DS_Store

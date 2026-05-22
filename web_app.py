@@ -673,6 +673,37 @@ def paper_stats_close():
                            flash_ok=flash_ok, flash_err=flash_err)
 
 
+# ── Watchlist ─────────────────────────────────────────────────────────────────
+
+@app.route("/watchlist")
+def watchlist_page():
+    from watchlist_engine import load_watchlist
+    entries = load_watchlist()
+    return render_template("watchlist.html", entries=entries)
+
+
+@app.route("/watchlist/add", methods=["POST"])
+def watchlist_add():
+    ticker = request.form.get("ticker", "").strip().upper()
+    if not ticker:
+        return redirect(url_for("watchlist_page"))
+    try:
+        from watchlist_engine import analyze_and_add
+        analyze_and_add(ticker)
+    except Exception as e:
+        pass  # entry will be missing — page will still load fine
+    return redirect(url_for("watchlist_page"))
+
+
+@app.route("/watchlist/remove", methods=["POST"])
+def watchlist_remove():
+    ticker = request.form.get("ticker", "").strip().upper()
+    if ticker:
+        from watchlist_engine import remove_entry
+        remove_entry(ticker)
+    return redirect(url_for("watchlist_page"))
+
+
 # ── Morning Intelligence Brief ────────────────────────────────────────────────
 
 @app.route("/brief")

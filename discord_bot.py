@@ -151,6 +151,13 @@ async def help_cmd(ctx):
         "`!trades` — today's 10 auto-generated paper trades\n"
         "`!generate` — manually trigger today's 10 trades"
     ), inline=False)
+    embed.add_field(name="👁  Watchlist & Research", value=(
+        "`!watch TICKER` — add to watchlist with thesis, conviction, price targets\n"
+        "`!deepdive TICKER` — full 6-prompt deep research report\n"
+        "`!watchlist` — show all watched names\n"
+        "`!remove TICKER` — drop from watchlist\n"
+        "`!screener` — screen watchlist for undervalued stocks (Value/Growth Score)"
+    ), inline=False)
     embed.add_field(name="⚔️  Intelligence", value=(
         "`!briefing` — morning briefing with FRED macro data\n"
         "`!macro` — quick Fed macro snapshot"
@@ -804,6 +811,318 @@ async def generate_cmd(ctx):
         inline=False,
     )
     embed.set_footer(text="Conquest Trading  •  Black-Scholes simulation  •  Not financial advice")
+    await ctx.send(embed=embed)
+
+
+# ── Watchlist commands ────────────────────────────────────────────────────────
+
+def _conviction_color(conviction: str) -> int:
+    return {
+        "HIGH":   COLOR_GREEN,
+        "MEDIUM": COLOR_GOLD,
+        "LOW":    COLOR_RED,
+    }.get(conviction.upper(), COLOR_DARK)
+
+
+def _conviction_icon(conviction: str) -> str:
+    return {"HIGH": "✦", "MEDIUM": "◆", "LOW": "◇"}.get(conviction.upper(), "•")
+
+
+def _build_watchlist_embed(entry: dict) -> discord.Embed:
+    """Build the #watchlist style embed from an entry dict."""
+    ticker     = entry.get("ticker", "?")
+    conviction = entry.get("conviction", "MEDIUM").upper()
+    color      = _conviction_color(conviction)
+    icon       = _conviction_icon(conviction)
+    name       = entry.get("name", ticker)
+    sector     = entry.get("sector", "")
+    price      = entry.get("price", 0)
+
+    embed = discord.Embed(
+        title=f"👁  WATCHLIST: {ticker}",
+        description=f"*{name}*  •  {sector}  •  ${price:.2f}",
+        color=color,
+        timestamp=_ts(),
+    )
+
+    # Thesis
+    thesis = entry.get("thesis", "")
+    hook   = entry.get("narrative_hook", "")
+    thesis_text = thesis
+    if hook and hook not in thesis:
+        thesis_text += f"\n\n*{hook}*"
+    if thesis_text:
+        embed.add_field(name="Thesis", value=thesis_text[:900], inline=False)
+
+    # Conviction + Waiting For (side by side)
+    embed.add_field(
+        name="Conviction",
+        value=f"**{conviction}** {icon}",
+        inline=True,
+    )
+    waiting = entry.get("waiting_for", "—")
+    embed.add_field(name="Waiting For", value=waiting[:200], inline=True)
+
+    # Price targets
+    bear = entry.get("bear_target", "")
+    base = entry.get("base_target", "")
+    bull = entry.get("bull_target", "")
+    entry_z = entry.get("entry_zone", "")
+    stop    = entry.get("hard_stop", "")
+
+    if any([bear, base, bull]):
+        targets = []
+        if bear: targets.append(f"🔴 Bear: {bear}")
+        if base: targets.append(f"🟡 Base: {base}")
+        if bull: targets.append(f"🟢 Bull: {bull}")
+        if entry_z: targets.append(f"📍 Entry: {entry_z}")
+        if stop:    targets.append(f"🛑 Stop: {stop}")
+        embed.add_field(name="Price Targets", value="\n".join(targets), inline=False)
+
+    # Risks
+    flags = entry.get("risk_flags", [])
+    if flags:
+        embed.add_field(
+            name="⚠ Risk Flags",
+            value="\n".join(f"• {f}" for f in flags[:3]),
+            inline=False,
+        )
+
+    # Analyst consensus
+    rec   = entry.get("recommendation", "").upper()
+    tgt   = entry.get("target_mean")
+    count = entry.get("analyst_count")
+    if rec or tgt:
+        consensus = f"{rec}"
+        if tgt:   consensus += f"  |  Mean target ${tgt:.2f}"
+        if count: consensus += f"  ({count} analysts)"
+        embed.add_field(name="Analyst Consensus", value=consensus, inline=False)
+
+    embed.set_footer(text="Conquest Watchlist  •  Not financial advice  •  Always DYOR")
+    return embed
+
+
+@bot.command(name="watch", aliases=["w", "addwatch", "addticker"])
+async def watch_cmd(ctx, ticker: str = ""):
+    """Add a ticker to the watchlist with full AI analysis."""
+    if not ticker:
+        await ctx.send("Usage: `!watch NVDA`")
+        return
+
+    ticker   = ticker.upper()
+    thinking = await ctx.send(
+        f"👁  Analyzing **{ticker}** — fetching fundamentals, running thesis + "
+        f"scenarios + risk report... (~20 seconds)"
+    )
+
+    def _run():
+        from watchlist_engine import analyze_and_add
+        return analyze_and_add(ticker)
+
+    try:
+        entry = await _run_sync(_run)
+    except Exception as e:
+        await thinking.delete()
+        await ctx.send(f"⚠ Analysis failed for **{ticker}**: {str(e)[:200]}")
+        return
+
+    await thinking.delete()
+
+    embed = _build_watchlist_embed(entry)
+
+    # Post to #watchlist channel
+    wl_channel = await _get_channel("watchlist", "general")
+    if wl_channel and wl_channel != ctx.channel:
+        await wl_channel.send(embed=embed)
+        await ctx.send(
+            f"✅ **{ticker}** added to watchlist and posted to {wl_channel.mention}",
+            delete_after=10,
+        )
+    else:
+        await ctx.send(embed=embed)
+
+
+@bot.command(name="deepdive", aliases=["dd", "research"])
+async def deepdive_cmd(ctx, ticker: str = ""):
+    """Full 6-prompt deep research on a ticker."""
+    if not ticker:
+        await ctx.send("Usage: `!deepdive NVDA`")
+        return
+
+    ticker   = ticker.upper()
+    thinking = await ctx.send(
+        f"🔬  Running full deep dive on **{ticker}** — "
+        f"thesis + scenarios + risks + business model... (~35 seconds)"
+    )
+
+    def _run():
+        from watchlist_engine import deep_dive
+        return deep_dive(ticker)
+
+    try:
+        entry, deep_text = await _run_sync(_run)
+    except Exception as e:
+        await thinking.delete()
+        await ctx.send(f"⚠ Deep dive failed for **{ticker}**: {str(e)[:200]}")
+        return
+
+    await thinking.delete()
+
+    # Watchlist embed
+    embed = _build_watchlist_embed(entry)
+
+    # Deep dive text — split if too long for Discord
+    dd_embed = discord.Embed(
+        title=f"🔬  {ticker} — Deep Research Report",
+        description=deep_text[:4000],
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+    dd_embed.set_footer(text="Conquest Research  •  Not financial advice")
+
+    wl_channel = await _get_channel("watchlist", "general")
+    dest = wl_channel if wl_channel else ctx.channel
+    await dest.send(embed=embed)
+    await dest.send(embed=dd_embed)
+
+    if dest != ctx.channel:
+        await ctx.send(
+            f"🔬 Deep dive on **{ticker}** posted to {dest.mention}",
+            delete_after=10,
+        )
+
+
+@bot.command(name="watchlist", aliases=["wl", "watched"])
+async def watchlist_cmd(ctx):
+    """Show all current watchlist entries."""
+    def _load():
+        from watchlist_engine import load_watchlist
+        return load_watchlist()
+
+    entries = await _run_sync(_load)
+
+    if not entries:
+        await ctx.send(
+            "📋 Watchlist is empty.\n"
+            "Use `!watch TICKER` to add a stock with full analysis."
+        )
+        return
+
+    lines = []
+    for e in entries:
+        ticker     = e.get("ticker", "?")
+        conviction = e.get("conviction", "?")
+        price      = e.get("price", 0)
+        waiting    = e.get("waiting_for", "")[:60]
+        icon       = _conviction_icon(conviction)
+        added      = e.get("added_at", "")[:10]
+        lines.append(
+            f"{icon} **{ticker}** `${price:.2f}`  {conviction}  —  {waiting}  *(added {added})*"
+        )
+
+    embed = discord.Embed(
+        title=f"👁  Conquest Watchlist  —  {len(entries)} names",
+        description="\n".join(lines),
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+    embed.set_footer(
+        text="!watch TICKER to add  •  !remove TICKER to drop  •  !deepdive TICKER for full report"
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="remove", aliases=["unwatch", "drop"])
+async def remove_cmd(ctx, ticker: str = ""):
+    """Remove a ticker from the watchlist."""
+    if not ticker:
+        await ctx.send("Usage: `!remove NVDA`")
+        return
+
+    ticker = ticker.upper()
+
+    def _do():
+        from watchlist_engine import remove_entry
+        return remove_entry(ticker)
+
+    removed = await _run_sync(_do)
+    if removed:
+        await ctx.send(f"✅ **{ticker}** removed from watchlist.")
+    else:
+        await ctx.send(f"⚠ **{ticker}** wasn't on the watchlist.")
+
+
+@bot.command(name="screener", aliases=["screen", "undervalued"])
+async def screener_cmd(ctx, *tickers):
+    """
+    Screen tickers for Value/Growth Score (P/S ÷ rev growth).
+    Uses your watchlist if no tickers given.
+    """
+    def _load_wl():
+        from watchlist_engine import load_watchlist
+        return [e.get("ticker") for e in load_watchlist()]
+
+    if tickers:
+        to_screen = [t.upper() for t in tickers]
+    else:
+        to_screen = await _run_sync(_load_wl)
+
+    if not to_screen:
+        await ctx.send(
+            "No tickers to screen. Use `!screener AAPL NVDA MSFT` or "
+            "add stocks with `!watch TICKER` first."
+        )
+        return
+
+    # Cap at 10 to avoid very long runs
+    to_screen = to_screen[:10]
+    thinking  = await ctx.send(
+        f"📊  Fetching data and screening **{len(to_screen)}** ticker(s) "
+        f"for value vs growth... (~{len(to_screen)*3}s)"
+    )
+
+    def _run():
+        from watchlist_engine import fetch_ticker_data, build_data_block
+        from conquest_brain   import watchlist_screener
+        pairs = []
+        for t in to_screen:
+            try:
+                d = fetch_ticker_data(t)
+                b = build_data_block(d)
+                pairs.append((t, b))
+            except Exception:
+                pass
+        return watchlist_screener(pairs)
+
+    results = await _run_sync(_run)
+    await thinking.delete()
+
+    if not results:
+        await ctx.send("⚠ Screener returned no results — API or data issue.")
+        return
+
+    lines = []
+    for r in results:
+        t       = r.get("ticker", "?")
+        score   = r.get("score")
+        verdict = r.get("verdict", "?")
+        reason  = r.get("reason", "")[:80]
+        score_s = f"{score:.2f}" if score is not None else "N/A"
+        icon    = "🟢" if verdict == "UNDERVALUED" else ("🟡" if verdict == "FAIRLY VALUED" else "🔴")
+        lines.append(f"{icon} **{t}** score={score_s}  {verdict}\n  *{reason}*")
+
+    embed = discord.Embed(
+        title=f"📊  Value/Growth Screener  —  {len(results)} tickers",
+        description="\n\n".join(lines),
+        color=COLOR_PURPLE,
+        timestamp=_ts(),
+    )
+    embed.add_field(
+        name="How to read",
+        value="Score = P/S ÷ Revenue Growth %. Lower = more growth per valuation dollar.",
+        inline=False,
+    )
+    embed.set_footer(text="Conquest Screener  •  Not financial advice  •  Always DYOR")
     await ctx.send(embed=embed)
 
 

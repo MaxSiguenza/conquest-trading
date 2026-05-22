@@ -1,0 +1,407 @@
+{% extends "base.html" %}
+{% block title %}Watchlist — Conquest{% endblock %}
+
+{% block extra_style %}
+
+.wl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.add-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.add-form input[type="text"] {
+  width: 130px;
+  margin-bottom: 0;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.add-form input::placeholder { text-transform: none; font-weight: 400; letter-spacing: 0; }
+
+.add-btn {
+  background: #7c6af7;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  margin-top: 0;
+}
+
+.add-btn:hover { background: #6a58e0; }
+
+.add-note {
+  font-size: 11px;
+  color: #475569;
+  margin-top: 4px;
+}
+
+/* ── Entry cards ──────────────────────────────────────────────── */
+.wl-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.wl-card {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 12px;
+  padding: 22px 24px;
+}
+
+.wl-card.conviction-high   { border-left: 4px solid #4ade80; }
+.wl-card.conviction-medium { border-left: 4px solid #fbbf24; }
+.wl-card.conviction-low    { border-left: 4px solid #f87171; }
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.card-ticker {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: 0.5px;
+}
+
+.card-name {
+  font-size: 13px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.card-price {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e2e8f0;
+  text-align: right;
+}
+
+.card-sector {
+  font-size: 11px;
+  color: #475569;
+  text-align: right;
+}
+
+.conviction-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 3px 12px;
+  border-radius: 99px;
+  margin-bottom: 12px;
+}
+
+.badge-high   { background: #1a3a2a; color: #4ade80; border: 1px solid #2a4a3a; }
+.badge-medium { background: #2a2510; color: #fbbf24; border: 1px solid #3a3520; }
+.badge-low    { background: #2a1010; color: #f87171; border: 1px solid #3a2020; }
+
+.section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #475569;
+  margin: 14px 0 4px;
+}
+
+.section-text {
+  font-size: 13.5px;
+  color: #cbd5e1;
+  line-height: 1.65;
+}
+
+.hook-text {
+  font-size: 13px;
+  color: #94a3b8;
+  font-style: italic;
+  margin-top: 6px;
+  line-height: 1.6;
+}
+
+/* ── Two-column lower section ─────────────────────────────────── */
+.card-lower {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+@media (max-width: 640px) { .card-lower { grid-template-columns: 1fr; } }
+
+.targets-box, .risks-box {
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.target-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+  padding: 3px 0;
+  border-bottom: 1px solid #1e2133;
+}
+
+.target-row:last-child { border-bottom: none; }
+.tgt-label { color: #64748b; }
+.tgt-val   { font-weight: 600; color: #e2e8f0; }
+
+.risk-flag {
+  font-size: 12px;
+  color: #f87171;
+  padding: 3px 0;
+  border-bottom: 1px solid #1e2133;
+  line-height: 1.5;
+}
+
+.risk-flag:last-child { border-bottom: none; }
+.risk-flag::before { content: "⚠ "; }
+
+/* ── Waiting for + analyst row ───────────────────────────────── */
+.card-footer-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.footer-pill {
+  background: #1e2133;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  flex: 1 1 200px;
+}
+
+.footer-pill-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #475569;
+  margin-bottom: 3px;
+}
+
+.footer-pill-value { color: #cbd5e1; }
+
+/* ── Remove button ────────────────────────────────────────────── */
+.remove-form { display: inline; }
+.remove-btn {
+  background: none;
+  border: 1px solid #3a1a1a;
+  color: #f87171;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-top: 14px;
+}
+.remove-btn:hover { background: #2a1010; }
+
+/* ── Empty state ──────────────────────────────────────────────── */
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: #475569;
+}
+
+.empty-state .big-icon { font-size: 48px; margin-bottom: 16px; }
+.empty-state h2 { color: #94a3b8; font-size: 18px; margin-bottom: 8px; }
+
+{% endblock %}
+
+
+{% block content %}
+
+{# ── Header ───────────────────────────────────────────────────────────────── #}
+<div class="wl-header">
+  <div>
+    <h1>👁 Conquest Watchlist</h1>
+    <p style="font-size:13px;color:#475569;margin-top:4px;">
+      AI-generated thesis, conviction, and price targets for every name you're watching.
+    </p>
+  </div>
+
+  <div>
+    <form class="add-form" method="post" action="/watchlist/add">
+      <input type="text" name="ticker" placeholder="e.g. CEG" maxlength="10" required>
+      <button type="submit" class="add-btn">+ Add &amp; Analyze</button>
+    </form>
+    <p class="add-note">Runs Prompts 1–3 + 6 (~20 sec). Also use <code>!watch TICKER</code> in Discord.</p>
+  </div>
+</div>
+
+{# ── Entries ──────────────────────────────────────────────────────────────── #}
+{% if entries %}
+<div class="wl-grid">
+  {% for e in entries %}
+    {% set conv = (e.get("conviction") or "MEDIUM").upper() %}
+    {% set conv_class = "conviction-" + conv.lower() %}
+    {% set badge_class = "badge-" + conv.lower() %}
+
+    <div class="wl-card {{ conv_class }}">
+
+      {# Top row: ticker + price #}
+      <div class="card-top">
+        <div>
+          <div class="card-ticker">{{ e.ticker }}</div>
+          <div class="card-name">{{ e.get("name", "") }}</div>
+        </div>
+        <div>
+          {% if e.get("price") %}
+          <div class="card-price">${{ "%.2f" | format(e.price) }}</div>
+          {% endif %}
+          <div class="card-sector">{{ e.get("sector", "") }}</div>
+        </div>
+      </div>
+
+      {# Conviction badge #}
+      <span class="conviction-badge {{ badge_class }}">{{ conv }}</span>
+
+      {# Thesis #}
+      {% if e.get("thesis") %}
+      <div class="section-label">Thesis</div>
+      <div class="section-text">{{ e.thesis }}</div>
+      {% endif %}
+      {% if e.get("narrative_hook") %}
+      <div class="hook-text">{{ e.narrative_hook }}</div>
+      {% endif %}
+
+      {# Waiting For + Fundamentals #}
+      {% if e.get("waiting_for") or e.get("fundamentals") %}
+      <div class="card-footer-row" style="margin-top:14px;">
+        {% if e.get("waiting_for") %}
+        <div class="footer-pill">
+          <div class="footer-pill-label">Waiting For</div>
+          <div class="footer-pill-value">{{ e.waiting_for }}</div>
+        </div>
+        {% endif %}
+        {% if e.get("entry_zone") %}
+        <div class="footer-pill">
+          <div class="footer-pill-label">Entry Zone</div>
+          <div class="footer-pill-value">{{ e.entry_zone }}</div>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {# Price targets + Risks — two column #}
+      {% if e.get("bear_target") or e.get("risk_flags") %}
+      <div class="card-lower">
+
+        {% if e.get("bear_target") or e.get("base_target") or e.get("bull_target") %}
+        <div class="targets-box">
+          <div class="section-label" style="margin-top:0;">Price Targets</div>
+          {% if e.get("bear_target") %}
+          <div class="target-row">
+            <span class="tgt-label">🔴 Bear (3–6mo)</span>
+            <span class="tgt-val">{{ e.bear_target }}</span>
+          </div>
+          {% endif %}
+          {% if e.get("base_target") %}
+          <div class="target-row">
+            <span class="tgt-label">🟡 Base (6–12mo)</span>
+            <span class="tgt-val">{{ e.base_target }}</span>
+          </div>
+          {% endif %}
+          {% if e.get("bull_target") %}
+          <div class="target-row">
+            <span class="tgt-label">🟢 Bull (12–18mo)</span>
+            <span class="tgt-val">{{ e.bull_target }}</span>
+          </div>
+          {% endif %}
+          {% if e.get("hard_stop") %}
+          <div class="target-row">
+            <span class="tgt-label">🛑 Stop</span>
+            <span class="tgt-val" style="color:#f87171;">{{ e.hard_stop.split("—")[0].split("(")[0].strip() }}</span>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if e.get("risk_flags") %}
+        <div class="risks-box">
+          <div class="section-label" style="margin-top:0;">Risk Flags</div>
+          {% for flag in e.risk_flags %}
+          <div class="risk-flag">{{ flag }}</div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+      </div>
+      {% endif %}
+
+      {# Fundamentals summary #}
+      {% if e.get("fundamentals") %}
+      <div class="section-label">Fundamentals</div>
+      <div class="section-text" style="font-size:12.5px;color:#94a3b8;">{{ e.fundamentals }}</div>
+      {% endif %}
+
+      {# Analyst consensus + meta #}
+      <div class="card-footer-row">
+        {% if e.get("recommendation") or e.get("target_mean") %}
+        <div class="footer-pill">
+          <div class="footer-pill-label">Analyst Consensus</div>
+          <div class="footer-pill-value">
+            {% if e.get("recommendation") %}{{ e.recommendation.upper() }}{% endif %}
+            {% if e.get("target_mean") %} · Target ${{ "%.2f" | format(e.target_mean) }}{% endif %}
+            {% if e.get("analyst_count") %} ({{ e.analyst_count }}){% endif %}
+          </div>
+        </div>
+        {% endif %}
+        {% if e.get("added_at") %}
+        <div class="footer-pill">
+          <div class="footer-pill-label">Added</div>
+          <div class="footer-pill-value">{{ e.added_at[:10] }}</div>
+        </div>
+        {% endif %}
+      </div>
+
+      {# Remove button #}
+      <form class="remove-form" method="post" action="/watchlist/remove">
+        <input type="hidden" name="ticker" value="{{ e.ticker }}">
+        <button type="submit" class="remove-btn">✕ Remove from watchlist</button>
+      </form>
+
+    </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="empty-state">
+  <div class="big-icon">👁</div>
+  <h2>Watchlist is empty</h2>
+  <p>Add a ticker above or use <code>!watch TICKER</code> in Discord.</p>
+  <p style="margin-top:8px;font-size:13px;">
+    The system will run Prompts 1–3 + 6 to generate thesis, conviction, price targets, and risk flags.
+  </p>
+</div>
+{% endif %}
+
+{% endblock %}

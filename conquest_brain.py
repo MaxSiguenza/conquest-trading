@@ -403,6 +403,214 @@ Output ONLY the following JSON object. No preamble, no markdown, just raw JSON:
         return {"error": str(e)}, f"Brief unavailable: {e}"
 
 
+def watchlist_thesis(ticker: str, data_block: str) -> dict:
+    """
+    Prompts 1 + 2 + 3 combined.
+    Returns a dict with thesis, narrative_hook, fundamentals,
+    price targets, conviction, waiting_for, entry_zone, hard_stop.
+    """
+    import json as _json
+
+    prompt = f"""{data_block}
+
+---
+Using the data above, generate a watchlist entry for {ticker}. Apply three analytical lenses:
+
+LENS 1 — NARRATIVE (what is driving the stock):
+Cover the dominant narrative (social media, retail sentiment), the actual catalyst
+(earnings/contract/policy — be specific with numbers), and the institutional view
+(recent analyst target changes, upgrades/downgrades).
+End with: "The stock is moving because [X], but [Y] is the part nobody is talking about."
+
+LENS 2 — FUNDAMENTALS (what is it worth):
+Is the stock trading above, at, or below its fundamental fair value?
+Show the math using the valuation data. Compare forward P/E and P/Sales to sector averages.
+Comment on balance sheet health and any dilution risk. One paragraph max.
+
+LENS 3 — SCENARIOS (where it can go):
+Build a price target framework. Show the math (multiple × EPS or revenue).
+Name the specific entry zone, trim levels, and hard stop where the thesis breaks.
+
+Output ONLY this JSON — no preamble, no markdown:
+{{
+  "thesis": "2-3 sentences combining narrative and fundamental view. Direct and specific.",
+  "narrative_hook": "The stock is moving because X, but Y is the part nobody is talking about.",
+  "fundamentals": "One paragraph. Fair value assessment with math. Above/at/below?",
+  "bear_target": "$XX — if catalyst disappoints (3-6 months)",
+  "base_target": "$XX — execution holds (6-12 months)",
+  "bull_target": "$XX — everything works (12-18 months)",
+  "entry_zone": "$XX–$XX",
+  "hard_stop": "$XX — one sentence describing the thesis break condition",
+  "conviction": "HIGH or MEDIUM or LOW",
+  "waiting_for": "One specific, concrete condition that must be true before entering"
+}}"""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1200,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        return _json.loads(raw)
+    except _json.JSONDecodeError:
+        return {"thesis": locals().get("raw", "Parse error"), "conviction": "LOW",
+                "waiting_for": "N/A", "error": "json_parse"}
+    except Exception as e:
+        return {"thesis": f"Analysis failed: {e}", "conviction": "LOW", "waiting_for": "N/A"}
+
+
+def watchlist_risks(ticker: str, data_block: str) -> dict:
+    """
+    Prompt 6 — skeptical 3-point risk assessment.
+    Returns dict with 'risks' (summary) and 'risk_flags' (list of 3).
+    """
+    import json as _json
+
+    prompt = f"""{data_block}
+
+---
+Act as a skeptic. Write a bear case for {ticker}.
+
+3-point risk assessment — be specific to the data above:
+1. Accounting irregularities or revenue quality concerns (check margins, cash vs reported earnings)
+2. Customer concentration risk (over-reliance on single customers/contracts)
+3. Competitive threats and moat erosion (who is eating their lunch and how fast)
+
+Reference actual numbers from the data where they reveal risk.
+
+Output ONLY this JSON:
+{{
+  "risks": "2-3 sentence overall bear thesis. Hard-hitting and specific.",
+  "risk_flags": [
+    "Specific flag 1 with numbers",
+    "Specific flag 2 with numbers",
+    "Specific flag 3 with numbers"
+  ]
+}}"""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        return _json.loads(raw)
+    except Exception as e:
+        return {"risks": f"Risk analysis failed: {e}", "risk_flags": []}
+
+
+def watchlist_deep_dive_report(ticker: str, data_block: str) -> str:
+    """
+    Prompt 4 — full deep research report.
+    Returns formatted text (4 sections).
+    """
+    prompt = f"""{data_block}
+
+---
+Generate a comprehensive Deep Research Report on {ticker}.
+
+Cover these 4 areas in order:
+
+1. BUSINESS MODEL
+How exactly do they make money? Core product in plain English. Revenue streams.
+
+2. MOAT AND COMPETITION
+Top 3 competitors by name. Does {ticker} have a unique technological advantage,
+patent, or network effect that competitors genuinely lack? Be honest about moat quality.
+
+3. CATALYST
+Upcoming product launches, regulatory approvals, or partnerships in the next 12 months.
+Be specific about dates and magnitude if known.
+
+4. ASYMMETRY CHECK
+What is the low valuation floor vs the high growth ceiling?
+Why is this a good risk/reward — or why not?
+
+Be specific throughout. Reference the data above. 4-6 sentences per section."""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        return f"Deep dive failed: {e}"
+
+
+def watchlist_screener(tickers_blocks: list) -> list:
+    """
+    Prompt 5 adapted — screen multiple tickers for value vs growth.
+    tickers_blocks: list of (ticker, data_block) tuples
+    Returns list of dicts sorted by Value/Growth Score.
+    """
+    import json as _json
+
+    sections = "\n\n".join(
+        f"=== {ticker} ===\n{block[:800]}"
+        for ticker, block in tickers_blocks
+    )
+
+    prompt = f"""You are screening these stocks for fundamental value vs growth quality.
+
+{sections}
+
+---
+For each stock, calculate the Value/Growth Score = P/S TTM ÷ revenue growth %.
+Lower score = more growth per valuation dollar (better).
+
+Also flag: any stock with P/E below the typical sector average AND positive revenue growth
+qualifies as potentially undervalued.
+
+Output ONLY a JSON array sorted by score ascending (best first):
+[
+  {{
+    "ticker": "X",
+    "score": 1.23,
+    "ps_ttm": 4.5,
+    "rev_growth_pct": 22.0,
+    "verdict": "UNDERVALUED",
+    "reason": "One specific sentence explaining why."
+  }}
+]
+
+Use "UNDERVALUED", "FAIRLY VALUED", or "OVERVALUED" for verdict.
+If data is missing for score calculation, estimate and note it."""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=800,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        return _json.loads(raw)
+    except Exception as e:
+        return []
+
+
 def position_debrief(positions: list, portfolio: dict) -> str:
     """
     Evening debrief — summary of all positions and what to do next.
