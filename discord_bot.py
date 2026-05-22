@@ -1340,6 +1340,7 @@ async def testchannels_cmd(ctx):
         ("screener",         "📊",  "Screener",                    "Pre-screener results (top candidates from 129-ticker scan) post here each morning at 9:35 AM ET. Weekly value/growth screen also posts here every Monday."),
         ("status-dashboard", "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
         ("agent-brain",      "🤖",  "Agent Brain",                 "Agent weight updates and learning events post here automatically after trades close."),
+        ("agent-debate",     "🗣",  "Agent Debate",                "Full bull/bear debate transcript posts here for every paper trade. See what the bull advocate argued, what the bear punched holes in, and the Portfolio Manager's final verdict."),
     ]
 
     status_lines = []
@@ -1850,6 +1851,62 @@ async def paper_trading_loop():
                         )
                     trade_embed.set_footer(text="Conquest Paper Trading  •  Simulation only")
                     await ch_trades.send(embed=trade_embed)
+
+                    # ── Post full debate to #agent-debate (if debate ran) ──────
+                    if t.get("debate_pm"):
+                        ch_debate = await _get_channel("agent-debate")
+                        if ch_debate:
+                            try:
+                                won_color   = COLOR_GREEN  # PM approved → proceed
+                                bull_str    = t.get("debate_bull_str", 0)
+                                bear_weak   = t.get("debate_bear_weak", 0)
+                                bull_bar    = "█" * round(bull_str * 10) + "░" * (10 - round(bull_str * 10))
+                                bear_bar    = "█" * round(bear_weak * 10) + "░" * (10 - round(bear_weak * 10))
+                                tt_label    = t["trade_type"].replace("_", " ").title()
+                                conf        = t.get("agent_confidence", 0)
+
+                                debate_embed = discord.Embed(
+                                    title=f"🗣  Agent Debate  —  {t['ticker']} {tt_label}",
+                                    description=(
+                                        f"6-agent swarm reached **{t.get('agent_count',0)}/6 consensus** "
+                                        f"at **{conf:.0%}** confidence.\n"
+                                        f"Bull/Bear debate ran before final trade approval."
+                                    ),
+                                    color=COLOR_PURPLE,
+                                    timestamp=_ts(),
+                                )
+                                debate_embed.add_field(
+                                    name=f"🐂  Bull Advocate  —  strength {bull_str:.0%}",
+                                    value=f"`{bull_bar}` {bull_str:.0%}\n\n{t.get('debate_bull','')[:800]}",
+                                    inline=False,
+                                )
+                                debate_embed.add_field(
+                                    name=f"🐻  Bear Adversary  —  weakness found {bear_weak:.0%}",
+                                    value=f"`{bear_bar}` {bear_weak:.0%}\n\n{t.get('debate_bear','')[:800]}",
+                                    inline=False,
+                                )
+                                # PM verdict with visual signal strength
+                                if bull_str >= bear_weak:
+                                    verdict_icon = "✅"
+                                    verdict_label = "PROCEED — Bull case stronger"
+                                else:
+                                    verdict_icon = "⚠️"
+                                    verdict_label = "PROCEED — Despite bear concerns"
+                                debate_embed.add_field(
+                                    name=f"⚖️  Portfolio Manager Verdict  —  {verdict_icon} {verdict_label}",
+                                    value=f"*\"{t.get('debate_pm','')}\"*",
+                                    inline=False,
+                                )
+                                debate_embed.set_footer(
+                                    text=(
+                                        f"Conquest Agent Debate  •  "
+                                        f"Inspired by TradingAgents + LLM-TradeBot  •  "
+                                        f"Simulation only"
+                                    )
+                                )
+                                await ch_debate.send(embed=debate_embed)
+                            except Exception as _de_err:
+                                print(f"[PaperLoop] Debate channel post failed: {_de_err}")
 
             # ── Post pre-screener summary to #screener ─────────────────────────
             ch_screener = await _get_channel("screener")
