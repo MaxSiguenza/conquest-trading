@@ -993,6 +993,11 @@ def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) 
     closed_block = "\n".join(closed_lines) if closed_lines else "  No trades closed today."
 
     # ── Still-open positions block ────────────────────────────────────────────
+    try:
+        from paper_trader import STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP
+    except Exception:
+        STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP = 0.05, -0.03, 0.50, -0.75
+
     open_trades = stats.get("open_trades", [])
     open_lines  = []
     for t in open_trades:
@@ -1003,9 +1008,7 @@ def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) 
         days_held  = t.get("days_held", 0) or 0
         days_left  = max(0, 5 - days_held)
         entry_r    = t.get("reasoning", "")
-        # Distance to targets — give the PM context on how close each is
         cost       = t.get("cost_basis", 0) or 0
-        curr       = t.get("current_price", cost) or cost
         if cost > 0:
             dist_profit = (STK_PROFIT if "stock" in ttype else OPT_PROFIT) * 100
             dist_stop   = abs(STK_STOP if "stock" in ttype else OPT_STOP) * 100
@@ -1020,12 +1023,6 @@ def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) 
         )
 
     open_block = "\n".join(open_lines) if open_lines else "  No positions currently open."
-
-    # Pull in constants needed for the prompt (imported at module level in paper_trader)
-    try:
-        from paper_trader import STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP
-    except Exception:
-        STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP = 0.05, -0.03, 0.50, -0.75
 
     prompt = f"""End-of-day paper trading summary — {_date.today().strftime('%B %d, %Y')}
 
