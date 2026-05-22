@@ -156,7 +156,8 @@ async def help_cmd(ctx):
         "`!deepdive TICKER` — full 6-prompt deep research report\n"
         "`!watchlist` — show all watched names\n"
         "`!remove TICKER` — drop from watchlist\n"
-        "`!screener` — screen watchlist for undervalued stocks (Value/Growth Score)"
+        "`!screener` — screen watchlist for undervalued stocks (Value/Growth Score)\n"
+        "`!earnings` — upcoming earnings for all watchlist names (next 14 days)"
     ), inline=False)
     embed.add_field(name="⚔️  Intelligence", value=(
         "`!briefing` — morning briefing with FRED macro data\n"
@@ -1126,6 +1127,78 @@ async def screener_cmd(ctx, *tickers):
     await ctx.send(embed=embed)
 
 
+# ── !earnings ─────────────────────────────────────────────────────────────────
+
+@bot.command(name="earnings", aliases=["er", "earningsradar", "calendar"])
+async def earnings_cmd(ctx, days: int = 14):
+    """Show upcoming earnings for all watchlist names within N days."""
+    thinking = await ctx.send(
+        f"📅 Checking earnings calendar for your watchlist (next {days} days)..."
+    )
+
+    def _run():
+        from watchlist_engine import get_upcoming_earnings
+        return get_upcoming_earnings(days)
+
+    upcoming = await _run_sync(_run)
+    await thinking.delete()
+
+    if not upcoming:
+        await ctx.send(
+            f"📅 No watchlist names have earnings in the next {days} days.\n"
+            f"Try `!earnings 30` to look further out."
+        )
+        return
+
+    lines = []
+    for e in upcoming:
+        d      = e["days_to"]
+        icon   = _conviction_icon(e.get("conviction", "MEDIUM"))
+        urgency = "🔴 " if d <= 2 else ("🟡 " if d <= 7 else "🟢 ")
+        date_label = "TODAY" if d == 0 else ("TOMORROW" if d == 1 else f"in {d}d")
+        thesis_snip = e.get("thesis", "")[:100]
+        entry  = e.get("entry_zone", "")
+        stop   = e.get("hard_stop", "").split("—")[0].split("(")[0].strip()
+
+        line = (
+            f"{urgency}{icon} **{e['ticker']}** — {e['earnings_date']} ({date_label})\n"
+            f"  *{thesis_snip}{'...' if len(e.get('thesis','')) > 100 else ''}*"
+        )
+        if entry:
+            line += f"\n  📍 Entry: {entry}"
+        if stop:
+            line += f"  🛑 Stop: {stop}"
+        lines.append(line)
+
+    embed = discord.Embed(
+        title=f"📅  Earnings Radar — {len(upcoming)} name(s) in next {days} days",
+        description="\n\n".join(lines),
+        color=COLOR_GOLD,
+        timestamp=_ts(),
+    )
+    embed.add_field(
+        name="Tip",
+        value=(
+            "Consider closing or reducing positions **before** earnings — "
+            "implied vol collapses after the print.\n"
+            "Use `!deepdive TICKER` for a full catalyst + risk breakdown."
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text="Conquest Earnings Radar  •  Dates sourced from Yahoo Finance  •  Always verify"
+    )
+
+    er_channel = await _get_channel("earnings-radar", "watchlist", "general")
+    dest = er_channel if er_channel else ctx.channel
+    await dest.send(embed=embed)
+    if dest != ctx.channel:
+        await ctx.send(
+            f"📅 Earnings radar ({len(upcoming)} names) posted to {dest.mention}",
+            delete_after=8,
+        )
+
+
 # ── !testchannels ─────────────────────────────────────────────────────────────
 
 @bot.command(name="testchannels", aliases=["tc", "techchannels"])
@@ -1136,9 +1209,10 @@ async def testchannels_cmd(ctx):
         ("morning-briefing", "🗞",  "Morning Intelligence Brief",  "Auto-posts the daily macro brief at 9:00 AM ET."),
         ("trade-alerts",     "🧪",  "Trade Alerts",                "New paper trades post here at 9:35 AM ET."),
         ("trade-log",        "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
-        ("evening-debrief",  "📊",  "Evening Debrief",             "Full EOD wrap with today's closed trades at 4:05 PM ET."),
+        ("evening-debrief",  "📊",  "Evening Debrief",             "Claude-narrated EOD wrap with paper trading summary at 4:05 PM ET."),
         ("daily-pnl",        "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
-        ("watchlist",        "📡",  "Watchlist Signals",           "Use !scan to post scan results here."),
+        ("watchlist",        "👁",  "Watchlist",                   "New !watch and !deepdive analysis cards post here."),
+        ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning."),
         ("macro-worldview",  "🌍",  "Macro Worldview",             "Use !macro to post the macro snapshot here."),
         ("live-positions",   "📈",  "Live Positions",              "Use !trades to see live paper positions."),
         ("status-dashboard", "🏆",  "Status Dashboard",            "Use !stats to post performance summary here."),
@@ -1434,6 +1508,29 @@ async def paper_trading_loop():
                 if ch_eod:
                     await ch_eod.send(embed=eod_embed)
 
+                # Claude narrative debrief (posted right after the numbers)
+                if ch_eod and today_closed:
+                    try:
+                        def _get_narrative():
+                            from conquest_brain import paper_evening_debrief
+                            return paper_evening_debrief(
+                                stats, today_closed, stats.get("total_pnl", 0)
+                            )
+                        narrative = await _run_sync(_get_narrative)
+                        if narrative and "unavailable" not in narrative.lower():
+                            narr_embed = discord.Embed(
+                                title="⚔️  Conquest Intelligence — EOD Read",
+                                description=narrative,
+                                color=COLOR_PURPLE,
+                                timestamp=_ts(),
+                            )
+                            narr_embed.set_footer(
+                                text="Conquest Intelligence Desk  •  Paper simulation  •  Not financial advice"
+                            )
+                            await ch_eod.send(embed=narr_embed)
+                    except Exception as e_narr:
+                        print(f"[PaperLoop] Narrative debrief error: {e_narr}")
+
                 # Short P&L line → #daily-pnl (separate channel)
                 if ch_pnl and ch_pnl != ch_eod:
                     sign = "▲" if today_pnl >= 0 else "▼"
@@ -1554,6 +1651,43 @@ async def morning_briefing_task():
         )
         await channel.send(embed=embed)
         print(f"[Bot] Auto morning brief posted at {now_et.strftime('%Y-%m-%d %H:%M ET')}")
+
+        # ── Earnings radar — post to #earnings-radar if any watchlist names report this week ──
+        try:
+            def _check_earnings():
+                from watchlist_engine import get_upcoming_earnings
+                return get_upcoming_earnings(7)   # next 7 days only for the auto morning post
+
+            upcoming_earnings = await _run_sync(_check_earnings)
+            if upcoming_earnings:
+                er_channel = await _get_channel("earnings-radar", "morning-briefing", "general")
+                if er_channel:
+                    lines = []
+                    for e in upcoming_earnings:
+                        d       = e["days_to"]
+                        icon    = _conviction_icon(e.get("conviction", "MEDIUM"))
+                        urgency = "🔴 " if d <= 2 else ("🟡 " if d <= 4 else "🟢 ")
+                        label   = "TODAY" if d == 0 else ("TOMORROW" if d == 1 else f"in {d}d ({e['earnings_date']})")
+                        lines.append(
+                            f"{urgency}{icon} **{e['ticker']}** — {label}\n"
+                            f"  *{e.get('thesis','')[:100]}{'...' if len(e.get('thesis','')) > 100 else ''}*"
+                        )
+                    er_embed = discord.Embed(
+                        title=f"📅  Earnings This Week — {len(upcoming_earnings)} watchlist name(s)",
+                        description="\n\n".join(lines),
+                        color=COLOR_GOLD,
+                        timestamp=_ts(),
+                    )
+                    er_embed.add_field(
+                        name="Reminder",
+                        value="Consider reducing size before the print. IV crush hits hard after earnings.",
+                        inline=False,
+                    )
+                    er_embed.set_footer(text="Conquest Earnings Radar  •  Verify dates before trading")
+                    await er_channel.send(embed=er_embed)
+                    print(f"[Bot] Earnings radar posted: {len(upcoming_earnings)} name(s)")
+        except Exception as e_er:
+            print(f"[Bot] Earnings radar error: {e_er}")
 
     except Exception as e:
         print(f"[Bot] Auto-briefing task error: {e}")

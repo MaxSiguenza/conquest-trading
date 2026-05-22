@@ -206,20 +206,22 @@
 
 {# ── Setup instructions ── #}
 <div class="card">
-  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px;">How to set up your Discord webhook</p>
+  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px;">Discord Bot Setup (Recommended)</p>
   <ol class="setup-steps">
-    <li>Open Discord and go to the channel where you want alerts (or create a new one like <strong>#trading-alerts</strong>).</li>
-    <li>Click the <strong>⚙️ Edit Channel</strong> gear → <strong>Integrations</strong> → <strong>Webhooks</strong> → <strong>New Webhook</strong>.</li>
-    <li>Give it a name like <em>Quant Bot</em>, then click <strong>Copy Webhook URL</strong>.</li>
-    <li>Paste it in the field below and click <strong>Test Connection</strong> to verify it works.</li>
+    <li>The bot posts to channels by <strong>name</strong> — no webhooks needed. Just make sure the bot is in your server and the channels exist with the exact names below.</li>
+    <li>Required channels: <code>#morning-briefing</code> <code>#trade-alerts</code> <code>#trade-log</code> <code>#evening-debrief</code> <code>#daily-pnl</code> <code>#watchlist</code> <code>#earnings-radar</code> <code>#macro-worldview</code> <code>#live-positions</code> <code>#status-dashboard</code></li>
+    <li>Run <code>!testchannels</code> in any Discord channel to verify all 10 channels are wired correctly. You'll get a ✅/❌ report.</li>
+    <li>Enable the auto-briefing checkbox below to get the morning brief + earnings radar at 9 AM ET every weekday — no action needed after that.</li>
   </ol>
+
+  <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin:20px 0 14px;">Legacy Webhook URL <span style="font-weight:400;text-transform:none;font-size:11px;">(optional — only needed for older !pnl command)</span></p>
 
   <form method="POST" id="alert-form">
     <div class="alert-form">
       <div class="field">
-        <label>Discord Webhook URL</label>
+        <label>Webhook URL <span style="font-weight:400;color:#475569;">(optional)</span></label>
         <input type="text" name="webhook_url" id="webhook_url"
-               placeholder="https://discord.com/api/webhooks/..."
+               placeholder="https://discord.com/api/webhooks/... (optional)"
                value="{{ settings.webhook_url }}" autocomplete="off">
       </div>
       <div class="field">
@@ -235,10 +237,10 @@
                  {% if auto_briefing %}checked{% endif %}
                  style="width:16px;height:16px;accent-color:#7c6af7;cursor:pointer;">
           <span style="font-size:12px;font-weight:600;color:#94a3b8;">
-            Auto-send morning briefing at 9:00 AM ET (Mon–Fri)
+            Auto-send morning briefing + earnings radar at 9:00 AM ET (Mon–Fri)
           </span>
         </label>
-        <span style="font-size:11px;color:#475569;">Requires webhook URL above</span>
+        <span style="font-size:11px;color:#4ade80;">✓ Runs via bot — no webhook required</span>
       </div>
 
       <div class="btn-row">

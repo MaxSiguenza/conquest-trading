@@ -611,6 +611,63 @@ If data is missing for score calculation, estimate and note it."""
         return []
 
 
+def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) -> str:
+    """
+    Claude-narrated end-of-day wrap for automated paper trading.
+    Called at 4:05 PM ET after the numeric EOD summary is posted.
+
+    stats        : get_paper_stats() dict
+    today_trades : list of trade dicts closed today
+    all_time_pnl : running total P&L
+    """
+    today_pnl  = sum(t.get("pnl", 0) for t in today_trades)
+    win_today  = sum(1 for t in today_trades if t.get("pnl", 0) >= 0)
+    loss_today = len(today_trades) - win_today
+
+    trade_lines = []
+    for t in sorted(today_trades, key=lambda x: x.get("pnl", 0), reverse=True)[:6]:
+        pnl    = t.get("pnl", 0)
+        reason = t.get("close_reason", "").replace("_", " ")
+        trade_lines.append(
+            f"  {t['ticker']} {t['trade_type'].replace('_',' ')} → "
+            f"${pnl:+.2f} ({t.get('pnl_pct', 0)*100:+.1f}%) via {reason}"
+        )
+
+    trades_block = "\n".join(trade_lines) if trade_lines else "  No trades closed today."
+
+    prompt = f"""End-of-day paper trading summary:
+
+TODAY:
+  Trades closed: {len(today_trades)} ({win_today} wins / {loss_today} losses)
+  Today P&L:     ${today_pnl:+.2f}
+
+TOP TRADES TODAY:
+{trades_block}
+
+ALL-TIME STATS:
+  Total closed: {stats.get('closed_count', 0)}
+  Win rate:     {stats.get('win_rate', 0)*100:.1f}%
+  All-time P&L: ${all_time_pnl:+.2f}
+  Sharpe ratio: {stats.get('sharpe') or 'N/A'}
+  Profit factor:{stats.get('profit_factor') or 'N/A'}
+
+Write a 3-4 sentence end-of-day debrief for the paper trading simulation.
+Cover: (1) how today went — was it a clean day or messy exits, (2) any pattern worth
+noting in what worked vs what didn't, (3) one forward-looking thought for tomorrow.
+Be direct and analytical. Reference actual numbers."""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=250,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        return f"[Debrief unavailable: {e}]"
+
+
 def position_debrief(positions: list, portfolio: dict) -> str:
     """
     Evening debrief — summary of all positions and what to do next.

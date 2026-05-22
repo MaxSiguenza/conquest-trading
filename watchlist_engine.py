@@ -8,7 +8,7 @@ with AI-generated thesis, conviction rating, and price targets.
 Storage: watchlist.json  (excluded from git via .gitignore)
 """
 
-import os, sys, json
+import os, sys, json, time
 from datetime import datetime, timezone, date as _date
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -16,11 +16,37 @@ DATA_FILE = os.path.join(APP_DIR, "watchlist.json")
 sys.path.insert(0, APP_DIR)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_earnings_date(cal) -> str | None:
+    """Safely extract next earnings date from yfinance calendar (dict or DataFrame)."""
+    if cal is None:
+        return None
+    try:
+        if isinstance(cal, dict):
+            ed = cal.get("Earnings Date")
+            if ed is not None:
+                val = list(ed)[0] if hasattr(ed, "__iter__") and not isinstance(ed, str) else ed
+                s = str(val)
+                return s[:10] if s and s not in ("NaT", "nan", "None") else None
+        elif hasattr(cal, "index"):          # DataFrame
+            if "Earnings Date" in cal.index:
+                val = cal.loc["Earnings Date"]
+                if hasattr(val, "iloc"):
+                    val = val.iloc[0]
+                s = str(val)
+                return s[:10] if s and s not in ("NaT", "nan", "None") else None
+    except Exception:
+        pass
+    return None
+
+
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
 def fetch_ticker_data(ticker: str) -> dict:
     """
-    Pull all available yfinance fundamentals, valuation, and analyst data.
+    Pull all available yfinance fundamentals, valuation, analyst data,
+    recent news headlines, and upcoming earnings date.
     Returns a flat dict — missing fields are None.
     """
     import yfinance as yf
@@ -55,10 +81,45 @@ def fetch_ticker_data(ticker: str) -> dict:
     except Exception:
         pass
 
-    price = (info.get("currentPrice")
-             or info.get("regularMarketPrice")
-             or info.get("previousClose")
-             or 0)
+    # Recent news headlines (last 72h, up to 5 items)
+    news_items = []
+    try:
+        now_ts = time.time()
+        for item in (t.news or [])[:6]:
+            title     = (item.get("title") or "")[:120]
+            publisher = item.get("publisher", "")
+            published = item.get("providerPublishTime", 0)
+            age_h     = int((now_ts - published) / 3600) if published else 999
+            if title and age_h <= 168:   # within 1 week
+                news_items.append({
+                    "title":     title,
+                    "publisher": publisher,
+                    "age_hours": age_h,
+                })
+    except Exception:
+        pass
+
+    # Upcoming earnings date
+    next_earnings = None
+    try:
+        next_earnings = _parse_earnings_date(t.calendar)
+    except Exception:
+        pass
+
+    # Live price — fast_info is more reliable than info["currentPrice"]
+    price = 0.0
+    try:
+        fi    = t.fast_info
+        price = float(getattr(fi, "last_price", 0) or 0)
+    except Exception:
+        pass
+    if not price:
+        price = float(
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or info.get("previousClose")
+            or 0
+        )
 
     return {
         "ticker":           ticker,
@@ -100,6 +161,9 @@ def fetch_ticker_data(ticker: str) -> dict:
         "short_ratio":      info.get("shortRatio"),
         # Business summary
         "summary":          (info.get("longBusinessSummary") or "")[:600],
+        # Live context
+        "news":             news_items,
+        "next_earnings":    next_earnings,
     }
 
 
@@ -132,6 +196,36 @@ def build_data_block(data: dict) -> str:
     if d.get("target_mean") and d.get("price") and d["price"] > 0:
         up = (d["target_mean"] / d["price"] - 1) * 100
         upside = f"  ({up:+.0f}% to consensus target)"
+
+    # ── Recent news block ─────────────────────────────────────────────────────
+    news_items = d.get("news", [])
+    if news_items:
+        news_lines = []
+        for n in news_items[:5]:
+            age = n.get("age_hours", 0)
+            age_str = f"{age}h ago" if age < 48 else f"{age // 24}d ago"
+            news_lines.append(
+                f'  "{n["title"]}" — {n.get("publisher", "")} ({age_str})'
+            )
+        news_block = "\nRECENT NEWS (incorporate into thesis if relevant):\n" + "\n".join(news_lines)
+    else:
+        news_block = ""
+
+    # ── Earnings date block ───────────────────────────────────────────────────
+    next_earnings = d.get("next_earnings")
+    if next_earnings and next_earnings not in ("nan", "NaT", "None"):
+        try:
+            from datetime import datetime as _dt2
+            ed       = _dt2.strptime(next_earnings[:10], "%Y-%m-%d").date()
+            days_to  = (ed - _date.today()).days
+            if days_to >= 0:
+                earnings_block = f"\nUPCOMING EARNINGS: {next_earnings[:10]} (in {days_to} days) — factor this into conviction and entry zone."
+            else:
+                earnings_block = f"\nMOST RECENT EARNINGS: {next_earnings[:10]} ({abs(days_to)} days ago)"
+        except Exception:
+            earnings_block = f"\nEARNINGS DATE: {next_earnings}"
+    else:
+        earnings_block = ""
 
     return f"""TICKER: {d['ticker']} — {d.get('name', '')}
 SECTOR: {d.get('sector', '')} / {d.get('industry', '')}
@@ -171,7 +265,7 @@ ANALYST CONSENSUS ({d.get('analyst_count', 0)} analysts)
   Rating:      {d.get('recommendation', '').upper()}
 
 BUSINESS SUMMARY:
-{d.get('summary', 'N/A')}"""
+{d.get('summary', 'N/A')}{news_block}{earnings_block}"""
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -265,6 +359,45 @@ def analyze_and_add(ticker: str) -> dict:
 
     save_entry(entry)
     return entry
+
+
+def get_upcoming_earnings(days_ahead: int = 14) -> list:
+    """
+    Check all watchlist tickers for upcoming earnings within days_ahead days.
+    Returns list of dicts sorted by days_to ascending:
+      {ticker, name, earnings_date, days_to, conviction, thesis}
+    """
+    import yfinance as yf
+
+    upcoming = []
+    for e in load_watchlist():
+        ticker = e.get("ticker", "")
+        if not ticker:
+            continue
+        try:
+            cal           = yf.Ticker(ticker).calendar
+            next_earnings = _parse_earnings_date(cal)
+            if not next_earnings or next_earnings in ("nan", "NaT", "None"):
+                continue
+            from datetime import datetime as _dt2
+            ed      = _dt2.strptime(next_earnings[:10], "%Y-%m-%d").date()
+            days_to = (ed - _date.today()).days
+            if 0 <= days_to <= days_ahead:
+                upcoming.append({
+                    "ticker":        ticker,
+                    "name":          e.get("name", ticker),
+                    "earnings_date": next_earnings[:10],
+                    "days_to":       days_to,
+                    "conviction":    e.get("conviction", "MEDIUM"),
+                    "thesis":        (e.get("thesis") or "")[:200],
+                    "entry_zone":    e.get("entry_zone", ""),
+                    "hard_stop":     e.get("hard_stop", ""),
+                })
+        except Exception:
+            pass
+
+    upcoming.sort(key=lambda x: x["days_to"])
+    return upcoming
 
 
 def deep_dive(ticker: str) -> tuple:
