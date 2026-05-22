@@ -170,16 +170,10 @@
   <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Home</a>
   <a href="/macro" {% if request.path == '/macro' %}class="active"{% endif %}>Macro</a>
   <a href="/mtf" {% if request.path == '/mtf' %}class="active"{% endif %}>MTF Dashboard</a>
-  <a href="/spreads" {% if request.path == '/spreads' %}class="active"{% endif %}>Spread Finder</a>
-  <a href="/csp" {% if request.path == '/csp' %}class="active"{% endif %}>CSP Finder</a>
-  <a href="/covered-call" {% if request.path == '/covered-call' %}class="active"{% endif %}>Covered Call</a>
-  <a href="/iron-condor" {% if request.path == '/iron-condor' %}class="active"{% endif %}>Iron Condor</a>
   <a href="/chart" {% if request.path == '/chart' %}class="active"{% endif %}>Chart</a>
   <a href="/alerts" {% if request.path == '/alerts' %}class="active"{% endif %}>🔔 Alerts</a>
-  <a href="/positions" {% if request.path == '/positions' %}class="active"{% endif %}>📋 Portfolio</a>
-  <a href="/alpaca" {% if request.path == '/alpaca' %}class="active"{% endif %}>📈 Alpaca</a>
   <a href="/paper-stats" {% if request.path.startswith('/paper-stats') %}class="active"{% endif %}>🧪 Paper Stats</a>
-  <a href="/watchlist" {% if request.path.startswith('/watchlist') %}class="active"{% endif %}>📈 Stock Watchlist</a>
+  <a href="/watchlist" {% if request.path.startswith('/watchlist') %}class="active"{% endif %}>👁 Watchlist</a>
   <a href="/brief" {% if request.path.startswith('/brief') %}class="active"{% endif %}>🗞 Brief</a>
 </nav>
 

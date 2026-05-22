@@ -138,8 +138,9 @@ async def help_cmd(ctx):
         "`!analyze AAPL` — deep dive + Claude analyst note"
     ), inline=False)
     embed.add_field(name="📋  Paper Portfolio", value=(
-        "`!portfolio` — live P&L on all positions\n"
-        "`!pnl` — send daily P&L to positions channel"
+        "`!trades` — all open paper positions with live P&L\n"
+        "`!portfolio` — same as !trades\n"
+        "`!pnl` — today's closed trades + P&L summary"
     ), inline=False)
     embed.add_field(name="🧪  Paper Trading Stats", value=(
         "`!stats` — win rate, P&L, Sharpe, by-type breakdown\n"
@@ -158,6 +159,11 @@ async def help_cmd(ctx):
     embed.add_field(name="⚔️  Intelligence", value=(
         "`!briefing` — morning briefing with FRED macro data\n"
         "`!macro` — quick Fed macro snapshot"
+    ), inline=False)
+    embed.add_field(name="🤖  AI Assistant", value=(
+        "`!ask <question>` — ask anything about trading, the market, or this system\n"
+        "Or just **@mention** the bot anywhere in chat to ask a question\n"
+        "Or post in `#conquest-ai` channel — every message gets a response"
     ), inline=False)
     embed.add_field(name="⚙️  Settings & Diagnostics", value=(
         "Go to the **Alerts** page to toggle the 9 AM auto-briefing on/off.\n"
@@ -324,96 +330,58 @@ async def analyze_cmd(ctx, ticker: str = ""):
 
 @bot.command(name="portfolio", aliases=["port", "p", "positions"])
 async def portfolio_cmd(ctx):
-    thinking = await ctx.send("⏳ Loading live portfolio...")
-
-    def _do_portfolio():
-        from positions import get_positions_web_data
-        return get_positions_web_data()
-
-    data = await _run_sync(_do_portfolio)
-
-    if not data or not data.get("positions"):
-        await thinking.delete()
-        await ctx.send(
-            "📋 No open positions.\n"
-            "Add one at http://localhost:5000/positions"
-        )
-        return
-
-    total_pnl = data.get("total_pnl",     0)
-    total_cost = data.get("total_cost",   0)
-    total_pct  = data.get("total_pnl_pct", 0) * 100
-    vix        = data.get("vix", 0)
-    sign       = "+" if total_pnl >= 0 else ""
-    color      = COLOR_GREEN if total_pnl >= 0 else COLOR_RED
-
-    lines = []
-    for p in data["positions"]:
-        if p.get("error"):
-            lines.append(f"**{p['ticker']}** ⚠ {str(p['error'])[:60]}")
-            continue
-
-        pnl   = p.get("pnl",     0)
-        pnl_p = p.get("pnl_pct", 0) * 100
-        ps    = "+" if pnl >= 0 else ""
-        rec   = p.get("status", "HOLD")
-
-        if p.get("kind") == "spread":
-            lines.append(
-                f"**{p['ticker']}** {p.get('type_label','Spread')}  "
-                f"`${p['long_strike']:.0f}/{p['short_strike']:.0f}` exp {p['expiry']} ({p['dte']}d)  "
-                f"**{ps}${pnl:.0f}** ({ps}{pnl_p:.1f}%)  `{rec}`"
-            )
-        elif p.get("kind") == "option":
-            lines.append(
-                f"**{p['ticker']}** {p['option_type'].upper()} ${p['strike']}  "
-                f"exp {p['expiry']} ({p['dte']}d)  "
-                f"**{ps}${pnl:.0f}** ({ps}{pnl_p:.1f}%)  `{rec}`"
-            )
-        elif p.get("kind") == "stock":
-            lines.append(
-                f"**{p['ticker']}** {p.get('shares',0):.0f}sh  "
-                f"entry ${p.get('entry_price',0):.2f} → ${p.get('current_price',0):.2f}  "
-                f"**{ps}${pnl:.0f}** ({ps}{pnl_p:.1f}%)  `{rec}`"
-            )
-
-    embed = discord.Embed(
-        title=f"📋  Paper Portfolio — {sign}${total_pnl:,.0f} ({sign}{total_pct:.1f}%)",
-        description="\n".join(lines) or "No position data.",
-        color=color,
-        timestamp=_ts(),
-    )
-    embed.add_field(name="Cost Basis",  value=f"${total_cost:,.0f}", inline=True)
-    embed.add_field(name="Total P&L",   value=f"{sign}${total_pnl:,.0f}", inline=True)
-    vix_note = data.get("vix_note", "")
-    embed.add_field(name=f"VIX  {vix}", value=vix_note, inline=True)
-    embed.set_footer(text="Conquest Trading  •  Paper Portfolio  •  Black-Scholes pricing")
-    await thinking.delete()
-    await ctx.send(embed=embed)
+    """Alias for !trades — shows all open paper positions."""
+    await trades_cmd(ctx)
 
 
 # ── !pnl ──────────────────────────────────────────────────────────────────────
 
 @bot.command(name="pnl")
 async def pnl_cmd(ctx):
-    thinking = await ctx.send("⏳ Calculating daily P&L...")
+    """Show today's paper trading P&L summary."""
+    thinking = await ctx.send("💰 Calculating today's P&L…")
 
     def _do_pnl():
-        from positions              import get_positions_web_data
-        from alerts.positions_notifier import notify_daily_pnl
-        data = get_positions_web_data()
-        ok   = notify_daily_pnl(data)
-        return ok
+        import pytz
+        from paper_trader import load_trades, get_paper_stats
+        today_str  = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        all_t      = load_trades()
+        today_closed = [
+            t for t in all_t
+            if t.get("status") == "closed"
+            and (t.get("date_closed") or "")[:10] == today_str
+        ]
+        today_pnl = round(sum(t.get("pnl", 0) for t in today_closed), 2)
+        stats     = get_paper_stats()
+        return today_closed, today_pnl, stats
 
-    ok = await _run_sync(_do_pnl)
+    today_closed, today_pnl, stats = await _run_sync(_do_pnl)
     await thinking.delete()
-    if ok:
-        await ctx.send("📊 Daily P&L summary sent to your positions channel!")
-    else:
-        await ctx.send(
-            "⚠ Couldn't send — add a Positions Webhook URL on the Portfolio page first.\n"
-            "http://localhost:5000/positions"
+
+    import pytz
+    today_str = datetime.now(pytz.timezone("America/New_York")).strftime("%b %d")
+    sign  = "▲" if today_pnl >= 0 else "▼"
+    color = COLOR_GREEN if today_pnl >= 0 else COLOR_RED
+
+    lines = []
+    for t in sorted(today_closed, key=lambda x: x.get("pnl", 0), reverse=True)[:8]:
+        dot = "🟢" if t.get("pnl", 0) >= 0 else "🔴"
+        lines.append(
+            f"{dot} **{t['ticker']}** {t['trade_type'].replace('_',' ')} "
+            f"${t.get('pnl', 0):+.2f} · {t.get('close_reason','').replace('_',' ')}"
         )
+
+    embed = discord.Embed(
+        title=f"{sign}  Daily P&L — {today_str}",
+        description="\n".join(lines) or "No trades closed today.",
+        color=color,
+        timestamp=_ts(),
+    )
+    embed.add_field(name="Today",    value=f"**${today_pnl:+.2f}**  ({len(today_closed)} trades)", inline=True)
+    embed.add_field(name="All-Time", value=f"**${stats.get('total_pnl', 0):+.2f}**", inline=True)
+    embed.add_field(name="Win Rate", value=f"**{stats.get('win_rate', 0)*100:.1f}%**", inline=True)
+    embed.set_footer(text="Conquest Trading  •  Paper Simulation")
+    await ctx.send(embed=embed)
 
 
 # ── !briefing ─────────────────────────────────────────────────────────────────
@@ -2516,6 +2484,126 @@ async def runmorning_cmd(ctx):
         print(f"[Bot] !runmorning screener error: {e}")
 
     await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#screener`.", delete_after=30)
+
+
+# ── AI Chatbot ────────────────────────────────────────────────────────────────
+# Three ways to trigger: !ask <question>, @mention the bot, or post in #conquest-ai
+
+_AI_SYSTEM_PROMPT = """You are Conquest, an AI trading assistant embedded in a Discord server.
+You are helping a trader (Max) who is learning quantitative trading and options strategies.
+
+About the Conquest Trading system you're part of:
+- An automated paper trading bot that generates 10 trades/day using a 6-agent AI swarm
+- Agents: market_scanner, valuation, technicals, catalysts, risk, options_flow — each a Claude Haiku specialist
+- Agents learn over time: weights shift based on win/loss outcomes
+- Trades span stocks, call spreads, put spreads, long calls, long puts, iron condors
+- Deployed on Railway (cloud), stores everything in PostgreSQL, logs trades to Notion
+- Morning briefing at 9 AM ET with FRED macro data + sector rotation
+
+Your role: answer questions about trading, options strategies, markets, technical analysis,
+quant concepts, and the Conquest system itself. Be direct, conversational, and educational.
+Keep responses concise for Discord — under 400 words unless a deep explanation is genuinely needed.
+Use plain text, not heavy markdown. Don't use bullet lists for short answers.
+Never give specific personalized financial advice ("you should buy X") — keep it educational."""
+
+_AI_CHAT_CHANNELS = {"conquest-ai", "ask-conquest", "ai-chat"}
+
+
+async def _conquest_ai_reply(message: discord.Message, question: str):
+    """Core AI response function. Calls Claude, handles chunking, posts reply."""
+    if not question.strip():
+        return
+
+    # Grab a snapshot of paper stats for extra context (best-effort)
+    context_note = ""
+    try:
+        def _get_ctx():
+            from paper_trader import get_paper_stats
+            s = get_paper_stats()
+            return (f"[System context: {s['total_trades']} paper trades logged, "
+                    f"{s['open_count']} open, win rate {s.get('win_rate',0)*100:.1f}%, "
+                    f"total P&L ${s.get('total_pnl',0):+.2f}]")
+        context_note = await _run_sync(_get_ctx)
+    except Exception:
+        pass
+
+    async with message.channel.typing():
+        def _call_ai():
+            from conquest_brain import _get_client
+            full_question = f"{context_note}\n\nUser question: {question}" if context_note else question
+            msg = _get_client().messages.create(
+                model     = "claude-haiku-4-5",
+                max_tokens= 600,
+                system    = _AI_SYSTEM_PROMPT,
+                messages  = [{"role": "user", "content": full_question}],
+            )
+            return msg.content[0].text.strip()
+
+        try:
+            answer = await _run_sync(_call_ai)
+        except Exception as e:
+            answer = f"⚠ AI unavailable right now: {str(e)[:100]}"
+
+    # Discord message limit is 2000 chars — split cleanly if needed
+    while answer:
+        chunk = answer[:1900]
+        if len(answer) > 1900:
+            # Break at last sentence boundary
+            last_period = chunk.rfind(". ")
+            if last_period > 800:
+                chunk = answer[:last_period + 1]
+        await message.channel.send(chunk)
+        answer = answer[len(chunk):].lstrip()
+
+
+@bot.command(name="ask", aliases=["q", "question", "chat", "ai"])
+async def ask_cmd(ctx, *, question: str = ""):
+    """Ask Conquest AI anything about trading, options, or the system."""
+    if not question:
+        await ctx.send("Usage: `!ask <your question>`  e.g. `!ask what is an iron condor?`")
+        return
+    await _conquest_ai_reply(ctx.message, question)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """
+    AI responds when:
+      1. The bot is @mentioned (in any channel)
+      2. A message is posted in a designated AI chat channel
+    Commands (!...) are processed normally first — this never blocks them.
+    """
+    # Never respond to ourselves
+    if message.author == bot.user:
+        return
+
+    # Always process commands first so nothing breaks
+    await bot.process_commands(message)
+
+    content = message.content.strip()
+
+    # Don't double-handle command messages
+    if content.startswith("!"):
+        return
+
+    # Case 1: bot is @mentioned
+    if bot.user in message.mentions:
+        question = (content
+                    .replace(f"<@{bot.user.id}>", "")
+                    .replace(f"<@!{bot.user.id}>", "")
+                    .strip())
+        if question:
+            await _conquest_ai_reply(message, question)
+        else:
+            await message.channel.send(
+                "Hey! Ask me anything about trading or this system. "
+                "e.g. `@Conquest what is the difference between a call spread and a long call?`"
+            )
+        return
+
+    # Case 2: dedicated AI channel
+    if message.channel.name.lower() in _AI_CHAT_CHANNELS:
+        await _conquest_ai_reply(message, content)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
