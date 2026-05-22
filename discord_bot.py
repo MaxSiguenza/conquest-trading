@@ -160,10 +160,11 @@ async def help_cmd(ctx):
         "`!briefing` — morning briefing with FRED macro data\n"
         "`!macro` — quick Fed macro snapshot"
     ), inline=False)
-    embed.add_field(name="🤖  AI Assistant", value=(
-        "`!ask <question>` — ask anything about trading, the market, or this system\n"
-        "Or just **@mention** the bot anywhere in chat to ask a question\n"
-        "Or post in `#conquest-ai` channel — every message gets a response"
+    embed.add_field(name="🤖  AI Assistant  (works in ANY channel)", value=(
+        "`?your question` — fastest, works everywhere, e.g. `?what is delta`\n"
+        "`!ask <question>` — explicit command form\n"
+        "**@mention** the bot — mention it anywhere\n"
+        "`#conquest-ai` — freeform chat, no prefix needed"
     ), inline=False)
     embed.add_field(name="⚙️  Settings & Diagnostics", value=(
         "Go to the **Alerts** page to toggle the 9 AM auto-briefing on/off.\n"
@@ -2487,7 +2488,11 @@ async def runmorning_cmd(ctx):
 
 
 # ── AI Chatbot ────────────────────────────────────────────────────────────────
-# Three ways to trigger: !ask <question>, @mention the bot, or post in #conquest-ai
+# Four ways to trigger (all work in ANY channel):
+#   1. ?your question       — fastest, works everywhere, no commands needed
+#   2. !ask your question   — explicit command form
+#   3. @mention the bot     — mention anywhere
+#   4. post in #conquest-ai — freeform chat channel
 
 _AI_SYSTEM_PROMPT = """You are Conquest, an AI trading assistant embedded in a Discord server.
 You are helping a trader (Max) who is learning quantitative trading and options strategies.
@@ -2568,16 +2573,18 @@ async def ask_cmd(ctx, *, question: str = ""):
 @bot.event
 async def on_message(message: discord.Message):
     """
-    AI responds when:
-      1. The bot is @mentioned (in any channel)
-      2. A message is posted in a designated AI chat channel
-    Commands (!...) are processed normally first — this never blocks them.
+    AI responds in any channel via four triggers:
+      1. ?question       — leading ? anywhere (fastest, no commands)
+      2. !ask question   — explicit command (handled by bot.process_commands)
+      3. @mention        — mention the bot anywhere
+      4. #conquest-ai    — freeform AI chat channel
+    Commands (!...) are always processed first — nothing ever breaks.
     """
     # Never respond to ourselves
     if message.author == bot.user:
         return
 
-    # Always process commands first so nothing breaks
+    # Always process commands first so !ask, !scan, etc. still work
     await bot.process_commands(message)
 
     content = message.content.strip()
@@ -2586,7 +2593,16 @@ async def on_message(message: discord.Message):
     if content.startswith("!"):
         return
 
-    # Case 1: bot is @mentioned
+    # ── Trigger 1: ? prefix — works in ANY channel, fastest shorthand ─────────
+    # e.g.  ?what is a bull call spread
+    #        ? why is NVDA down today
+    if content.startswith("?") and len(content) > 2:
+        question = content[1:].strip()
+        if question:
+            await _conquest_ai_reply(message, question)
+        return
+
+    # ── Trigger 2: @mention — works in any channel ────────────────────────────
     if bot.user in message.mentions:
         question = (content
                     .replace(f"<@{bot.user.id}>", "")
@@ -2596,12 +2612,12 @@ async def on_message(message: discord.Message):
             await _conquest_ai_reply(message, question)
         else:
             await message.channel.send(
-                "Hey! Ask me anything about trading or this system. "
-                "e.g. `@Conquest what is the difference between a call spread and a long call?`"
+                "Hey! Ask me anything. Try `?what is delta` or `?why is NVDA down` "
+                "from any channel — no need to type !ask."
             )
         return
 
-    # Case 2: dedicated AI channel
+    # ── Trigger 3: dedicated AI channel — freeform, no prefix needed ──────────
     if message.channel.name.lower() in _AI_CHAT_CHANNELS:
         await _conquest_ai_reply(message, content)
 
