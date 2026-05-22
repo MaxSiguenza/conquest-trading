@@ -972,50 +972,89 @@ def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) 
     Claude-narrated end-of-day wrap for automated paper trading.
     Called at 4:05 PM ET after the numeric EOD summary is posted.
 
-    stats        : get_paper_stats() dict
+    stats        : get_paper_stats() dict  — includes open_trades list
     today_trades : list of trade dicts closed today
     all_time_pnl : running total P&L
     """
+    from datetime import date as _date
     today_pnl  = sum(t.get("pnl", 0) for t in today_trades)
     win_today  = sum(1 for t in today_trades if t.get("pnl", 0) >= 0)
     loss_today = len(today_trades) - win_today
 
-    trade_lines = []
+    # ── Closed trades block ───────────────────────────────────────────────────
+    closed_lines = []
     for t in sorted(today_trades, key=lambda x: x.get("pnl", 0), reverse=True)[:6]:
         pnl    = t.get("pnl", 0)
-        reason = t.get("close_reason", "").replace("_", " ")
-        trade_lines.append(
+        reason = t.get("close_reason", "?").replace("_", " ")
+        closed_lines.append(
             f"  {t['ticker']} {t['trade_type'].replace('_',' ')} → "
             f"${pnl:+.2f} ({t.get('pnl_pct', 0)*100:+.1f}%) via {reason}"
         )
+    closed_block = "\n".join(closed_lines) if closed_lines else "  No trades closed today."
 
-    trades_block = "\n".join(trade_lines) if trade_lines else "  No trades closed today."
+    # ── Still-open positions block ────────────────────────────────────────────
+    open_trades = stats.get("open_trades", [])
+    open_lines  = []
+    for t in open_trades:
+        ticker     = t.get("ticker", "?")
+        ttype      = t.get("trade_type", "?").replace("_", " ")
+        pnl        = t.get("pnl", 0) or 0
+        pnl_pct    = (t.get("pnl_pct", 0) or 0) * 100
+        days_held  = t.get("days_held", 0) or 0
+        days_left  = max(0, 5 - days_held)
+        entry_r    = t.get("reasoning", "")
+        # Distance to targets — give the PM context on how close each is
+        cost       = t.get("cost_basis", 0) or 0
+        curr       = t.get("current_price", cost) or cost
+        if cost > 0:
+            dist_profit = (STK_PROFIT if "stock" in ttype else OPT_PROFIT) * 100
+            dist_stop   = abs(STK_STOP if "stock" in ttype else OPT_STOP) * 100
+        else:
+            dist_profit = dist_stop = 0
 
-    prompt = f"""End-of-day paper trading summary:
+        entry_snippet = (entry_r[:120] + "…") if len(entry_r) > 120 else entry_r
+        open_lines.append(
+            f"  {ticker} {ttype} | P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%) | "
+            f"Day {days_held}/5 ({days_left}d left) | "
+            f"Original thesis: {entry_snippet or 'not recorded'}"
+        )
 
-TODAY:
-  Trades closed: {len(today_trades)} ({win_today} wins / {loss_today} losses)
-  Today P&L:     ${today_pnl:+.2f}
+    open_block = "\n".join(open_lines) if open_lines else "  No positions currently open."
 
-TOP TRADES TODAY:
-{trades_block}
+    # Pull in constants needed for the prompt (imported at module level in paper_trader)
+    try:
+        from paper_trader import STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP
+    except Exception:
+        STK_PROFIT, STK_STOP, OPT_PROFIT, OPT_STOP = 0.05, -0.03, 0.50, -0.75
 
-ALL-TIME STATS:
-  Total closed: {stats.get('closed_count', 0)}
-  Win rate:     {stats.get('win_rate', 0)*100:.1f}%
-  All-time P&L: ${all_time_pnl:+.2f}
-  Sharpe ratio: {stats.get('sharpe') or 'N/A'}
-  Profit factor:{stats.get('profit_factor') or 'N/A'}
+    prompt = f"""End-of-day paper trading summary — {_date.today().strftime('%B %d, %Y')}
 
-Write a 3-4 sentence end-of-day debrief for the paper trading simulation.
-Cover: (1) how today went — was it a clean day or messy exits, (2) any pattern worth
-noting in what worked vs what didn't, (3) one forward-looking thought for tomorrow.
-Be direct and analytical. Reference actual numbers."""
+═══ TODAY'S CLOSED TRADES ═══
+Closed: {len(today_trades)} trades  ({win_today}W / {loss_today}L)  |  Today P&L: ${today_pnl:+.2f}
+
+{closed_block}
+
+═══ POSITIONS STILL OPEN OVERNIGHT ═══
+{open_block}
+
+═══ ALL-TIME STATS ═══
+  Closed trades: {stats.get('closed_count', 0)}   Win rate: {stats.get('win_rate', 0)*100:.1f}%
+  All-time P&L:  ${all_time_pnl:+.2f}   Sharpe: {stats.get('sharpe') or 'N/A'}   PF: {stats.get('profit_factor') or 'N/A'}
+
+Write a sharp end-of-day debrief covering THREE sections:
+
+1. TODAY'S CLOSE — How did the day go? Were exits clean or forced? Any patterns in what worked vs what didn't? Reference actual numbers.
+
+2. OPEN POSITIONS REVIEW — For EACH open position above, give one sentence: where it stands right now, why the system kept it (it hasn't hit its target or stop yet), and what to watch tomorrow. Be specific — use the ticker name and P&L.
+
+3. TOMORROW'S OUTLOOK — One forward-looking thought based on what's still on the books and what today's action revealed.
+
+Be direct and analytical. No fluff. Reference tickers by name."""
 
     try:
         msg = _get_client().messages.create(
             model="claude-haiku-4-5",
-            max_tokens=250,
+            max_tokens=500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )

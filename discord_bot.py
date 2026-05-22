@@ -2168,8 +2168,9 @@ async def paper_trading_loop():
                 if ch_eod:
                     await ch_eod.send(embed=eod_embed)
 
-                # Claude narrative debrief (posted right after the numbers)
-                if ch_eod and today_closed:
+                # Claude narrative debrief (always fires — covers closed + open positions)
+                open_positions = stats.get("open_trades", [])
+                if ch_eod and (today_closed or open_positions):
                     try:
                         def _get_narrative():
                             from conquest_brain import paper_evening_debrief
@@ -2184,9 +2185,12 @@ async def paper_trading_loop():
                                 color=COLOR_PURPLE,
                                 timestamp=_ts(),
                             )
-                            narr_embed.set_footer(
-                                text="Conquest Intelligence Desk  •  Paper simulation  •  Not financial advice"
+                            # Add open positions count to footer so it's clear
+                            footer_txt = (
+                                f"{len(open_positions)} position(s) held overnight  •  "
+                                "Conquest Intelligence Desk  •  Not financial advice"
                             )
+                            narr_embed.set_footer(text=footer_txt)
                             await ch_eod.send(embed=narr_embed)
                     except Exception as e_narr:
                         print(f"[PaperLoop] Narrative debrief error: {e_narr}")
