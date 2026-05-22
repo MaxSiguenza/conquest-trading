@@ -270,7 +270,12 @@ def alerts():
         settings["auto_briefing"] = auto_briefing
         _save_settings(settings)
 
-        if action == "test":
+        if action == "save":
+            # Settings already saved above — just redirect back with confirmation
+            from flask import redirect, url_for
+            return redirect("/alerts?saved=1")
+
+        elif action == "test":
             from alerts.discord import test_webhook
             ok, send_status = test_webhook(webhook_url)
 
@@ -316,6 +321,8 @@ def alerts():
             else:
                 send_status = "Add your webhook URL to send the briefing to Discord."
 
+    saved = request.args.get("saved") == "1"
+
     return render_template(
         "alerts.html",
         settings=settings,
@@ -323,6 +330,7 @@ def alerts():
         send_status=send_status,
         action=action,
         auto_briefing=settings.get("auto_briefing", False),
+        saved=saved,
     )
 
 

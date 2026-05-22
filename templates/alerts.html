@@ -86,6 +86,8 @@
 .btn-send:hover { background: #4752c4; }
 .btn-briefing { background: #2d1f4e; color: #a78bfa; border: 1px solid #7c6af7; }
 .btn-briefing:hover { background: #3d2a6e; color: #c4b5fd; }
+.btn-save { background: #1a3a2a; color: #4ade80; border: 1px solid #4ade80; }
+.btn-save:hover { background: #1f4a34; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .status-box {
@@ -244,6 +246,9 @@
       </div>
 
       <div class="btn-row">
+        <button type="submit" name="action" value="save" class="btn btn-save" id="save-btn">
+          💾 Save Settings
+        </button>
         <button type="submit" name="action" value="scan" class="btn btn-primary" id="scan-btn">
           Scan Watchlist
         </button>
@@ -259,6 +264,17 @@
       </div>
     </div>
   </form>
+
+  {% if saved %}
+  <div class="status-box status-ok" style="margin-top:16px;">
+    ✓ Settings saved. Auto-briefing is <strong>{{ "ON" if auto_briefing else "OFF" }}</strong>.
+    {% if auto_briefing %}
+      The full automation schedule will run every weekday starting at 9:00 AM ET.
+    {% else %}
+      Check the box above and save again to enable the full automation schedule.
+    {% endif %}
+  </div>
+  {% endif %}
 
   <div class="spinner" id="spinner">
     <div class="dot"></div><div class="dot"></div><div class="dot"></div>
