@@ -943,8 +943,8 @@ async def watch_cmd(ctx, ticker: str = ""):
 
     embed = _build_watchlist_embed(entry)
 
-    # Post to #watchlist channel
-    wl_channel = await _get_channel("watchlist", "general")
+    # Post to #stocks channel
+    wl_channel = await _get_channel("stocks", "general")
     if wl_channel and wl_channel != ctx.channel:
         await wl_channel.send(embed=embed)
         await ctx.send(
@@ -993,7 +993,7 @@ async def deepdive_cmd(ctx, ticker: str = ""):
     )
     dd_embed.set_footer(text="Conquest Research  •  Not financial advice")
 
-    wl_channel = await _get_channel("watchlist", "general")
+    wl_channel = await _get_channel("stocks", "general")
     dest = wl_channel if wl_channel else ctx.channel
     await dest.send(embed=embed)
     await dest.send(embed=dd_embed)
@@ -1201,7 +1201,7 @@ async def earnings_cmd(ctx, days: int = 14):
         text="Conquest Earnings Radar  •  Dates sourced from Yahoo Finance  •  Always verify"
     )
 
-    er_channel = await _get_channel("earnings-radar", "watchlist", "general")
+    er_channel = await _get_channel("earnings-radar", "stocks", "general")
     dest = er_channel if er_channel else ctx.channel
     await dest.send(embed=embed)
     if dest != ctx.channel:
@@ -1223,7 +1223,7 @@ async def testchannels_cmd(ctx):
         ("trade-log",        "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
         ("evening-debrief",  "📊",  "Evening Debrief",             "Claude-narrated EOD wrap with paper trading summary at 4:05 PM ET."),
         ("daily-pnl",        "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
-        ("watchlist",        "👁",  "Watchlist",                   "Auto-scan results post here at market open (9:30 AM). !watch and !deepdive cards also post here."),
+        ("stocks",           "📈",  "Stock Watchlist",             "Auto-scan results post here at market open (9:30 AM). !watch and !deepdive cards also post here."),
         ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
         ("macro-worldview",  "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
         ("live-positions",   "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
@@ -1359,7 +1359,7 @@ async def paper_trading_loop():
         ch_log      = await _get_channel("trade-log",       "trade-alerts", "general")
         ch_eod      = await _get_channel("evening-debrief", "daily-pnl",    "general")
         ch_pnl      = await _get_channel("daily-pnl",       "evening-debrief", "general")
-        ch_watchlist= await _get_channel("watchlist",        "general")
+        ch_watchlist= await _get_channel("stocks",           "general")
         ch_positions= await _get_channel("live-positions",   "general")
 
         # ── 0a. Auto-scan at market open (9:30–10:15 AM, once per day) ─────────
