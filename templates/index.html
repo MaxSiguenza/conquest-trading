@@ -1,183 +1,624 @@
 {% extends "base.html" %}
 
-{% block title %}Conquest Trading{% endblock %}
+{% block title %}Conquest Trading — Command Center{% endblock %}
 
 {% block extra_style %}
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+* { font-family: 'Space Grotesk', -apple-system, sans-serif; }
+code, .mono { font-family: 'JetBrains Mono', monospace; }
+
+/* ── Hero ───────────────────────────────────────────────── */
+.hero {
+  padding: 20px 0 36px;
+  position: relative;
+}
+
+.hero-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #7c6af7;
+  margin-bottom: 10px;
+}
+
+.hero-title {
+  font-size: 32px;
+  font-weight: 700;
+  color: #f1f5f9;
+  line-height: 1.15;
+  margin-bottom: 10px;
+  letter-spacing: -0.5px;
+}
+
+.hero-title span {
+  background: linear-gradient(120deg, #7c6af7 0%, #a78bfa 50%, #60a5fa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-sub {
+  font-size: 14px;
+  color: #475569;
+  line-height: 1.6;
+  max-width: 540px;
+}
+
+/* ── Status bar ─────────────────────────────────────────── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 18px;
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  margin-bottom: 36px;
+  flex-wrap: wrap;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-green  { background: #4ade80; box-shadow: 0 0 6px #4ade8060; animation: pulse-dot 2.5s infinite; }
+.dot-purple { background: #7c6af7; box-shadow: 0 0 6px #7c6af760; animation: pulse-dot 2.5s infinite 0.5s; }
+.dot-blue   { background: #60a5fa; box-shadow: 0 0 6px #60a5fa60; animation: pulse-dot 2.5s infinite 1s; }
+.dot-orange { background: #fb923c; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+
+.status-label { color: #94a3b8; font-weight: 500; }
+
+/* ── Section headers ────────────────────────────────────── */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  margin-top: 32px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.section-line {
+  flex: 1;
+  height: 1px;
+  background: #1e2235;
+}
+
+/* ── Cards ──────────────────────────────────────────────── */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 14px;
 }
 
 .tool-card {
-  background: #1a1d27;
-  border: 1px solid #2d3148;
+  background: #13151f;
+  border: 1px solid #1e2235;
   border-radius: 12px;
-  padding: 22px;
+  padding: 20px 22px;
   text-decoration: none;
   color: inherit;
   display: block;
-  transition: all 0.15s;
-  cursor: pointer;
+  transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.tool-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--card-accent, transparent);
+  opacity: 0;
+  transition: opacity 0.2s;
 }
 
 .tool-card:hover {
-  border-color: #7c6af7;
+  border-color: #2d3148;
   transform: translateY(-2px);
-  background: #1e2133;
+  background: #161824;
 }
 
-.tool-card .icon {
-  font-size: 26px;
+.tool-card:hover::before { opacity: 1; }
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   margin-bottom: 12px;
 }
 
-.tool-card h3 {
-  font-size: 15px;
-  font-weight: 600;
-  color: #f1f5f9;
-  margin-bottom: 6px;
+.card-icon {
+  font-size: 22px;
+  line-height: 1;
 }
 
-.tool-card p {
-  font-size: 13px;
-  color: #64748b;
-  line-height: 1.5;
-}
-
-.tag {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 99px;
-  margin-top: 10px;
-  letter-spacing: 0.5px;
+.badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
   text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 5px;
 }
 
-.tag-credit  { background: #1a3a2a; color: #4ade80; }
-.tag-debit   { background: #1a2a3a; color: #60a5fa; }
-.tag-income  { background: #2a1a3a; color: #c084fc; }
-.tag-macro   { background: #3a2a1a; color: #fb923c; }
-.tag-scan    { background: #1a2a3a; color: #38bdf8; }
-.tag-paper   { background: #1a1f35; color: #818cf8; }
-.tag-alpaca  { background: #1a3328; color: #34d399; }
+.badge-auto    { background: #1a2a1a; color: #4ade80; }
+.badge-ai      { background: #2a1a3a; color: #c084fc; }
+.badge-live    { background: #1a2535; color: #38bdf8; }
+.badge-scan    { background: #2a2010; color: #fb923c; }
+.badge-macro   { background: #2a1a10; color: #f97316; }
+.badge-research{ background: #1a2030; color: #60a5fa; }
+.badge-discord { background: #1a1a30; color: #818cf8; }
 
-.subtitle {
+.card-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.card-desc {
+  font-size: 12.5px;
+  color: #475569;
+  line-height: 1.55;
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #1e2235;
+  font-size: 11px;
+  color: #334155;
+}
+
+.card-footer-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* card accent colors */
+.accent-purple { --card-accent: linear-gradient(90deg, #7c6af7, #a78bfa); }
+.accent-green  { --card-accent: linear-gradient(90deg, #4ade80, #34d399); }
+.accent-blue   { --card-accent: linear-gradient(90deg, #60a5fa, #38bdf8); }
+.accent-orange { --card-accent: linear-gradient(90deg, #fb923c, #f59e0b); }
+
+/* ── AI Agent card (featured) ───────────────────────────── */
+.agent-card {
+  background: #13151f;
+  border: 1px solid #2d3148;
+  border-radius: 14px;
+  padding: 24px;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  align-items: center;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-card::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #7c6af7, #a78bfa, #60a5fa);
+}
+
+.agent-card:hover {
+  border-color: #7c6af780;
+  background: #161824;
+}
+
+.agent-left {}
+
+.agent-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #7c6af7;
+  margin-bottom: 8px;
+}
+
+.agent-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin-bottom: 8px;
+}
+
+.agent-desc {
   font-size: 13px;
   color: #475569;
-  margin-bottom: 28px;
+  line-height: 1.6;
+  max-width: 500px;
+}
+
+.agent-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.agent-pill {
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 99px;
+  border: 1px solid #2d3148;
+  color: #64748b;
+}
+
+.agent-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.agent-stat {
+  text-align: right;
+}
+
+.agent-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #a78bfa;
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1;
+}
+
+.agent-stat-label {
+  font-size: 10px;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Workflow strip ─────────────────────────────────────── */
+.workflow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 18px 20px;
+  background: #0f1117;
+  border: 1px solid #1e2235;
+  border-radius: 12px;
+  margin-top: 32px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.wf-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.wf-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  font-size: 11px;
+  font-weight: 700;
+  color: #7c6af7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wf-text {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.wf-text strong {
+  color: #94a3b8;
+}
+
+.wf-arrow {
+  color: #1e2235;
+  margin: 0 12px;
+  font-size: 16px;
+}
+
+@media (max-width: 640px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .agent-card { grid-template-columns: 1fr; }
+  .agent-right { align-items: flex-start; }
+  .hero-title { font-size: 24px; }
 }
 {% endblock %}
 
 {% block content %}
-<h1>Conquest Trading</h1>
-<p class="subtitle">All tools in one place. Click any card to open it.</p>
+
+<!-- ── Hero ────────────────────────────────────────────── -->
+<div class="hero">
+  <div class="hero-eyebrow">⚔ Conquest Trading</div>
+  <h1 class="hero-title">Your AI-Powered<br><span>Trading Command Center</span></h1>
+  <p class="hero-sub">Six specialist AI agents scan, analyze, and generate paper trades every market day. All intelligence flows back to Discord.</p>
+</div>
+
+<!-- ── Status bar ───────────────────────────────────────── -->
+<div class="status-bar">
+  <div class="status-item">
+    <div class="status-dot dot-green"></div>
+    <span class="status-label">Agent Swarm</span>
+    <span>6 agents active</span>
+  </div>
+  <div class="status-item">
+    <div class="status-dot dot-purple"></div>
+    <span class="status-label">Paper Trades</span>
+    <span>9:35 AM ET daily</span>
+  </div>
+  <div class="status-item">
+    <div class="status-dot dot-blue"></div>
+    <span class="status-label">Discord Bot</span>
+    <span>Real-time · !ask anything</span>
+  </div>
+  <div class="status-item">
+    <div class="status-dot dot-orange"></div>
+    <span class="status-label">Finnhub</span>
+    <span>News · Insiders · Earnings</span>
+  </div>
+</div>
+
+<!-- ── AI Brain (featured) ──────────────────────────────── -->
+<div class="section-header">
+  <span class="section-label">Autonomous AI System</span>
+  <div class="section-line"></div>
+</div>
+
+<div class="grid" style="margin-bottom: 0;">
+  <a href="/paper-stats" class="agent-card">
+    <div class="agent-left">
+      <div class="agent-eyebrow">🤖 Multi-Agent Swarm · Claude Haiku</div>
+      <div class="agent-title">Conquest Agent Brain</div>
+      <div class="agent-desc">
+        Six specialist agents run in parallel on every ticker — market scanner, valuation, technicals,
+        catalysts (live Finnhub news + insider data), risk, and options flow.
+        Agents learn from every closed trade, shifting weights toward whoever's been right.
+      </div>
+      <div class="agent-pills">
+        <span class="agent-pill">market_scanner</span>
+        <span class="agent-pill">valuation</span>
+        <span class="agent-pill">technicals</span>
+        <span class="agent-pill">catalysts ✦ Finnhub</span>
+        <span class="agent-pill">risk</span>
+        <span class="agent-pill">options_flow</span>
+      </div>
+    </div>
+    <div class="agent-right">
+      <div class="agent-stat">
+        <div class="agent-stat-value">6</div>
+        <div class="agent-stat-label">Agents</div>
+      </div>
+      <div class="agent-stat">
+        <div class="agent-stat-value">4/6</div>
+        <div class="agent-stat-label">Consensus min</div>
+      </div>
+      <div class="agent-stat">
+        <div class="agent-stat-value">0.62</div>
+        <div class="agent-stat-label">Conf threshold</div>
+      </div>
+    </div>
+  </a>
+</div>
+
+<!-- ── Intelligence & Analysis ──────────────────────────── -->
+<div class="section-header" style="margin-top: 28px;">
+  <span class="section-label">Intelligence & Analysis</span>
+  <div class="section-line"></div>
+</div>
 
 <div class="grid">
 
-  <a href="/macro" class="tool-card">
-    <div class="icon">🌍</div>
-    <h3>Macro Dashboard</h3>
-    <p>Check the full economic backdrop before any trade. DXY, yields, HYG, oil, copper, sector rotation phase.</p>
-    <span class="tag tag-macro">Run First</span>
+  <a href="/brief" class="tool-card accent-purple">
+    <div class="card-top">
+      <div class="card-icon">🗞</div>
+      <span class="badge badge-ai">AI · Daily</span>
+    </div>
+    <div class="card-title">Morning Intelligence Brief</div>
+    <div class="card-desc">AI-generated macro brief each morning. Regime assessment, overnight news, sector rotation signals, and what to watch — grounded in real FRED indicators.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">⚡ 8:45 AM ET auto-generated</div>
+    </div>
   </a>
 
-  <a href="/mtf" class="tool-card">
-    <div class="icon">📊</div>
-    <h3>Multi-Timeframe Dashboard</h3>
-    <p>Scan any list of stocks. Shows MTF signals, ADX, HV Rank, RS rank, squeeze, OBV, and sector ETF confirmation.</p>
-    <span class="tag tag-scan">Scanner</span>
+  <a href="/macro" class="tool-card accent-orange">
+    <div class="card-top">
+      <div class="card-icon">🌍</div>
+      <span class="badge badge-macro">Macro</span>
+    </div>
+    <div class="card-title">Macro Dashboard</div>
+    <div class="card-desc">Check the full economic backdrop before any trade. DXY, yields, HYG, oil, copper, and sector rotation phase via FRED data.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">📌 Run this first</div>
+    </div>
   </a>
 
-  <a href="/spreads" class="tool-card">
-    <div class="icon">📈</div>
-    <h3>Spread Finder</h3>
-    <p>Finds bull call spreads and bull put spreads within your budget. HVR-driven recommendation on which type to use.</p>
-    <span class="tag tag-debit">Debit</span>
-    <span class="tag tag-credit">Credit</span>
+  <a href="/mtf" class="tool-card accent-blue">
+    <div class="card-top">
+      <div class="card-icon">📊</div>
+      <span class="badge badge-scan">Scanner</span>
+    </div>
+    <div class="card-title">Multi-Timeframe Dashboard</div>
+    <div class="card-desc">Full MTF scan across monthly/weekly/daily. ADX, HV Rank, squeeze momentum, OBV, RS rank, and sector ETF confirmation in one shot.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">📈 Entry signal detection</div>
+    </div>
   </a>
 
-  <a href="/csp" class="tool-card">
-    <div class="icon">💵</div>
-    <h3>Cash-Secured Put Finder</h3>
-    <p>Step 1 of the Wheel Strategy. Sell a put, collect premium, get assigned shares at a discount if exercised.</p>
-    <span class="tag tag-income">Wheel Step 1</span>
-  </a>
-
-  <a href="/covered-call" class="tool-card">
-    <div class="icon">📝</div>
-    <h3>Covered Call Analyzer</h3>
-    <p>Step 2 of the Wheel Strategy. Own 100+ shares? Sell a call against them each month for steady income.</p>
-    <span class="tag tag-income">Wheel Step 2</span>
-  </a>
-
-  <a href="/iron-condor" class="tool-card">
-    <div class="icon">🦅</div>
-    <h3>Iron Condor Finder</h3>
-    <p>Profit if the stock stays in a range. Bull put spread + bear call spread simultaneously. Best for low-volatility stocks.</p>
-    <span class="tag tag-credit">Credit</span>
-  </a>
-
-  <a href="/chart" class="tool-card">
-    <div class="icon">📉</div>
-    <h3>Chart Analyzer</h3>
-    <p>Interactive chart with EMAs, Bollinger Bands, RSI, MACD, Monte Carlo forecast cone, buy/sell signals, and backtest equity curve.</p>
-    <span class="tag tag-scan">Interactive</span>
-  </a>
-
-  <a href="/alerts" class="tool-card">
-    <div class="icon">🔔</div>
-    <h3>Discord Alerts</h3>
-    <p>Scan your entire watchlist at once. Get notified on your phone via Discord when entry signals or MACD crossovers fire on any ticker.</p>
-    <span class="tag tag-scan">Alerts</span>
-  </a>
-
-  <a href="/positions" class="tool-card">
-    <div class="icon">📋</div>
-    <h3>Paper Portfolio</h3>
-    <p>Track paper trades with live P&L. Add spreads, options, and stocks. Live Black-Scholes pricing with hold/close/roll recommendations.</p>
-    <span class="tag tag-paper">Paper Trading</span>
-  </a>
-
-  <a href="/alpaca" class="tool-card">
-    <div class="icon">📈</div>
-    <h3>Alpaca Paper Account</h3>
-    <p>Live paper brokerage account. $100K virtual equity, $200K buying power. Submit paper stock orders directly from the dashboard.</p>
-    <span class="tag tag-alpaca">Live Paper</span>
-  </a>
-
-  <a href="/paper-stats" class="tool-card">
-    <div class="icon">🧪</div>
-    <h3>Paper Trading Stats</h3>
-    <p>10 auto-generated trades per day across stocks, calls, puts, spreads, and iron condors. Tracks win rate, Sharpe ratio, profit factor, and P&L by trade type. Fully automated.</p>
-    <span class="tag tag-paper">Auto</span>
-  </a>
-
-  <a href="/watchlist" class="tool-card">
-    <div class="icon">📈</div>
-    <h3>Stock Watchlist</h3>
-    <p>Add any ticker and get an AI-generated thesis, conviction rating, price targets, and risk report — equity buying only, no options. Auto-discovery scans 80 stocks daily.</p>
-    <span class="tag tag-scan">Research</span>
-  </a>
-
-  <a href="/brief" class="tool-card">
-    <div class="icon">🗞</div>
-    <h3>Morning Intelligence Brief</h3>
-    <p>AI-generated daily macro brief. Covers regime assessment, overnight developments, sector rotation, and what to watch — grounded in real market data and FRED indicators.</p>
-    <span class="tag tag-macro">Daily</span>
+  <a href="/chart" class="tool-card accent-blue">
+    <div class="card-top">
+      <div class="card-icon">📉</div>
+      <span class="badge badge-live">Interactive</span>
+    </div>
+    <div class="card-title">Chart Analyzer</div>
+    <div class="card-desc">Interactive chart with EMAs, Bollinger Bands, RSI, MACD, Monte Carlo forecast cone, buy/sell signals overlaid, and backtest equity curve.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">🔍 Any ticker, any time</div>
+    </div>
   </a>
 
 </div>
 
-<div class="card" style="margin-top: 32px;">
-  <p style="font-size: 13px; color: #475569; line-height: 1.7;">
-    <strong style="color: #94a3b8;">Workflow:</strong>
-    Run <a href="/macro" style="color: #7c6af7;">Macro</a> first to check the economic backdrop.
-    Then run <a href="/mtf" style="color: #7c6af7;">MTF Dashboard</a> to find strong signals.
-    Then use <a href="/spreads" style="color: #7c6af7;">Spread Finder</a> on the best picks.
-    Close all trades at 50% profit. Never hold past 21 DTE.
-  </p>
+<!-- ── Trading & Portfolio ───────────────────────────────── -->
+<div class="section-header">
+  <span class="section-label">Trading & Performance</span>
+  <div class="section-line"></div>
 </div>
+
+<div class="grid">
+
+  <a href="/paper-stats" class="tool-card accent-purple">
+    <div class="card-top">
+      <div class="card-icon">🧪</div>
+      <span class="badge badge-auto">Fully Auto</span>
+    </div>
+    <div class="card-title">Paper Trading Stats</div>
+    <div class="card-desc">10 agent-generated trades per day — stocks, calls, puts, spreads, iron condors. Win rate, Sharpe ratio, profit factor, and P&L by trade type.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">🤖 Agent-driven · learns from results</div>
+    </div>
+  </a>
+
+  <a href="/watchlist" class="tool-card accent-green">
+    <div class="card-top">
+      <div class="card-icon">👁</div>
+      <span class="badge badge-ai">AI Research</span>
+    </div>
+    <div class="card-title">Stock Watchlist</div>
+    <div class="card-desc">Add any ticker and get an AI thesis, conviction rating, price targets, and risk report. Auto-discovery scans 80 stocks daily for new setups.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">🔍 Auto-scans 80 stocks daily</div>
+    </div>
+  </a>
+
+</div>
+
+<!-- ── Alerts & Discord ──────────────────────────────────── -->
+<div class="section-header">
+  <span class="section-label">Alerts & Discord</span>
+  <div class="section-line"></div>
+</div>
+
+<div class="grid-2">
+
+  <a href="/alerts" class="tool-card accent-purple">
+    <div class="card-top">
+      <div class="card-icon">🔔</div>
+      <span class="badge badge-discord">Discord</span>
+    </div>
+    <div class="card-title">Alert Settings</div>
+    <div class="card-desc">Configure your watchlist and Discord webhook. Toggle the 9 AM auto-briefing. Run manual scans and send alerts direct to Discord from here.</div>
+    <div class="card-footer">
+      <div class="card-footer-item">⚙️ Webhook · Watchlist · Auto-briefing toggle</div>
+    </div>
+  </a>
+
+  <div class="tool-card" style="cursor: default;">
+    <div class="card-top">
+      <div class="card-icon">🤖</div>
+      <span class="badge badge-ai">Live</span>
+    </div>
+    <div class="card-title">Conquest Discord Bot</div>
+    <div class="card-desc">
+      Ask anything in <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">#conquest-ai</code> or use
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!ask</code>.
+      @mention the bot anywhere. Full command set:
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!scan</code>
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!trades</code>
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!stats</code>
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!agents</code>
+      <code style="background:#1a1d27;padding:2px 6px;border-radius:4px;font-size:11px;">!brief</code>
+    </div>
+    <div class="card-footer">
+      <div class="card-footer-item">📱 Works on mobile · Always-on</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Workflow strip ────────────────────────────────────── -->
+<div class="workflow">
+  <div class="wf-step">
+    <div class="wf-num">1</div>
+    <div class="wf-text"><strong>Macro</strong> — check backdrop</div>
+  </div>
+  <div class="wf-arrow">→</div>
+  <div class="wf-step">
+    <div class="wf-num">2</div>
+    <div class="wf-text"><strong>MTF Scan</strong> — find signals</div>
+  </div>
+  <div class="wf-arrow">→</div>
+  <div class="wf-step">
+    <div class="wf-num">3</div>
+    <div class="wf-text"><strong>Agent Brain</strong> — 6-agent consensus</div>
+  </div>
+  <div class="wf-arrow">→</div>
+  <div class="wf-step">
+    <div class="wf-num">4</div>
+    <div class="wf-text"><strong>Paper Stats</strong> — track results</div>
+  </div>
+  <div class="wf-arrow">→</div>
+  <div class="wf-step">
+    <div class="wf-num">5</div>
+    <div class="wf-text"><strong>Discord</strong> — alerts on your phone</div>
+  </div>
+  <div class="wf-arrow">→</div>
+  <div class="wf-step">
+    <div class="wf-num">6</div>
+    <div class="wf-text"><strong>Learn</strong> — agents improve over time</div>
+  </div>
+</div>
+
 {% endblock %}
