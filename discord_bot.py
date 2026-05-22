@@ -2648,7 +2648,22 @@ Keep responses concise for Discord — under 400 words unless a deep explanation
 Use plain text, not heavy markdown. Don't use bullet lists for short answers.
 Never give specific personalized financial advice ("you should buy X") — keep it educational."""
 
-_AI_CHAT_CHANNELS = {"conquest-ai", "ask-conquest", "ai-chat"}
+# All channels where free-typing gets an AI response (no prefix needed).
+# Conquest-specific channels are included so you can ask questions anywhere
+# in your server without switching to a dedicated AI channel.
+_AI_CHAT_CHANNELS = {
+    # dedicated AI channels
+    "conquest-ai", "ask-conquest", "ai-chat",
+    # active discussion channels
+    "general", "stocks", "trading", "options", "charts",
+    "trade-alerts", "trade-log",
+    # agent system channels — ask follow-up questions right there
+    "agent-debate", "agent-brain",
+    # research / watchlist
+    "watchlist", "earnings-radar", "screener",
+    # morning content channels
+    "morning-briefing", "macro-worldview",
+}
 
 
 async def _conquest_ai_reply(message: discord.Message, question: str):
