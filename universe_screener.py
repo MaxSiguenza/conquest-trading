@@ -95,6 +95,15 @@ def _score_scan(r: dict) -> float:
     return round(s, 4)
 
 
+# Module-level cache so Discord bot can read results after trade generation runs
+_last_screen_results: list = []   # list of scored scan dicts from last run
+
+
+def get_last_screen() -> list:
+    """Return the full scored results from the most recent pre_screen() call."""
+    return list(_last_screen_results)
+
+
 def pre_screen(n: int = 40, universe: list = None, workers: int = 14) -> list:
     """
     Run a lightweight momentum pre-screen over the full universe.
@@ -133,6 +142,9 @@ def pre_screen(n: int = 40, universe: list = None, workers: int = 14) -> list:
                 pass
 
     results.sort(key=lambda r: r["_score"], reverse=True)
+    global _last_screen_results
+    _last_screen_results = results   # cache for Discord bot to read
+
     top_tickers = [r["ticker"] for r in results[:n]]
 
     # Sector diversity guard: make sure SPY + QQQ are included as anchors

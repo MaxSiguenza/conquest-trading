@@ -510,6 +510,148 @@ def build_consensus(signals: list, weights: dict) -> dict:
     }
 
 
+# ── Bull / Bear Debate Round ──────────────────────────────────────────────────
+# Inspired by TradingAgents (github.com/TauricResearch/TradingAgents) +
+# LLM-TradeBot adversarial framing (github.com/EthanAlgoX/LLM-TradeBot).
+#
+# Runs ONLY after initial 6-agent consensus says should_trade=True.
+# Three steps — each a separate Haiku call:
+#   1. Bull agent  — make the strongest specific case FOR the trade
+#   2. Bear agent  — adversarially try to KILL the trade (find flaws, not balance)
+#   3. Portfolio Manager — weighs both sides and casts the deciding vote
+#
+# Net effect: catches trades where 4 agents voted BUY on superficial alignment
+# rather than genuine thesis strength.  PM can override consensus → SKIP.
+
+def _parse_debate_json(raw: str) -> dict:
+    """Strip markdown fences and parse JSON from a debate agent response."""
+    clean = raw.strip()
+    if clean.startswith("```"):
+        parts = clean.split("```")
+        clean = parts[1] if len(parts) > 1 else clean
+        if clean.lower().startswith("json"):
+            clean = clean[4:]
+        clean = clean.strip()
+    try:
+        return json.loads(clean)
+    except Exception:
+        return {}
+
+
+def _run_debate_round(td: "TickerData", consensus: dict, signals: list, client) -> dict:
+    """
+    Bull vs Bear debate.  Returns an enriched consensus dict.
+    All three calls are sequential (each depends on the previous).
+    Total latency: ~6–10 s (three fast Haiku calls).
+
+    Returns the original consensus unchanged if anything errors out,
+    so the debate is always best-effort / non-blocking.
+    """
+    # Compact context used by all three agents
+    signal_summary = "  |  ".join(
+        f"{s.agent_name}:{s.signal}({s.confidence:.0%})" for s in signals
+    )
+    sc = td.scan
+    data_ctx = (
+        f"Ticker: {td.ticker} @ ${td.price:.2f}\n"
+        f"MTF: {sc.get('mtf_score',0)}/3  RSI: {sc.get('rsi',50):.0f}  "
+        f"ADX: {sc.get('adx',20):.0f}  HV Rank: {sc.get('hv_rank',50):.0f}\n"
+        f"Beta: {td.beta:.1f}  Max drawdown (6M): {td.max_dd:.1%}  "
+        f"Next earnings: {td.earnings_date}\n"
+        f"Analyst target upside: {td.target_upside:+.1f}%  Reco: {td.analyst_reco}\n"
+        f"News sentiment: {td.news_sentiment:+.3f}  Insider: {td.insider_sentiment}  "
+        f"Upgrades/downgrades: {td.analyst_upgrades}↑ / {td.analyst_downgrades}↓\n"
+        f"Agent votes: {signal_summary}"
+    )
+
+    bull_case     = "Signals are aligned across multiple timeframes."
+    bull_strength = 0.60
+    bear_case     = "Elevated risk and uncertain macro."
+    bear_weakness = 0.40
+    pm_decision   = "PROCEED"
+    pm_conviction = consensus.get("confidence", 0.65)
+    pm_reasoning  = "Debate complete — original consensus maintained."
+
+    try:
+        # ── Step 1: Bull advocate ─────────────────────────────────────────────
+        r1 = client.messages.create(
+            model="claude-haiku-4-5", max_tokens=200,
+            messages=[{"role": "user", "content":
+                f"""You are a bull-case advocate. Make the STRONGEST case for trading {td.ticker} right now.
+{data_ctx}
+
+Cite specific numbers from the data above (RSI, ADX, news sentiment, analyst target, etc.).
+What are the 2–3 most compelling reasons this trade works? What is the exact catalyst?
+Return JSON only: {{"bull_case":"2-3 sentence argument using specific numbers","strength":0.0-1.0}}"""}]
+        )
+        d1 = _parse_debate_json(r1.content[0].text)
+        bull_case     = d1.get("bull_case", bull_case)
+        bull_strength = float(d1.get("strength", bull_strength))
+    except Exception:
+        pass
+
+    try:
+        # ── Step 2: Adversarial bear ──────────────────────────────────────────
+        r2 = client.messages.create(
+            model="claude-haiku-4-5", max_tokens=200,
+            messages=[{"role": "user", "content":
+                f"""You are an adversarial risk analyst. Your ONLY job is to PUNCH HOLES in this trade thesis.
+{data_ctx}
+
+The bull advocate just argued: "{bull_case}"
+
+Find 2–3 specific weaknesses, data contradictions, or risks they ignored.
+You are NOT trying to be balanced — you are trying to kill this trade if it deserves to die.
+Cite specific numbers that undercut the bull case.
+Return JSON only: {{"bear_case":"2-3 sentence critique with specific data","weakness_score":0.0-1.0}}"""}]
+        )
+        d2 = _parse_debate_json(r2.content[0].text)
+        bear_case     = d2.get("bear_case", bear_case)
+        bear_weakness = float(d2.get("weakness_score", bear_weakness))
+    except Exception:
+        pass
+
+    try:
+        # ── Step 3: Portfolio Manager final verdict ───────────────────────────
+        r3 = client.messages.create(
+            model="claude-haiku-4-5", max_tokens=180,
+            messages=[{"role": "user", "content":
+                f"""You are the Portfolio Manager. Make the FINAL trade decision on {td.ticker}.
+
+BULL CASE (strength {bull_strength:.0%}): {bull_case}
+BEAR CASE (weakness {bear_weakness:.0%}): {bear_case}
+Initial consensus: {consensus.get('agreeing_count',0)}/6 agents BUY, confidence {consensus.get('confidence',0):.0%}
+
+Decision rules (apply strictly):
+- SKIP if bear_weakness > 0.70 AND bull strength < 0.60  (weak bull + valid bear objections)
+- SKIP if earnings within 7 days and high IV (avoid earnings binary)
+- SKIP if beta > 2.0 and max_dd worse than -25% (portfolio risk too high)
+- PROCEED if bull strength ≥ 0.65 AND bear weakness ≤ 0.55
+- Default: lean toward caution — missing a trade costs nothing, a bad trade costs capital
+
+Return JSON only: {{"decision":"PROCEED|SKIP","conviction":0.0-1.0,"reasoning":"one sentence"}}"""}]
+        )
+        d3 = _parse_debate_json(r3.content[0].text)
+        pm_decision   = d3.get("decision", "PROCEED").upper()
+        pm_conviction = float(d3.get("conviction", pm_conviction))
+        pm_reasoning  = d3.get("reasoning", pm_reasoning)
+    except Exception:
+        pass
+
+    return {
+        **consensus,
+        "should_trade":   pm_decision == "PROCEED",
+        "confidence":     pm_conviction,
+        "bull_case":      bull_case,
+        "bull_strength":  bull_strength,
+        "bear_case":      bear_case,
+        "bear_weakness":  bear_weakness,
+        "pm_decision":    pm_decision,
+        "pm_reasoning":   pm_reasoning,
+        "debate_ran":     True,
+    }
+
+
 # ── Main system class ──────────────────────────────────────────────────────────
 
 class ConquestAgentSystem:
@@ -594,6 +736,23 @@ class ConquestAgentSystem:
                     ))
 
         consensus = build_consensus(signals, self.weights)
+
+        # ── Debate round: only if initial consensus says trade ────────────────
+        # Bull advocate → adversarial bear → Portfolio Manager final verdict.
+        # ~6-10 extra seconds but catches weak-thesis false positives.
+        if consensus.get("should_trade"):
+            try:
+                from conquest_brain import _get_client as _gc
+                consensus = _run_debate_round(td, consensus, signals, _gc())
+                verdict = consensus.get("pm_decision", "?")
+                print(
+                    f"[Debate] {ticker}: PM says {verdict} "
+                    f"(bull {consensus.get('bull_strength',0):.0%} / "
+                    f"bear {consensus.get('bear_weakness',0):.0%}) — "
+                    f"{consensus.get('pm_reasoning','')}"
+                )
+            except Exception as _de:
+                print(f"[Debate] {ticker}: debate errored ({_de}) — keeping original consensus")
 
         return {
             "ticker":       ticker,
@@ -739,12 +898,19 @@ class ConquestAgentSystem:
             if not trade:
                 continue
 
-            # Attach agent metadata
+            # Attach agent metadata + debate results
             trade["agent_consensus"]  = consensus.get("signal")
             trade["agent_confidence"] = consensus.get("confidence", 0)
             trade["agent_votes"]      = consensus.get("votes", {})
             trade["agent_count"]      = consensus.get("agreeing_count", 0)
             trade["adx_entry"]        = round(scan.get("adx", 0), 1)
+            # Debate round fields (present only when debate ran)
+            if consensus.get("debate_ran"):
+                trade["debate_bull"]      = consensus.get("bull_case", "")
+                trade["debate_bull_str"]  = round(consensus.get("bull_strength", 0), 2)
+                trade["debate_bear"]      = consensus.get("bear_case", "")
+                trade["debate_bear_weak"] = round(consensus.get("bear_weakness", 0), 2)
+                trade["debate_pm"]        = consensus.get("pm_reasoning", "")
 
             new_trades.append(trade)
             type_counts[trade_type] = type_counts.get(trade_type, 0) + 1

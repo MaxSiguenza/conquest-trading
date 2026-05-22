@@ -1337,8 +1337,9 @@ async def testchannels_cmd(ctx):
         ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
         ("macro-worldview",  "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
         ("live-positions",   "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
-        ("screener",         "📊",  "Screener",                    "Weekly value/growth screen auto-posts every Monday at 9:00 AM ET."),
+        ("screener",         "📊",  "Screener",                    "Pre-screener results (top candidates from 129-ticker scan) post here each morning at 9:35 AM ET. Weekly value/growth screen also posts here every Monday."),
         ("status-dashboard", "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
+        ("agent-brain",      "🤖",  "Agent Brain",                 "Agent weight updates and learning events post here automatically after trades close."),
     ]
 
     status_lines = []
@@ -1833,8 +1834,60 @@ async def paper_trading_loop():
                         value=signals_text,
                         inline=True,
                     )
+                    # Debate round fields — show when PM ran the bull/bear review
+                    if t.get("debate_pm"):
+                        bull_bar = "█" * round(t.get("debate_bull_str", 0) * 10)
+                        bear_bar = "█" * round(t.get("debate_bear_weak", 0) * 10)
+                        debate_text = (
+                            f"**Bull** `{bull_bar:<10}` {t.get('debate_bull_str',0):.0%}  "
+                            f"**Bear** `{bear_bar:<10}` {t.get('debate_bear_weak',0):.0%}\n"
+                            f"⚖️ PM: *{t.get('debate_pm','')}*"
+                        )
+                        trade_embed.add_field(
+                            name="🗣 Bull/Bear Debate",
+                            value=debate_text[:1000],
+                            inline=False,
+                        )
                     trade_embed.set_footer(text="Conquest Paper Trading  •  Simulation only")
                     await ch_trades.send(embed=trade_embed)
+
+            # ── Post pre-screener summary to #screener ─────────────────────────
+            ch_screener = await _get_channel("screener")
+            if ch_screener:
+                try:
+                    def _get_screen():
+                        from universe_screener import get_last_screen
+                        return get_last_screen()
+                    screen_results = await _run_sync(_get_screen)
+                    if screen_results:
+                        top10 = screen_results[:10]
+                        lines = []
+                        for i, r in enumerate(top10, 1):
+                            sig = ""
+                            if r.get("entry_signal"): sig = " ✦ **ENTRY**"
+                            elif r.get("sqz_fired"):  sig = " 🔥 SQZ"
+                            elif r.get("macd_cross_up"): sig = " ↑ MACD"
+                            lines.append(
+                                f"`{i:2}.` **{r['ticker']}** "
+                                f"score={r.get('_score',0):.1f}  "
+                                f"MTF {r.get('mtf_score',0)}/3  "
+                                f"ADX {r.get('adx',0):.0f}{sig}"
+                            )
+                        scr_embed = discord.Embed(
+                            title=f"📊  Pre-Screen Results  —  {today.strftime('%b %d')}",
+                            description=(
+                                f"Scanned **{len(screen_results)}** tickers → top **40** fed to agent swarm.\n\n"
+                                + "\n".join(lines)
+                            ),
+                            color=COLOR_PURPLE,
+                            timestamp=_ts(),
+                        )
+                        scr_embed.set_footer(
+                            text="Conquest Universe Screener  •  129-ticker S&P 500 coverage"
+                        )
+                        await ch_screener.send(embed=scr_embed)
+                except Exception as _se:
+                    print(f"[PaperLoop] Screener post failed: {_se}")
 
         # ── 2. Mark-to-market + close check (every tick during market hours) ──
         def _run_close():
@@ -1908,6 +1961,33 @@ async def paper_trading_loop():
                 text="Conquest Trading  •  paper simulation  •  not financial advice"
             )
             await ch_log.send(embed=embed)
+
+            # ── Post agent weight update to #agent-brain ───────────────────────
+            ch_brain = await _get_channel("agent-brain")
+            if ch_brain:
+                try:
+                    def _get_weights():
+                        from conquest_agents import get_agent_system
+                        sys = get_agent_system()
+                        return sys.weights.copy()
+                    weights = await _run_sync(_get_weights)
+                    won = pnl >= 0
+                    w_lines = []
+                    for ag, w in sorted(weights.items(), key=lambda x: -x[1]):
+                        bar = "█" * int(w * 4)
+                        w_lines.append(f"`{ag:<15}` {bar:<9} {w:.3f}")
+                    brain_embed = discord.Embed(
+                        title=f"🧠  Agent Weights Updated  —  {t['ticker']} {'WIN' if won else 'LOSS'}",
+                        description="\n".join(w_lines),
+                        color=COLOR_GREEN if won else COLOR_RED,
+                        timestamp=_ts(),
+                    )
+                    brain_embed.set_footer(
+                        text=f"Agents that called it right gain weight · wrong agents lose weight · learn rate ±0.08"
+                    )
+                    await ch_brain.send(embed=brain_embed)
+                except Exception:
+                    pass   # agent brain post is best-effort
 
         # ── 3. EOD summary (4:05–4:20 PM) ─────────────────────────────────────
         if h == 16 and 5 <= m <= 20 and today not in _paper_eod_dates:
