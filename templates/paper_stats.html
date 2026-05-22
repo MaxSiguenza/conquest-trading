@@ -400,6 +400,24 @@ canvas { width: 100% !important; }
           <span class="badge badge-{{ t.close_reason }}">{{ (t.close_reason or "—") | replace("_"," ") }}</span>
         </td>
       </tr>
+      {% if t.get('reasoning') or t.get('close_reasoning') %}
+      <tr class="reasoning-row">
+        <td colspan="10" style="padding:8px 16px 14px 16px;border-top:none">
+          {% if t.get('reasoning') %}
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">
+            <span style="color:#7c6af7;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px">Entry Thesis</span><br>
+            {{ t.reasoning }}
+          </div>
+          {% endif %}
+          {% if t.get('close_reasoning') %}
+          <div style="font-size:12px;color:#94a3b8;margin-top:6px">
+            <span style="color:{% if t.pnl >= 0 %}#4ade80{% else %}#f87171{% endif %};font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px">Close Reasoning</span><br>
+            {{ t.close_reasoning }}
+          </div>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>

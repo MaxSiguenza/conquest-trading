@@ -527,6 +527,7 @@ def generate_daily_trades(n: int = 10) -> list:
 
         trade = _build_trade(scan, trade_type, ts)
         if trade:
+            trade["adx_entry"] = round(scan.get("adx", 0), 1)
             new_trades.append(trade)
             type_counts[trade_type] = type_counts.get(trade_type, 0) + 1
             used_tickers.add(scan["ticker"])
@@ -546,6 +547,25 @@ def generate_daily_trades(n: int = 10) -> list:
             if trade:
                 new_trades.append(trade)
                 used_tickers.add(scan["ticker"])
+
+    # ── Generate entry reasoning for every new trade ──────────────────────────
+    if new_trades:
+        try:
+            from conquest_brain import generate_trade_reasonings
+            # Match each trade back to its scan result
+            scan_map = {s["ticker"]: s for s in scans}
+            trades_and_scans = [
+                (t, scan_map.get(t["ticker"], {}))
+                for t in new_trades
+            ]
+            reasonings = generate_trade_reasonings(trades_and_scans)
+            for t in new_trades:
+                t["reasoning"] = reasonings.get(t["id"], "Reasoning unavailable.")
+            print(f"[PaperTrader] Entry reasoning generated for {len(reasonings)} trades.")
+        except Exception as e:
+            print(f"[PaperTrader] Reasoning generation failed: {e}")
+            for t in new_trades:
+                t.setdefault("reasoning", "Reasoning unavailable.")
 
     all_trades.extend(new_trades)
     save_trades(all_trades)
@@ -597,6 +617,14 @@ def run_daily_close() -> dict:
             trades[i]["status"]       = "closed"
             trades[i]["date_closed"]  = now_str
             trades[i]["close_reason"] = reason
+            # Generate close reasoning
+            try:
+                from conquest_brain import generate_close_reasoning
+                trades[i]["close_reasoning"] = generate_close_reasoning(
+                    trades[i], reason, price or 0
+                )
+            except Exception:
+                trades[i]["close_reasoning"] = "Reasoning unavailable."
             closed_count += 1
 
     save_trades(trades)

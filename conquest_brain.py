@@ -665,6 +665,156 @@ You MUST include every ticker — do not skip any."""
     return all_results
 
 
+def generate_trade_reasonings(trades_and_scans: list) -> dict:
+    """
+    Generate entry reasoning for a batch of new paper trades.
+    trades_and_scans: list of (trade_dict, scan_dict) tuples
+    Returns dict mapping trade_id → reasoning string.
+
+    Uses Haiku for speed/cost on a batch of up to 10 trades.
+    """
+    import json as _json
+
+    if not trades_and_scans:
+        return {}
+
+    lines = []
+    for i, (trade, scan) in enumerate(trades_and_scans):
+        tt       = trade["trade_type"].replace("_", " ").upper()
+        ticker   = trade["ticker"]
+        price    = scan.get("price", 0)
+        mtf      = scan.get("mtf_score", 0)
+        daily    = scan.get("daily", "?")
+        weekly   = scan.get("weekly", "?")
+        monthly  = scan.get("monthly", "?")
+        rsi      = scan.get("rsi", 50)
+        adx      = scan.get("adx", 0)
+        hvr      = scan.get("hv_rank", 0)
+        entry    = scan.get("entry_signal", False)
+        sqz      = scan.get("sqz_fired", False)
+        macd     = scan.get("macd_cross_up", False)
+
+        # Trade-specific details
+        extra = ""
+        if trade["trade_type"] in ("call_spread", "put_spread"):
+            extra = f"Spread: ${trade.get('long_strike','?')}/${trade.get('short_strike','?')}  Debit: ${trade.get('entry_net_debit','?')}  Max profit: ${trade.get('max_profit','?')}"
+        elif trade["trade_type"] in ("long_call", "long_put"):
+            extra = f"Strike: ${trade.get('strike','?')}  Premium: ${trade.get('entry_option_price','?')}"
+        elif trade["trade_type"] == "iron_condor":
+            extra = f"Wings: ${trade.get('long_put_k','?')}/${trade.get('short_put_k','?')}/{trade.get('short_call_k','?')}/{trade.get('long_call_k','?')}  Credit: ${trade.get('entry_net_credit','?')}"
+        elif trade["trade_type"] in ("stock_long", "stock_short"):
+            extra = f"Entry: ${trade.get('entry_price','?')}  Shares: {trade.get('shares','?')}"
+
+        lines.append(
+            f"TRADE {i+1}: {ticker} {tt}\n"
+            f"  Price: ${price:.2f}  MTF: {mtf}/3 (M:{monthly}/W:{weekly}/D:{daily})\n"
+            f"  RSI: {rsi:.0f}  ADX: {adx:.0f}  HV Rank: {hvr:.0%}\n"
+            f"  Signals: entry={entry}  squeeze_fired={sqz}  macd_cross={macd}\n"
+            f"  {extra}"
+        )
+
+    trades_block = "\n\n".join(lines)
+
+    prompt = f"""You are narrating the entry reasoning for {len(trades_and_scans)} new paper trades opened today.
+
+{trades_block}
+
+---
+For each trade, write 2-3 sentences explaining:
+1. Why this specific ticker was selected (what the signals showed)
+2. Why this trade structure was chosen over alternatives (why call spread vs long call, why iron condor vs directional, etc.)
+3. What the thesis is — what needs to happen for this trade to win
+
+Be specific — reference the actual numbers (RSI, ADX, MTF score, strikes).
+Write like a trader logging their rationale, not a textbook.
+
+Output ONLY raw JSON — no markdown, no fences:
+[
+  {{"id": 1, "reasoning": "2-3 sentence entry rationale here."}},
+  {{"id": 2, "reasoning": "..."}},
+  ...
+]"""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=2000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        parsed = _json.loads(raw)
+        return {
+            trades_and_scans[item["id"] - 1][0]["id"]: item["reasoning"]
+            for item in parsed
+            if 1 <= item["id"] <= len(trades_and_scans)
+        }
+    except Exception as e:
+        print(f"[Brain] generate_trade_reasonings error: {e}")
+        return {}
+
+
+def generate_close_reasoning(trade: dict, close_reason: str, current_price: float) -> str:
+    """
+    Generate a close/stop reasoning for a single trade being closed.
+    close_reason: 'profit_target' | 'stop_loss' | 'max_hold'
+    Returns a 2-3 sentence string.
+    """
+    tt      = trade["trade_type"].replace("_", " ").upper()
+    ticker  = trade["ticker"]
+    pnl     = trade.get("pnl", 0)
+    pnl_pct = trade.get("pnl_pct", 0) * 100
+    days    = trade.get("days_held", 0)
+    entry   = trade.get("entry_price") or trade.get("entry_net_debit") or trade.get("entry_net_credit", 0)
+
+    reason_labels = {
+        "profit_target": "hit the profit target",
+        "stop_loss":     "hit the stop loss",
+        "max_hold":      "reached the maximum hold period",
+        "manual":        "manually closed",
+    }
+    reason_text = reason_labels.get(close_reason, close_reason)
+
+    # Trade-specific close context
+    if trade["trade_type"] in ("call_spread", "put_spread"):
+        close_context = f"Spread closed at net value ${trade.get('current_net_value', 0):.2f} vs entry debit ${entry:.2f}. Max profit was ${trade.get('max_profit', 0):.2f}."
+    elif trade["trade_type"] == "iron_condor":
+        close_context = f"Condor closed at net value ${trade.get('current_net_value', 0):.2f} vs entry credit ${entry:.2f}."
+    elif trade["trade_type"] in ("long_call", "long_put"):
+        close_context = f"Option closed at ${trade.get('current_option_price', 0):.2f} vs entry ${entry:.2f}."
+    else:
+        close_context = f"Stock closed at ${current_price:.2f} vs entry ${entry:.2f}."
+
+    prompt = f"""A paper trade just closed. Write 2-3 sentences explaining what happened and what to learn from it.
+
+TRADE: {ticker} {tt}
+CLOSE REASON: {reason_text}
+P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)
+Days held: {days}
+{close_context}
+MTF at entry: {trade.get('mtf_score', '?')}/3
+RSI at entry: {trade.get('rsi_entry', '?')}
+
+Cover: what the outcome was, why the close trigger fired, and what the key lesson is (did the trade work as planned, did it stop out before the thesis played out, or did it max-hold because the move stalled).
+Be direct and specific. No disclaimers."""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=200,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        return f"[Reasoning unavailable: {e}]"
+
+
 def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) -> str:
     """
     Claude-narrated end-of-day wrap for automated paper trading.

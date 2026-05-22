@@ -1622,9 +1622,7 @@ async def paper_trading_loop():
                     title=f"🧪  Paper Trades Generated  —  {today.strftime('%b %d')}",
                     description=(
                         f"**{len(new_trades)} trades** placed across the universe.\n"
-                        f"{breakdown}\n\n"
-                        "Checked every 15 min — closes anything that hits a target or stop.\n"
-                        "Use `!trades` to see the full list."
+                        f"{breakdown}"
                     ),
                     color=COLOR_GOLD,
                     timestamp=_ts(),
@@ -1633,6 +1631,67 @@ async def paper_trading_loop():
                     text="Auto-closes: options +50%/−75% · stocks +5%/−3% · max 5 days"
                 )
                 await ch_trades.send(embed=embed)
+
+                # Post one card per trade with full reasoning
+                for t in new_trades:
+                    tt_label = t["trade_type"].replace("_", " ").title()
+                    price    = t.get("entry_price") or t.get("entry_net_debit") or t.get("entry_net_credit", 0)
+                    reasoning = t.get("reasoning", "")
+
+                    trade_embed = discord.Embed(
+                        title=f"🧪  {t['ticker']} — {tt_label}",
+                        description=reasoning,
+                        color=COLOR_PURPLE,
+                        timestamp=_ts(),
+                    )
+                    # Strike / structure details
+                    if t["trade_type"] in ("call_spread", "put_spread"):
+                        trade_embed.add_field(
+                            name="Structure",
+                            value=(
+                                f"${t.get('long_strike','?')} / ${t.get('short_strike','?')}  "
+                                f"({'Calls' if t['trade_type']=='call_spread' else 'Puts'})\n"
+                                f"Debit: **${price:.2f}**  |  Max profit: **${t.get('max_profit',0):.2f}**\n"
+                                f"Breakeven: **${t.get('breakeven',0):.2f}**"
+                            ),
+                            inline=True,
+                        )
+                    elif t["trade_type"] == "iron_condor":
+                        trade_embed.add_field(
+                            name="Structure",
+                            value=(
+                                f"${t.get('long_put_k','?')} / ${t.get('short_put_k','?')} / "
+                                f"${t.get('short_call_k','?')} / ${t.get('long_call_k','?')}\n"
+                                f"Credit: **${price:.2f}**  |  Max loss: **${t.get('max_loss',0):.2f}**"
+                            ),
+                            inline=True,
+                        )
+                    elif t["trade_type"] in ("long_call", "long_put"):
+                        trade_embed.add_field(
+                            name="Structure",
+                            value=(
+                                f"Strike: **${t.get('strike','?')}**  |  Premium: **${price:.2f}**\n"
+                                f"Breakeven: **${t.get('breakeven',0):.2f}**"
+                            ),
+                            inline=True,
+                        )
+                    else:
+                        trade_embed.add_field(
+                            name="Structure",
+                            value=f"Entry: **${price:.2f}**  |  Shares: {t.get('shares','?')}",
+                            inline=True,
+                        )
+                    trade_embed.add_field(
+                        name="Signals",
+                        value=(
+                            f"MTF {t.get('mtf_score','?')}/3  ·  "
+                            f"RSI {t.get('rsi_entry','?')}  ·  "
+                            f"ADX {t.get('adx_entry', t.get('adx','?'))}"
+                        ),
+                        inline=True,
+                    )
+                    trade_embed.set_footer(text="Conquest Paper Trading  •  Simulation only")
+                    await ch_trades.send(embed=trade_embed)
 
         # ── 2. Mark-to-market + close check (every tick during market hours) ──
         def _run_close():
@@ -1690,6 +1749,18 @@ async def paper_trading_loop():
                 ),
                 inline=True,
             )
+            if t.get("reasoning"):
+                embed.add_field(
+                    name="Entry Thesis",
+                    value=t["reasoning"][:1000],
+                    inline=False,
+                )
+            if t.get("close_reasoning"):
+                embed.add_field(
+                    name="Why It Closed",
+                    value=t["close_reasoning"][:1000],
+                    inline=False,
+                )
             embed.set_footer(
                 text="Conquest Trading  •  paper simulation  •  not financial advice"
             )
