@@ -211,9 +211,9 @@
   <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px;">Discord Bot Setup (Recommended)</p>
   <ol class="setup-steps">
     <li>The bot posts to channels by <strong>name</strong> — no webhooks needed. Just make sure the bot is in your server and the channels exist with the exact names below.</li>
-    <li>Required channels: <code>#morning-briefing</code> <code>#trade-alerts</code> <code>#trade-log</code> <code>#evening-debrief</code> <code>#daily-pnl</code> <code>#watchlist</code> <code>#earnings-radar</code> <code>#macro-worldview</code> <code>#live-positions</code> <code>#status-dashboard</code></li>
+    <li>Required channels: <code>#morning-briefing</code> <code>#trade-alerts</code> <code>#trade-log</code> <code>#evening-debrief</code> <code>#daily-pnl</code> <code>#stocks</code> <code>#earnings-radar</code> <code>#macro-worldview</code> <code>#live-positions</code> <code>#screener</code> <code>#status-dashboard</code></li>
     <li>Run <code>!testchannels</code> in any Discord channel to verify all 10 channels are wired correctly. You'll get a ✅/❌ report.</li>
-    <li>Enable the auto-briefing checkbox below to get the morning brief + earnings radar at 9 AM ET every weekday — no action needed after that.</li>
+    <li>The full automation schedule runs every weekday automatically — morning brief at 9 AM, market scan at 9:30 AM, positions updates at noon and 3:30 PM, EOD debrief at 4:05 PM. No setup needed.</li>
   </ol>
 
   <p style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.6px;margin:20px 0 14px;">Legacy Webhook URL <span style="font-weight:400;text-transform:none;font-size:11px;">(optional — only needed for older !pnl command)</span></p>
@@ -230,19 +230,6 @@
         <label>Watchlist — space-separated tickers</label>
         <textarea name="watchlist" id="watchlist" rows="3"
                   placeholder="AAPL NVDA MSFT GOOGL AMZN">{{ settings.watchlist }}</textarea>
-      </div>
-
-      {# Auto morning briefing toggle #}
-      <div class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;">
-          <input type="checkbox" name="auto_briefing" id="auto_briefing"
-                 {% if auto_briefing %}checked{% endif %}
-                 style="width:16px;height:16px;accent-color:#7c6af7;cursor:pointer;">
-          <span style="font-size:12px;font-weight:600;color:#94a3b8;">
-            Auto-send morning briefing + earnings radar at 9:00 AM ET (Mon–Fri)
-          </span>
-        </label>
-        <span style="font-size:11px;color:#4ade80;">✓ Runs via bot — no webhook required</span>
       </div>
 
       <div class="btn-row">
@@ -267,12 +254,7 @@
 
   {% if saved %}
   <div class="status-box status-ok" style="margin-top:16px;">
-    ✓ Settings saved. Auto-briefing is <strong>{{ "ON" if auto_briefing else "OFF" }}</strong>.
-    {% if auto_briefing %}
-      The full automation schedule will run every weekday starting at 9:00 AM ET.
-    {% else %}
-      Check the box above and save again to enable the full automation schedule.
-    {% endif %}
+    ✓ Settings saved. The full automation schedule runs every weekday automatically.
   </div>
   {% endif %}
 

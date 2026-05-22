@@ -15,7 +15,7 @@ COMMANDS (type these anywhere in your Discord server):
   !help              — show all commands
 
 AUTO TASKS:
-  Morning briefing fires at 9:00 AM ET Mon–Fri when auto_briefing=true
+  Morning briefing fires at 9:00 AM ET Mon–Fri automatically
   (Check the box on the Alerts page, no webhook URL needed)
 
 SETUP (one-time):
@@ -1884,9 +1884,6 @@ async def morning_briefing_task():
             return
 
         s = _load_settings()
-        if not s.get("auto_briefing"):
-            return   # user hasn't enabled auto-briefing
-
         _briefing_sent_date = today
 
         channel = await _get_channel("morning-briefing", "general")
@@ -2099,13 +2096,6 @@ async def runmorning_cmd(ctx):
     await ctx.send("⚔️ Firing all 9 AM auto-posts now — check each channel...", delete_after=10)
 
     s = _load_settings()
-    if not s.get("auto_briefing"):
-        await ctx.send(
-            "⚠️ Auto-briefing is **OFF** in settings. Go to /alerts and enable it first, "
-            "then run `!runmorning` again.",
-            delete_after=20,
-        )
-        return
 
     # ── 1. Morning brief ───────────────────────────────────────────────────────
     try:
