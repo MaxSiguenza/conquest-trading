@@ -34,10 +34,14 @@ import json
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 ET = pytz.timezone("America/New_York")
+
+# ── Optional enrichment keys (activate on Railway by adding env vars) ──────────
+FINNHUB_KEY      = os.getenv("FINNHUB_API_KEY", "")
+AV_KEY           = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 
 # ── Agent registry ─────────────────────────────────────────────────────────────
 AGENT_NAMES = [
@@ -84,6 +88,12 @@ class TickerData:
     target_upside: float  = 0.0
     w52_low:       float  = 0.0
     w52_high:      float  = 0.0
+    # Finnhub enrichment (populated when FINNHUB_API_KEY is set)
+    news_sentiment:     float = 0.0   # -0.5 (bearish) → +0.5 (bullish)
+    news_count_24h:     int   = 0     # articles in last 24 hours
+    insider_sentiment:  str   = "N/A" # BULLISH / BEARISH / NEUTRAL
+    analyst_upgrades:   int   = 0     # upgrade count last 3 months
+    analyst_downgrades: int   = 0     # downgrade count last 3 months
     error:         Optional[str] = None
 
 
@@ -191,6 +201,85 @@ def fetch_ticker_data(ticker: str, scan: dict = None) -> TickerData:
             except Exception:
                 scan = {}
 
+        # ── Finnhub enrichment (activates when FINNHUB_API_KEY is set) ─────────
+        news_sentiment = 0.0
+        news_count_24h = 0
+        insider_sentiment = "N/A"
+        analyst_upgrades = 0
+        analyst_downgrades = 0
+
+        if FINNHUB_KEY:
+            try:
+                import requests as _req
+
+                # 1. News sentiment score
+                try:
+                    r = _req.get(
+                        f"https://finnhub.io/api/v1/news-sentiment?symbol={ticker}&token={FINNHUB_KEY}",
+                        timeout=5
+                    )
+                    if r.status_code == 200:
+                        d = r.json()
+                        bull_pct = float(d.get("sentiment", {}).get("bullishPercent", 0.5))
+                        news_sentiment = round(bull_pct - 0.5, 3)   # −0.5 → +0.5
+                        news_count_24h = int(d.get("buzz", {}).get("articlesInLastWeek", 0))
+                except Exception:
+                    pass
+
+                # 2. Better earnings date from Finnhub calendar
+                try:
+                    today  = datetime.now().strftime("%Y-%m-%d")
+                    future = (datetime.now() + timedelta(days=120)).strftime("%Y-%m-%d")
+                    r = _req.get(
+                        f"https://finnhub.io/api/v1/calendar/earnings"
+                        f"?from={today}&to={future}&symbol={ticker}&token={FINNHUB_KEY}",
+                        timeout=5
+                    )
+                    if r.status_code == 200:
+                        cal = r.json().get("earningsCalendar", [])
+                        if cal:
+                            earnings_date = cal[0].get("date", earnings_date)
+                except Exception:
+                    pass
+
+                # 3. Insider sentiment (net buy/sell signal)
+                try:
+                    from_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                    today     = datetime.now().strftime("%Y-%m-%d")
+                    r = _req.get(
+                        f"https://finnhub.io/api/v1/stock/insider-sentiment"
+                        f"?symbol={ticker}&from={from_date}&to={today}&token={FINNHUB_KEY}",
+                        timeout=5
+                    )
+                    if r.status_code == 200:
+                        data = r.json().get("data", [])
+                        if data:
+                            net_change = sum(d.get("change", 0) for d in data)
+                            insider_sentiment = (
+                                "BULLISH" if net_change > 0 else
+                                ("BEARISH" if net_change < 0 else "NEUTRAL")
+                            )
+                except Exception:
+                    pass
+
+                # 4. Analyst upgrades/downgrades (last 3 months)
+                try:
+                    r = _req.get(
+                        f"https://finnhub.io/api/v1/stock/recommendation?symbol={ticker}&token={FINNHUB_KEY}",
+                        timeout=5
+                    )
+                    if r.status_code == 200:
+                        recs = r.json()
+                        if recs:
+                            latest = recs[0]  # most recent month
+                            analyst_upgrades   = int(latest.get("buy",        0)) + int(latest.get("strongBuy",  0))
+                            analyst_downgrades = int(latest.get("sell",       0)) + int(latest.get("strongSell", 0))
+                except Exception:
+                    pass
+
+            except Exception:
+                pass   # Finnhub enrichment is always best-effort
+
         return TickerData(
             ticker=ticker, price=price, scan=scan, info=info,
             hv30=hv30, hv60=hv60, beta=beta, max_dd=max_dd,
@@ -198,6 +287,9 @@ def fetch_ticker_data(ticker: str, scan: dict = None) -> TickerData:
             top_calls_str=top_calls_str, top_puts_str=top_puts_str,
             earnings_date=earnings_date, analyst_reco=analyst_reco,
             target_upside=target_upside, w52_low=w52_low, w52_high=w52_high,
+            news_sentiment=news_sentiment, news_count_24h=news_count_24h,
+            insider_sentiment=insider_sentiment,
+            analyst_upgrades=analyst_upgrades, analyst_downgrades=analyst_downgrades,
         )
 
     except Exception as e:
@@ -262,9 +354,15 @@ Analyst recommendation: {td.analyst_reco} ({td.info.get('numberOfAnalystOpinions
 Price target upside: {td.target_upside:+.1f}%
 Revenue Growth: {td.info.get('revenueGrowth')}
 Earnings Growth: {td.info.get('earningsGrowth')}
+News Sentiment (7d): {td.news_sentiment:+.3f}  (scale: -0.5 bearish → +0.5 bullish)  Articles: {td.news_count_24h}
+Insider Sentiment (90d): {td.insider_sentiment}
+Analyst Upgrades/Downgrades (1mo): {td.analyst_upgrades} upgrades / {td.analyst_downgrades} downgrades
 
-Are there positive catalysts supporting a trade? BUY = clear catalyst + analyst support.
-SELL = negative catalyst overhang. HOLD = no near-term catalyst.
+Are there positive catalysts supporting a trade? Weight news sentiment and insider activity heavily —
+positive insider buying and bullish news sentiment are strong near-term catalysts.
+BUY = clear catalyst: bullish news ({td.news_sentiment:+.3f} > 0.1), insider buying, upcoming earnings + analyst upgrades.
+SELL = negative catalyst overhang: bearish news, insider selling, analyst downgrades.
+HOLD = neutral/no near-term catalyst.
 Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|stock_long|iron_condor|put_spread|stock_short"}}""",
 
         "risk": f"""You are a risk assessment agent. Your job is to protect capital.
