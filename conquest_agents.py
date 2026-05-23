@@ -105,8 +105,108 @@ class AgentSignal:
     signal:        str   # BUY | SELL | HOLD | WATCH
     confidence:    float # 0.0–1.0
     reasoning:     str
-    suggested_type: str  = ""  # trade structure preference
+    suggested_type: str  = ""  # trade structure preferred
     raw:           str   = ""
+
+
+@dataclass
+class GlobalContext:
+    """
+    Shared macro + portfolio context fetched ONCE per generate_trades() call.
+    Passed read-only to every agent so they all see a consistent picture.
+    Fetched outside the per-ticker loops so we don't make redundant API calls.
+    """
+    # ── FRED macro ────────────────────────────────────────────────────────────
+    macro_line:   str  = ""     # compact one-liner: "GDP +2.8% | CPI 3.2% YoY | Fed 4.33% | ..."
+    yield_normal: bool = True   # False = yield curve inverted = recession warning
+    # ── Technical macro regime ────────────────────────────────────────────────
+    macro_health: int  = 3      # 0–6 bullish macro indicators count
+    regime_phase: str  = "MIXED"        # "MID-CYCLE EXPANSION", "LATE-CYCLE", etc.
+    regime_desc:  str  = ""             # one-sentence description of current regime
+    best_sectors: list = field(default_factory=list)  # ["Energy", "Financials", ...]
+    credit_bull:  bool = True   # HYG golden cross = credit healthy; death cross = stress
+    # ── Per-ticker macro warnings ─────────────────────────────────────────────
+    macro_warnings: dict = field(default_factory=dict)  # {"AAPL": ["10Y yields rising — tech headwind"]}
+    # ── Open portfolio ────────────────────────────────────────────────────────
+    open_trades:    list = field(default_factory=list)  # raw open trade dicts
+    open_tickers:   set  = field(default_factory=set)   # {"NVDA", "AAPL", ...}
+    open_by_type:   dict = field(default_factory=dict)  # {"long_call": 2, "stock_long": 3}
+    open_by_ticker: dict = field(default_factory=dict)  # {"NVDA": 2, "AAPL": 1}
+    # ── Watchlist ─────────────────────────────────────────────────────────────
+    watchlist: dict = field(default_factory=dict)  # {ticker: full watchlist entry dict}
+
+
+def fetch_global_context(universe: list = None) -> GlobalContext:
+    """
+    Fetch all shared macro + portfolio context once per trading session.
+    All network calls are best-effort — failures return sensible defaults.
+    Total added latency: ~2-5s (FRED + macro fetcher run in parallel).
+    """
+    import time
+    t0 = time.time()
+    gctx = GlobalContext()
+
+    # ── FRED macro data ───────────────────────────────────────────────────────
+    try:
+        from macro.fred_data import fetch_fred_macro, fred_macro_context
+        fred = fetch_fred_macro()
+        gctx.macro_line = fred_macro_context(fred)
+        curve = fred.get("T10Y2Y", {})
+        if not curve.get("error"):
+            gctx.yield_normal = float(curve.get("latest", 0.5) or 0.5) >= 0
+    except Exception as e:
+        print(f"[GlobalCtx] FRED unavailable ({e})")
+
+    # ── Technical macro regime ────────────────────────────────────────────────
+    try:
+        from macro.fetcher import (fetch_macro_data, macro_health_score,
+                                    sector_rotation_phase, stock_macro_warnings)
+        from datetime import datetime as _dt, timedelta as _td
+        macro_data = fetch_macro_data((_dt.now() - _td(days=400)).strftime("%Y-%m-%d"))
+        score, _ = macro_health_score(macro_data)
+        gctx.macro_health = int(score)
+        phase, desc, sectors = sector_rotation_phase(macro_data)
+        gctx.regime_phase = phase
+        gctx.regime_desc  = desc
+        gctx.best_sectors = list(sectors)
+        hyg = macro_data.get("HYG", {})
+        gctx.credit_bull  = int(hyg.get("regime", 1)) == 1
+        yc = macro_data.get("YIELD_CURVE", {})
+        if not yc.get("error"):
+            gctx.yield_normal = int(yc.get("regime", 1)) == 1
+        if universe:
+            gctx.macro_warnings = stock_macro_warnings(list(universe), macro_data) or {}
+    except Exception as e:
+        print(f"[GlobalCtx] Macro regime unavailable ({e})")
+
+    # ── Open portfolio ────────────────────────────────────────────────────────
+    try:
+        from paper_trader import load_trades
+        open_t = [t for t in load_trades() if t.get("status") == "open"]
+        gctx.open_trades   = open_t
+        gctx.open_tickers  = {t["ticker"] for t in open_t}
+        for t in open_t:
+            tt = t.get("trade_type", "?")
+            tk = t.get("ticker",     "?")
+            gctx.open_by_type[tt]   = gctx.open_by_type.get(tt, 0)   + 1
+            gctx.open_by_ticker[tk] = gctx.open_by_ticker.get(tk, 0) + 1
+    except Exception as e:
+        print(f"[GlobalCtx] Portfolio unavailable ({e})")
+
+    # ── Watchlist ─────────────────────────────────────────────────────────────
+    try:
+        from watchlist_engine import load_watchlist
+        gctx.watchlist = {e["ticker"]: e for e in load_watchlist() if e.get("ticker")}
+    except Exception as e:
+        print(f"[GlobalCtx] Watchlist unavailable ({e})")
+
+    print(f"[GlobalCtx] Loaded in {time.time()-t0:.1f}s — "
+          f"regime={gctx.regime_phase} health={gctx.macro_health}/6 "
+          f"yield={'NORMAL' if gctx.yield_normal else 'INVERTED'} "
+          f"credit={'BULL' if gctx.credit_bull else 'STRESS'} "
+          f"open={len(gctx.open_trades)} positions "
+          f"watchlist={len(gctx.watchlist)} tickers")
+    return gctx
 
 
 # ── Data fetcher ───────────────────────────────────────────────────────────────
@@ -296,14 +396,81 @@ def fetch_ticker_data(ticker: str, scan: dict = None) -> TickerData:
         return TickerData(ticker=ticker, price=0, error=str(e))
 
 
+# ── Context helpers ────────────────────────────────────────────────────────────
+
+def _portfolio_block(ticker: str, gctx: "GlobalContext") -> str:
+    """One-line portfolio exposure note for agent prompts."""
+    if gctx is None:
+        return ""
+    lines = []
+    n = gctx.open_by_ticker.get(ticker, 0)
+    if n:
+        lines.append(f"ALREADY OPEN: {n} position(s) on {ticker} in portfolio.")
+    total_open = len(gctx.open_trades)
+    if total_open:
+        by_type = "  ".join(f"{tt}:{cnt}" for tt, cnt in sorted(gctx.open_by_type.items()))
+        lines.append(f"Portfolio: {total_open} open positions [{by_type}]")
+    return "\n".join(lines)
+
+def _watchlist_block(ticker: str, gctx: "GlobalContext") -> str:
+    """Watchlist entry context for agent prompts, or empty string if not watched."""
+    if gctx is None:
+        return ""
+    wl = gctx.watchlist.get(ticker)
+    if not wl:
+        return "Watchlist: NOT on watchlist — no pre-vetted thesis."
+    parts = [f"Watchlist: CONVICTION={wl.get('conviction','?')} | {wl.get('thesis','')}"]
+    if wl.get("entry_zone"):
+        parts.append(f"Entry zone: {wl['entry_zone']}  Hard stop: {wl.get('hard_stop','?')}")
+    if wl.get("waiting_for"):
+        parts.append(f"Waiting for: {wl['waiting_for']}")
+    if wl.get("risks"):
+        parts.append(f"Key risks: {wl['risks']}")
+    return "\n".join(parts)
+
+def _macro_block(ticker: str, gctx: "GlobalContext", mode: str = "brief") -> str:
+    """
+    Macro context block for agent prompts.
+    mode='brief' → one line summary
+    mode='full'  → full regime + yield curve + credit health
+    """
+    if gctx is None or not gctx.macro_line:
+        return ""
+    if mode == "brief":
+        phase_line = f"Macro Regime: {gctx.regime_phase} (health {gctx.macro_health}/6)"
+        return phase_line
+    # Full mode
+    lines = []
+    if gctx.macro_line:
+        lines.append(f"FRED Macro: {gctx.macro_line}")
+    lines.append(f"Regime: {gctx.regime_phase} — {gctx.regime_desc}")
+    lines.append(f"Yield Curve: {'NORMAL (non-recessionary)' if gctx.yield_normal else 'INVERTED — recession warning'}")
+    lines.append(f"Credit Markets (HYG): {'Golden cross — credit healthy' if gctx.credit_bull else 'Death cross — credit STRESS, risk-off signal'}")
+    if gctx.best_sectors:
+        lines.append(f"Best sectors this cycle: {', '.join(gctx.best_sectors[:4])}")
+    warn = gctx.macro_warnings.get(ticker, [])
+    if warn:
+        lines.append(f"Macro headwinds for {ticker}: {'; '.join(warn)}")
+    return "\n".join(lines)
+
+
 # ── Specialist agent prompts ───────────────────────────────────────────────────
 
-def _run_agent(agent_name: str, td: TickerData, client) -> AgentSignal:
+def _run_agent(agent_name: str, td: TickerData, client,
+               gctx: "GlobalContext" = None) -> AgentSignal:
     """
     Run a single specialist agent. Each agent gets only the data
     relevant to its dimension — focused, not overwhelmed.
     """
     sc = td.scan
+
+    # ── Pre-build context blocks ──────────────────────────────────────────────
+    portfolio_ctx = _portfolio_block(td.ticker, gctx)
+    watchlist_ctx = _watchlist_block(td.ticker, gctx)
+    macro_brief   = _macro_block(td.ticker, gctx, mode="brief")
+    macro_full    = _macro_block(td.ticker, gctx, mode="full")
+    signal_stale  = sc.get("signal_stale", False)
+    stale_warn    = "\n⚠ SIGNAL STALE: intraday price action contradicts EOD signal — lower conviction." if signal_stale else ""
 
     prompts = {
 
@@ -316,12 +483,17 @@ MACD Cross Up: {sc.get('macd_cross_up', False)}
 RSI: {sc.get('rsi', 50):.1f}  ADX: {sc.get('adx', 20):.1f}
 HV Rank: {sc.get('hv_rank', 50):.0f}/100
 52W Range: ${td.w52_low:.2f}–${td.w52_high:.2f}
+{stale_warn}
+{watchlist_ctx}
+{portfolio_ctx}
+{macro_brief}
 
 Based purely on the signal picture — do these signals justify entering a trade?
 A BUY means signals are aligned and high quality. HOLD means signals are weak or mixed. SELL means signals are bearish.
+If ALREADY OPEN on this ticker, be more skeptical — we don't want to double-up concentration.
 IV RANK RULE: Only suggest long_call or long_put when HV Rank < 35 (options are cheap). HV Rank > 65 → suggest iron_condor, bull_put_spread, or bear_call_spread instead (collect expensive premium, don't pay it).
 SQUEEZE RULE: long_call/long_put entries are highest-quality when Squeeze Fired=True — this is the leading indicator that fires BEFORE explosive moves.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short"}}""",
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short|bull_put_spread|bear_call_spread|covered_call"}}""",
 
         "valuation": f"""You are a fundamental valuation agent.
 Ticker: {td.ticker} @ ${td.price:.2f}  Sector: {td.info.get('sector','?')}
@@ -331,10 +503,12 @@ EV/EBITDA: {td.info.get('enterpriseToEbitda')}   PEG: {td.info.get('pegRatio')}
 Revenue Growth: {td.info.get('revenueGrowth')}   Earnings Growth: {td.info.get('earningsGrowth')}
 Market Cap: ${(td.info.get('marketCap') or 0)/1e9:.1f}B
 Analyst target upside: {td.target_upside:+.1f}%  ({td.analyst_reco})
+{macro_brief}
+Macro context: High interest rates (Fed Funds {gctx.macro_line.split('Fed ')[1].split(' |')[0] if gctx and 'Fed ' in gctx.macro_line else 'unknown'}) raise discount rates, compressing growth stock multiples. Inverted yield curve = recession risk reduces earnings growth expectations.
 
-Is this stock fairly valued for a trade at current price? BUY = undervalued or growth justifies premium.
-AVOID/SELL = overvalued vs growth. HOLD = fairly valued, no edge.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"stock_long|call_spread|long_call|iron_condor|stock_short|put_spread"}}""",
+Is this stock fairly valued for a trade at current price? BUY = undervalued or growth justifies premium given current rates.
+AVOID/SELL = overvalued vs growth or rates headwind. HOLD = fairly valued, no edge.
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"stock_long|call_spread|long_call|iron_condor|stock_short|put_spread|bull_put_spread"}}""",
 
         "technicals": f"""You are a technical analysis agent.
 Ticker: {td.ticker} @ ${td.price:.2f}
@@ -344,29 +518,32 @@ Squeeze Momentum: {sc.get('sqz_momentum', 0):+.3f}
 HV Rank: {sc.get('hv_rank', 50):.0f}/100
 52W position: ${td.price:.2f} vs low ${td.w52_low:.2f} / high ${td.w52_high:.2f}
 Max 6M drawdown: {td.max_dd:.1%}
+{macro_brief}
+Sector rotation: Best sectors this cycle are {', '.join(gctx.best_sectors[:3]) if gctx and gctx.best_sectors else 'unknown'}. Trading with the rotation adds tailwind.
 
-What is the technical setup? BUY = strong trend + healthy momentum. SELL = downtrend/breakdown.
+What is the technical setup? BUY = strong trend + healthy momentum + in a favored sector. SELL = downtrend/breakdown.
 HOLD = choppy/consolidating. WATCH = setup forming but not confirmed.
 IV RANK RULE: Only suggest long_call or long_put when HV Rank < 35. When HV Rank > 65, options are expensive — suggest iron_condor or credit spreads instead.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short"}}""",
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short|bull_put_spread|bear_call_spread"}}""",
 
         "catalysts": f"""You are a catalyst analysis agent.
 Ticker: {td.ticker} @ ${td.price:.2f}  Sector: {td.info.get('sector','?')}
 Next Earnings: {td.earnings_date}
 Analyst recommendation: {td.analyst_reco} ({td.info.get('numberOfAnalystOpinions',0)} analysts)
 Price target upside: {td.target_upside:+.1f}%
-Revenue Growth: {td.info.get('revenueGrowth')}
-Earnings Growth: {td.info.get('earningsGrowth')}
+Revenue Growth: {td.info.get('revenueGrowth')}   Earnings Growth: {td.info.get('earningsGrowth')}
 News Sentiment (7d): {td.news_sentiment:+.3f}  (scale: -0.5 bearish → +0.5 bullish)  Articles: {td.news_count_24h}
 Insider Sentiment (90d): {td.insider_sentiment}
 Analyst Upgrades/Downgrades (1mo): {td.analyst_upgrades} upgrades / {td.analyst_downgrades} downgrades
+Macro backdrop: {gctx.macro_line if gctx else 'unavailable'}
+{stale_warn}
 
-Are there positive catalysts supporting a trade? Weight news sentiment and insider activity heavily —
-positive insider buying and bullish news sentiment are strong near-term catalysts.
-BUY = clear catalyst: bullish news ({td.news_sentiment:+.3f} > 0.1), insider buying, upcoming earnings + analyst upgrades.
-SELL = negative catalyst overhang: bearish news, insider selling, analyst downgrades.
+Are there positive catalysts supporting a trade? Weight news sentiment and insider activity heavily.
+EARNINGS WITHIN 7 DAYS = elevated binary risk — prefer iron_condor or credit spread over directional trades.
+BUY = clear catalyst: bullish news ({td.news_sentiment:+.3f} > 0.1), insider buying, analyst upgrades.
+SELL = negative catalyst overhang: bearish news, insider selling, downgrades, macro headwinds.
 HOLD = neutral/no near-term catalyst.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|stock_long|iron_condor|put_spread|stock_short"}}""",
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|stock_long|iron_condor|put_spread|stock_short|bull_put_spread|bear_call_spread"}}""",
 
         "risk": f"""You are a risk assessment agent. Your job is to protect capital.
 Ticker: {td.ticker} @ ${td.price:.2f}
@@ -375,12 +552,21 @@ Max 6M drawdown: {td.max_dd:.1%}
 HV Rank: {sc.get('hv_rank', 50):.0f}/100
 IV Avg (options): {td.iv_avg:.1%}
 
+{macro_full}
+
+{portfolio_ctx}
+{watchlist_ctx}
+
 Is the risk profile acceptable for a trade right now?
-BUY = low/medium risk, favorable risk-reward setup.
-HOLD = risk is elevated but manageable.
-SELL = risk is too high, position sizing dangerous.
-If confidence is below 0.30, you are effectively vetoing the trade.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence with specific risk concern","suggested_type":"iron_condor|call_spread|put_spread|long_call|stock_long|stock_short"}}""",
+VETO (confidence < 0.30) if ANY of:
+  - Yield curve INVERTED AND credit stress (HYG death cross) simultaneously — recession regime
+  - Beta > 2.0 AND max drawdown worse than -25%
+  - Already have 2+ open positions on this ticker
+  - Earnings within 7 days AND HV Rank > 65 (earnings binary + expensive IV)
+  - Stock is trading BELOW the watchlist hard_stop price
+BUY = risk is manageable, favorable setup.
+SELL = risk too high for directional trade, suggest defensive structures.
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence citing the specific risk factor","suggested_type":"iron_condor|call_spread|put_spread|long_call|stock_long|stock_short|bull_put_spread|bear_call_spread"}}""",
 
         "options_flow": f"""You are an options flow intelligence agent.
 Ticker: {td.ticker} @ ${td.price:.2f}
@@ -389,12 +575,14 @@ Avg Call IV: {td.iv_avg:.1%}
 Top Call OI strikes: {td.top_calls_str}
 Top Put OI strikes: {td.top_puts_str}
 HV Rank: {sc.get('hv_rank', 50):.0f}/100
+Macro: Yield curve {'NORMAL' if gctx and gctx.yield_normal else 'INVERTED — elevated hedging expected'}. Credit markets {'healthy' if gctx and gctx.credit_bull else 'STRESSED — elevated put buying/hedging'}.
 
 What is smart money positioning signaling?
-BUY = call-heavy flow, unusual upside bets, bullish positioning.
-SELL = put-heavy flow, hedging, bearish institutional bets.
-HOLD = balanced flow, no clear signal.
-Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|iron_condor|put_spread|stock_long|stock_short"}}""",
+Inverted yield curve + credit stress = institutions hedge more → expect elevated put OI, high P/C ratio is normal (not always bearish).
+BUY = call-heavy flow, unusual upside bets, bullish smart-money positioning vs macro backdrop.
+SELL = extreme put loading beyond macro hedging norms — genuine directional bearish bet.
+HOLD = balanced flow consistent with macro regime, no clear directional signal.
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|iron_condor|put_spread|stock_long|stock_short|bull_put_spread|bear_call_spread"}}""",
     }
 
     try:
@@ -541,7 +729,8 @@ def _parse_debate_json(raw: str) -> dict:
         return {}
 
 
-def _run_debate_round(td: "TickerData", consensus: dict, signals: list, client) -> dict:
+def _run_debate_round(td: "TickerData", consensus: dict, signals: list, client,
+                      gctx: "GlobalContext" = None) -> dict:
     """
     Bull vs Bear debate.  Returns an enriched consensus dict.
     All three calls are sequential (each depends on the previous).
@@ -555,6 +744,15 @@ def _run_debate_round(td: "TickerData", consensus: dict, signals: list, client) 
         f"{s.agent_name}:{s.signal}({s.confidence:.0%})" for s in signals
     )
     sc = td.scan
+    # Watchlist / portfolio lines for the PM
+    wl = (gctx.watchlist or {}).get(td.ticker, {}) if gctx else {}
+    wl_line = (f"Watchlist: {wl.get('conviction','?')} conviction | {wl.get('thesis','')[:80]}"
+               if wl else "Not on watchlist.")
+    portfolio_line = (f"Portfolio: {len(gctx.open_trades)} open trades, "
+                      f"{gctx.open_by_ticker.get(td.ticker, 0)} already on {td.ticker}"
+                      if gctx else "Portfolio: unknown.")
+    macro_ctx_line = _macro_block(td.ticker, gctx, mode="full") if gctx else ""
+
     data_ctx = (
         f"Ticker: {td.ticker} @ ${td.price:.2f}\n"
         f"MTF: {sc.get('mtf_score',0)}/3  RSI: {sc.get('rsi',50):.0f}  "
@@ -564,6 +762,9 @@ def _run_debate_round(td: "TickerData", consensus: dict, signals: list, client) 
         f"Analyst target upside: {td.target_upside:+.1f}%  Reco: {td.analyst_reco}\n"
         f"News sentiment: {td.news_sentiment:+.3f}  Insider: {td.insider_sentiment}  "
         f"Upgrades/downgrades: {td.analyst_upgrades}↑ / {td.analyst_downgrades}↓\n"
+        f"{macro_ctx_line}\n"
+        f"{wl_line}\n"
+        f"{portfolio_line}\n"
         f"Agent votes: {signal_summary}"
     )
 
@@ -624,10 +825,15 @@ Return JSON only: {{"bear_case":"2-3 sentence critique with specific data","weak
 BULL CASE (strength {bull_strength:.0%}): {bull_case}
 BEAR CASE (weakness {bear_weakness:.0%}): {bear_case}
 Initial consensus: {consensus.get('agreeing_count',0)}/6 agents BUY, confidence {consensus.get('confidence',0):.0%}
+{wl_line}
+{portfolio_line}
+Macro: {'YIELD CURVE INVERTED + CREDIT STRESS — recession regime, raise bar to PROCEED' if gctx and not gctx.yield_normal and not gctx.credit_bull else 'Macro regime: ' + (gctx.regime_phase if gctx else 'unknown')}
 
 Decision rules (apply strictly):
+- SKIP if yield curve INVERTED AND credit markets STRESSED (HYG death cross) — recession regime, only defensive structures
+- SKIP if already have 2+ open positions on this ticker — avoid concentration
 - SKIP if bear_weakness > 0.70 AND bull strength < 0.60  (weak bull + valid bear objections)
-- SKIP if earnings within 7 days and high IV (avoid earnings binary)
+- SKIP if earnings within 7 days and high IV (earnings binary — use iron_condor instead)
 - SKIP if beta > 2.0 and max_dd worse than -25% (portfolio risk too high)
 - PROCEED if bull strength ≥ 0.65 AND bear weakness ≤ 0.55
 - Default: lean toward caution — missing a trade costs nothing, a bad trade costs capital
@@ -725,23 +931,25 @@ class ConquestAgentSystem:
 
     # ── Core analysis pipeline ────────────────────────────────────────────────
 
-    def analyze_ticker(self, ticker: str, scan: dict = None) -> dict:
+    def analyze_ticker(self, ticker: str, scan: dict = None,
+                       gctx: "GlobalContext" = None) -> dict:
         """
         Full agent swarm analysis for one ticker.
         Runs all 6 specialist agents in parallel, then builds consensus.
+        gctx is shared global context (macro + portfolio) fetched once per session.
         """
         td = fetch_ticker_data(ticker, scan=scan)
         if td.error or not td.price:
             return {"ticker": ticker, "should_trade": False,
                     "reason": td.error or "no price", "signals": [], "consensus": {}}
 
-        # Run all agents in parallel
+        # Run all agents in parallel — pass gctx to every agent
         signals = []
         with ThreadPoolExecutor(max_workers=6) as pool:
             from conquest_brain import _get_client
             client = _get_client()
             futs = {
-                pool.submit(_run_agent, name, td, client): name
+                pool.submit(_run_agent, name, td, client, gctx): name
                 for name in AGENT_NAMES
             }
             for fut in as_completed(futs):
@@ -763,7 +971,7 @@ class ConquestAgentSystem:
         if consensus.get("should_trade"):
             try:
                 from conquest_brain import _get_client as _gc
-                consensus = _run_debate_round(td, consensus, signals, _gc())
+                consensus = _run_debate_round(td, consensus, signals, _gc(), gctx=gctx)
                 verdict = consensus.get("pm_decision", "?")
                 print(
                     f"[Debate] {ticker}: PM says {verdict} "
@@ -858,13 +1066,19 @@ class ConquestAgentSystem:
         ts = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
 
         _clear_vetoed_trades()   # reset cache for this run
+
+        # Fetch macro + portfolio context once; share across all ticker analyses
+        gctx = fetch_global_context(universe)
+        # Merge portfolio's already-open tickers with caller-supplied exclusions
+        all_existing = existing_tickers | gctx.open_tickers
+
         print(f"[AgentSystem] Analyzing {len(universe)} tickers with 6-agent swarm…")
 
         # Parallel ticker analysis (8 workers — one per ticker group)
         results = []
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {pool.submit(self.analyze_ticker, t): t
-                    for t in universe if t not in existing_tickers}
+            futs = {pool.submit(self.analyze_ticker, t, None, gctx): t
+                    for t in universe if t not in all_existing}
             for fut in as_completed(futs):
                 try:
                     results.append(fut.result())
