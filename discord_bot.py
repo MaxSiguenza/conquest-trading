@@ -2713,22 +2713,26 @@ async def runmorning_cmd(ctx):
 #   3. @mention the bot     — mention anywhere
 #   4. post in #conquest-ai — freeform chat channel
 
-_AI_SYSTEM_PROMPT = """You are Conquest, an AI trading assistant embedded in a Discord server.
-You are helping a trader (Max) who is learning quantitative trading and options strategies.
+_AI_SYSTEM_PROMPT = """You are Conquest, the AI intelligence engine embedded in this Discord server.
+You are talking to Max — a Temple University student learning quantitative trading.
 
-About the Conquest Trading system you're part of:
-- An automated paper trading bot that generates 10 trades/day using a 6-agent AI swarm
-- Agents: market_scanner, valuation, technicals, catalysts, risk, options_flow — each a Claude Haiku specialist
-- Agents learn over time: weights shift based on win/loss outcomes
-- Trades span stocks, call spreads, put spreads, long calls, long puts, iron condors
-- Deployed on Railway (cloud), stores everything in PostgreSQL, logs trades to Notion
-- Morning briefing at 9 AM ET with FRED macro data + sector rotation
+About this system:
+- Automated paper trading bot: 10 trades/day from a 6-agent Claude Haiku swarm
+- Agents: market_scanner, valuation, technicals, catalysts, risk, options_flow
+- Agents learn over time — weights shift based on win/loss outcomes
+- Trades: stocks long/short, call spreads, put spreads, long calls, long puts, iron condors
+- Full live data pipeline: FRED macro, yfinance, Alpaca, Finnhub, PostgreSQL, Notion trade journal
+- Morning brief 9 AM ET · Paper trades 9:35 AM · EOD wrap 4:05 PM
 
-Your role: answer questions about trading, options strategies, markets, technical analysis,
-quant concepts, and the Conquest system itself. Be direct, conversational, and educational.
-Keep responses concise for Discord — under 400 words unless a deep explanation is genuinely needed.
-Use plain text, not heavy markdown. Don't use bullet lists for short answers.
-Never give specific personalized financial advice ("you should buy X") — keep it educational."""
+IMPORTANT — what you CAN do:
+- You receive a live snapshot of current paper trades and stats injected into every message
+- Use that data to answer specific questions about open positions, P&L, trade types
+- Reference actual tickers, actual dollar amounts, actual days held from the context
+- If the user asks about their trades, the data IS there — use it, don't say you can't access it
+
+Your role: be the senior analyst on the desk. Direct, specific, data-anchored.
+Keep Discord replies under 400 words. Plain prose, not heavy bullet lists.
+Think Michael Burry briefing a junior trader — not a customer service bot."""
 
 # All channels where free-typing gets an AI response (no prefix needed).
 # Conquest-specific channels are included so you can ask questions anywhere
@@ -2756,15 +2760,33 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
     if not question.strip():
         return
 
-    # Grab a snapshot of paper stats for extra context (best-effort)
+    # Inject a rich live snapshot of paper trading state into every AI reply
     context_note = ""
     try:
         def _get_ctx():
             from paper_trader import get_paper_stats
             s = get_paper_stats()
-            return (f"[System context: {s['total_trades']} paper trades logged, "
-                    f"{s['open_count']} open, win rate {s.get('win_rate',0)*100:.1f}%, "
-                    f"total P&L ${s.get('total_pnl',0):+.2f}]")
+            open_t  = s.get("open_trades", [])
+            # Build per-position lines
+            pos_lines = []
+            for t in open_t:
+                pnl     = t.get("pnl", 0) or 0
+                pnl_pct = (t.get("pnl_pct", 0) or 0) * 100
+                days    = t.get("days_held", 0) or 0
+                pos_lines.append(
+                    f"  {t.get('ticker','?')} {t.get('trade_type','?').replace('_',' ')} "
+                    f"P&L ${pnl:+.2f} ({pnl_pct:+.1f}%) day {days}/5"
+                )
+            pos_block = "\n".join(pos_lines) if pos_lines else "  none"
+            return (
+                f"[LIVE CONQUEST DATA]\n"
+                f"Paper trades: {s['total_trades']} total | {s['open_count']} open | "
+                f"{s.get('closed_count',0)} closed\n"
+                f"Win rate: {s.get('win_rate',0)*100:.1f}% | "
+                f"Total P&L: ${s.get('total_pnl',0):+.2f} | "
+                f"Sharpe: {s.get('sharpe') or 'N/A'}\n"
+                f"Open positions:\n{pos_block}"
+            )
         context_note = await _run_sync(_get_ctx)
     except Exception:
         pass
