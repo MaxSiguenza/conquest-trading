@@ -1001,57 +1001,76 @@ def paper_evening_debrief(stats: dict, today_trades: list, all_time_pnl: float) 
     open_trades = stats.get("open_trades", [])
     open_lines  = []
     for t in open_trades:
-        ticker     = t.get("ticker", "?")
-        ttype      = t.get("trade_type", "?").replace("_", " ")
-        pnl        = t.get("pnl", 0) or 0
-        pnl_pct    = (t.get("pnl_pct", 0) or 0) * 100
-        days_held  = t.get("days_held", 0) or 0
-        days_left  = max(0, 5 - days_held)
-        entry_r    = t.get("reasoning", "")
-        cost       = t.get("cost_basis", 0) or 0
-        if cost > 0:
-            dist_profit = (STK_PROFIT if "stock" in ttype else OPT_PROFIT) * 100
-            dist_stop   = abs(STK_STOP if "stock" in ttype else OPT_STOP) * 100
-        else:
-            dist_profit = dist_stop = 0
+        ticker    = t.get("ticker", "?")
+        ttype     = t.get("trade_type", "?").replace("_", " ")
+        pnl       = t.get("pnl", 0) or 0
+        pnl_pct   = (t.get("pnl_pct", 0) or 0) * 100
+        days_held = t.get("days_held", 0) or 0
+        days_left = max(0, 5 - days_held)
+        cost      = t.get("cost_basis", 0) or 0
+        curr      = t.get("current_price", 0) or 0
+        entry_r   = t.get("reasoning", "") or "not recorded"
 
-        entry_snippet = (entry_r[:120] + "…") if len(entry_r) > 120 else entry_r
+        # Position spec — strikes/expiry for options, shares/price for stocks
+        spec_parts = []
+        if t.get("strike"):
+            spec_parts.append(f"${t['strike']} strike")
+        if t.get("short_strike"):
+            spec_parts.append(f"/ ${t['short_strike']} short")
+        if t.get("expiry"):
+            spec_parts.append(f"exp {t['expiry']}")
+        if t.get("dte") is not None:
+            spec_parts.append(f"{t['dte']}d DTE")
+        if t.get("shares"):
+            spec_parts.append(f"{t['shares']:.0f} shares")
+        spec = "  " + " | ".join(spec_parts) if spec_parts else ""
+
+        # Profit/stop targets
+        is_stock = "stock" in ttype
+        target_pct = STK_PROFIT * 100 if is_stock else OPT_PROFIT * 100
+        stop_pct   = abs(STK_STOP) * 100 if is_stock else abs(OPT_STOP) * 100
+
         open_lines.append(
-            f"  {ticker} {ttype} | P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%) | "
+            f"  [{ticker} — {ttype.upper()}]{spec}\n"
+            f"    Cost: ${cost:.2f} → Now: ${curr:.2f} | "
+            f"P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%) | "
             f"Day {days_held}/5 ({days_left}d left) | "
-            f"Original thesis: {entry_snippet or 'not recorded'}"
+            f"Target: +{target_pct:.0f}% | Stop: -{stop_pct:.0f}%\n"
+            f"    Entry thesis: {entry_r[:220]}{'…' if len(entry_r) > 220 else ''}"
         )
 
-    open_block = "\n".join(open_lines) if open_lines else "  No positions currently open."
+    open_block = "\n\n".join(open_lines) if open_lines else "  No positions currently open."
 
-    prompt = f"""End-of-day paper trading summary — {_date.today().strftime('%B %d, %Y')}
+    prompt = f"""End-of-day paper trading debrief — {_date.today().strftime('%B %d, %Y')}
 
 ═══ TODAY'S CLOSED TRADES ═══
 Closed: {len(today_trades)} trades  ({win_today}W / {loss_today}L)  |  Today P&L: ${today_pnl:+.2f}
 
 {closed_block}
 
-═══ POSITIONS STILL OPEN OVERNIGHT ═══
+═══ ALL 19 OPEN POSITIONS (full detail) ═══
 {open_block}
 
-═══ ALL-TIME STATS ═══
-  Closed trades: {stats.get('closed_count', 0)}   Win rate: {stats.get('win_rate', 0)*100:.1f}%
-  All-time P&L:  ${all_time_pnl:+.2f}   Sharpe: {stats.get('sharpe') or 'N/A'}   PF: {stats.get('profit_factor') or 'N/A'}
+═══ ALL-TIME ═══
+  {stats.get('closed_count', 0)} closed | {stats.get('win_rate', 0)*100:.1f}% win rate | ${all_time_pnl:+.2f} P&L | Sharpe {stats.get('sharpe') or 'N/A'}
 
-Write a sharp end-of-day debrief covering THREE sections:
+Write a sharp EOD debrief in THREE clearly labelled sections:
 
-1. TODAY'S CLOSE — How did the day go? Were exits clean or forced? Any patterns in what worked vs what didn't? Reference actual numbers.
+**1. TODAY'S CLOSE**
+How the day went. Reference actual numbers from closed trades. Was execution clean?
 
-2. OPEN POSITIONS REVIEW — For EACH open position above, give one sentence: where it stands right now, why the system kept it (it hasn't hit its target or stop yet), and what to watch tomorrow. Be specific — use the ticker name and P&L.
+**2. OPEN POSITIONS — OVERNIGHT HOLD REVIEW**
+Go through EVERY open position. For each one: state the specific position (ticker, type, strikes if applicable), current P&L in dollars, why the agents entered it (pull from entry thesis), why it's still open (hasn't hit target/stop), and the one thing to watch tomorrow. Be specific — dollar amounts, strike prices, days remaining.
 
-3. TOMORROW'S OUTLOOK — One forward-looking thought based on what's still on the books and what today's action revealed.
+**3. TOMORROW'S WATCH LIST**
+Given everything on the books, what are the key levels and decisions for tomorrow morning? Which positions are closest to their targets? Which need to be cut if they don't move?
 
-Be direct and analytical. No fluff. Reference tickers by name."""
+No fluff. This is a real trading desk debrief. Reference every position by name."""
 
     try:
         msg = _get_client().messages.create(
             model="claude-haiku-4-5",
-            max_tokens=500,
+            max_tokens=1200,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
