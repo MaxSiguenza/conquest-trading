@@ -488,6 +488,50 @@ def brief_generate():
     return redirect(url_for("brief_page"))
 
 
+# ── Backtest ──────────────────────────────────────────────────────────────────
+
+@app.route("/backtest", methods=["GET", "POST"])
+def backtest_page():
+    """
+    Run the Conquest backtesting engine.
+    GET  → show the form
+    POST → fire backtest in a background thread, redirect back with status
+    """
+    from flask import flash, get_flashed_messages
+    status = None
+    error  = None
+
+    if request.method == "POST":
+        period  = request.form.get("period", "2y").strip() or "2y"
+        raw     = request.form.get("tickers", "").strip().upper()
+        tickers = raw.split() if raw else None
+
+        def _run_bg():
+            try:
+                import sys
+                sys.path.insert(0, APP_DIR)
+                from backtest import run_backtest
+                run_backtest(
+                    tickers=tickers,
+                    period=period,
+                    workers=10,
+                    discord=True,
+                )
+            except Exception as bg_e:
+                print(f"[Backtest] Background run failed: {bg_e}")
+
+        import threading
+        threading.Thread(target=_run_bg, daemon=True).start()
+
+        universe = f"{len(tickers)} tickers" if tickers else "full 129-ticker universe"
+        status = (
+            f"Backtest started on {universe} ({period} lookback). "
+            f"Results will be posted to #agent-brain on Discord in a few minutes."
+        )
+
+    return render_template("backtest.html", status=status, error=error)
+
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

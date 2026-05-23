@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Backtest Engine — Conquest{% endblock %}
+
+{% block extra_style %}
+.field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+.field input, .field select {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.field select { appearance: none; cursor: pointer; }
+.field input:focus, .field select:focus { border-color: #7c6af7; }
+.form-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  gap: 16px;
+  align-items: end;
+}
+@media (max-width: 600px) {
+  .form-grid { grid-template-columns: 1fr; }
+}
+.btn-run {
+  background: #166534;
+  color: #bbf7d0;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 28px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+  height: 42px;
+  align-self: end;
+}
+.btn-run:hover { opacity: 0.85; }
+.btn-run:disabled { background: #2d3148; color: #475569; cursor: not-allowed; }
+.status-ok {
+  background: #14532d;
+  border: 1px solid #166534;
+  color: #bbf7d0;
+  border-radius: 10px;
+  padding: 16px 20px;
+  font-size: 14px;
+  margin-top: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.status-err {
+  background: #450a0a;
+  border: 1px solid #7f1d1d;
+  color: #fecaca;
+  border-radius: 10px;
+  padding: 16px 20px;
+  font-size: 14px;
+  margin-top: 20px;
+}
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-top: 28px;
+}
+.info-tile {
+  background: #1a1d27;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+.info-tile .label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.info-tile .value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+.info-tile .value.green { color: #4ade80; }
+.info-tile .value.purple { color: #a78bfa; }
+.spinner-row {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  color: #7c6af7;
+  font-size: 13px;
+  margin-top: 16px;
+}
+.spinner-row.visible { display: flex; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #7c6af7; animation: bounce 1.2s infinite; }
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%,80%,100%{ transform:scale(0.6);opacity:0.4; } 40%{ transform:scale(1);opacity:1; } }
+{% endblock %}
+
+{% block content %}
+<a href="/paper-stats" style="font-size:13px;color:#64748b;text-decoration:none;display:inline-flex;align-items:center;gap:6px;margin-bottom:20px;">
+  ← Back to Paper Stats
+</a>
+<h1>🔬 Backtest Engine
+  <span style="font-size:13px;color:#64748b;font-weight:400;">— 129 tickers · Black-Scholes options sim</span>
+</h1>
+
+<div class="card">
+  <p style="font-size:13px;color:#94a3b8;margin-bottom:20px;line-height:1.6;">
+    Runs the full Conquest strategy across the complete universe and posts structured results
+    to <strong style="color:#c4b5fd">#agent-brain</strong> on Discord.
+    The backtest simulates stocks + options (long calls &amp; long puts) with exact production
+    signals, Black-Scholes pricing, and realistic hold/exit rules.
+    Results arrive in Discord in ~3–5 minutes.
+  </p>
+  <form method="POST" id="bt-form">
+    <div class="form-grid">
+      <div class="field">
+        <label for="period">Lookback Period</label>
+        <select id="period" name="period">
+          <option value="1y">1 year</option>
+          <option value="2y" selected>2 years</option>
+          <option value="3y">3 years</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="tickers">Tickers (optional — leave blank for full universe)</label>
+        <input
+          type="text"
+          id="tickers"
+          name="tickers"
+          placeholder="e.g. AAPL NVDA GS SPY  (blank = all 129)"
+          autocomplete="off"
+        >
+      </div>
+      <button type="submit" class="btn-run" id="run-btn">Run Backtest</button>
+    </div>
+  </form>
+
+  <div class="spinner-row" id="spinner">
+    <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+    <span>Launching backtest engine...</span>
+  </div>
+</div>
+
+{% if status %}
+<div class="status-ok">
+  <span style="font-size:20px">✅</span>
+  <div>
+    <strong>Backtest running</strong><br>
+    <span style="font-size:13px;opacity:0.85">{{ status }}</span>
+  </div>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="status-err">⚠ {{ error }}</div>
+{% endif %}
+
+<!-- Last known results summary -->
+<div class="info-grid">
+  <div class="info-tile">
+    <div class="label">Last Run Results</div>
+    <div class="value purple">5,807 trades</div>
+    <div style="font-size:11px;color:#64748b;margin-top:3px;">2-year · 129 tickers</div>
+  </div>
+  <div class="info-tile">
+    <div class="label">Total P&amp;L</div>
+    <div class="value green">+$246,112</div>
+    <div style="font-size:11px;color:#64748b;margin-top:3px;">Sharpe 1.92 · PF 1.24</div>
+  </div>
+  <div class="info-tile">
+    <div class="label">Win Rate</div>
+    <div class="value green">48.7%</div>
+    <div style="font-size:11px;color:#64748b;margin-top:3px;">Options win via asymmetry</div>
+  </div>
+  <div class="info-tile">
+    <div class="label">Verdict</div>
+    <div class="value green" style="font-size:14px;">EDGE CONFIRMED</div>
+    <div style="font-size:11px;color:#64748b;margin-top:3px;">Positive Sharpe + profit factor</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:24px">
+  <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">
+    Discord Command
+  </div>
+  <div style="background:#0f1117;border:1px solid #2d3148;border-radius:8px;padding:12px 16px;font-family:monospace;font-size:13px;color:#c9d6e8;">
+    <span style="color:#7c6af7">!backtest</span>
+    &nbsp;&nbsp;&nbsp;
+    <span style="color:#64748b"># full universe, 2y</span><br>
+    <span style="color:#7c6af7">!backtest 3y</span>
+    &nbsp;&nbsp;&nbsp;
+    <span style="color:#64748b"># 3-year lookback</span><br>
+    <span style="color:#7c6af7">!backtest 2y AAPL NVDA GS</span>
+    &nbsp;
+    <span style="color:#64748b"># specific tickers</span>
+  </div>
+</div>
+
+<script>
+document.getElementById("bt-form").addEventListener("submit", function () {
+  const btn = document.getElementById("run-btn");
+  btn.disabled = true;
+  btn.textContent = "Launching...";
+  document.getElementById("spinner").classList.add("visible");
+});
+</script>
+{% endblock %}

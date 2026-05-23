@@ -2845,6 +2845,54 @@ async def ask_cmd(ctx, *, question: str = ""):
     await _conquest_ai_reply(ctx.message, question)
 
 
+@bot.command(name="backtest", aliases=["bt", "runbacktest"])
+async def backtest_cmd(ctx, *args):
+    """
+    Run the Conquest backtesting engine and post results to #agent-brain.
+    Usage:
+      !backtest                     — full 129-ticker universe, 2 years
+      !backtest 3y                  — 3-year lookback
+      !backtest 2y AAPL NVDA SPY   — specific tickers, 2-year lookback
+      !backtest AAPL NVDA           — specific tickers, default 2y
+    """
+    # Parse args: if first arg looks like a period (e.g. "2y", "1y", "3y") use it
+    period      = "2y"
+    ticker_list = None
+
+    if args:
+        first = args[0].lower()
+        if len(first) <= 3 and first.endswith("y") and first[:-1].isdigit():
+            period      = first
+            ticker_list = list(args[1:]) if len(args) > 1 else None
+        else:
+            ticker_list = [t.upper() for t in args]
+
+    universe_desc = (
+        f"{len(ticker_list)} tickers" if ticker_list
+        else "full 129-ticker universe"
+    )
+    await ctx.send(
+        f"Running backtest on {universe_desc} ({period} lookback)... "
+        f"Results will post to <#1507449004945047602> in a few minutes."
+    )
+
+    def _run():
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from backtest import run_backtest
+        return run_backtest(
+            tickers=ticker_list,
+            period=period,
+            workers=10,
+            discord=True,
+        )
+
+    try:
+        await _run_sync(_run)
+    except Exception as e:
+        await ctx.send(f"Backtest failed: {str(e)[:200]}")
+
+
 @bot.event
 async def on_message(message: discord.Message):
     """

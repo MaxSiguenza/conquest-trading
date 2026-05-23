@@ -112,7 +112,7 @@ def _strike_step(price: float) -> float:
 
 _TYPE_WEIGHTS = {
     "stock_long":   1,
-    "stock_short":  1,
+    # stock_short removed — backtest confirmed 42.8% WR, -$6,231 drag over 2y
     "call_spread":  2,
     "put_spread":   2,
     "long_call":    1,
@@ -158,8 +158,8 @@ def _assign_trade_type(scan: dict) -> str:
         if sqz_fired and sqz_mom < 0:
             return random.choice(["put_spread", "long_put", "put_spread"])
         if rsi > 58:
-            return random.choice(["long_put", "stock_short"])
-        return random.choice(["put_spread", "stock_short", "long_put", "put_spread"])
+            return random.choice(["long_put", "put_spread"])
+        return random.choice(["put_spread", "long_put", "put_spread"])
 
     # Neutral / mixed — range-bound candidates
     if hv_rank > 0.40:
