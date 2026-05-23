@@ -80,6 +80,45 @@ def _bs(S: float, K: float, T: float, sigma: float, opt_type: str = "call") -> f
         return 0.0
 
 
+def _greeks(S: float, K: float, T: float, sigma: float,
+            opt_type: str = "call") -> dict:
+    """
+    Black-Scholes Greeks — per share, per day for theta.
+
+    Returns delta, theta ($/share/day), gamma, vega (per 1% IV move).
+    All values are from the LONG perspective:
+      • Long call:  delta > 0,  theta < 0,  gamma > 0,  vega > 0
+      • Long put:   delta < 0,  theta < 0,  gamma > 0,  vega > 0
+    For short positions, flip the signs at the call site.
+    """
+    try:
+        from scipy.stats import norm
+        import math
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+            return {"delta": 0.0, "theta": 0.0, "gamma": 0.0, "vega": 0.0}
+        d1  = (math.log(S / K) + (RISK_FREE + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2  = d1 - sigma * math.sqrt(T)
+        pdf = float(norm.pdf(d1))
+        gamma = pdf / (S * sigma * math.sqrt(T))
+        vega  = S * pdf * math.sqrt(T) / 100          # per 1 % IV change
+        if opt_type == "call":
+            delta = float(norm.cdf(d1))
+            theta = (-(S * pdf * sigma) / (2 * math.sqrt(T))
+                     - RISK_FREE * K * math.exp(-RISK_FREE * T) * float(norm.cdf(d2))) / 365
+        else:
+            delta = float(norm.cdf(d1)) - 1.0
+            theta = (-(S * pdf * sigma) / (2 * math.sqrt(T))
+                     + RISK_FREE * K * math.exp(-RISK_FREE * T) * float(norm.cdf(-d2))) / 365
+        return {
+            "delta": round(delta,  4),
+            "theta": round(theta,  4),   # per share per day (negative = long option pays theta)
+            "gamma": round(gamma,  4),
+            "vega":  round(vega,   4),
+        }
+    except Exception:
+        return {"delta": 0.0, "theta": 0.0, "gamma": 0.0, "vega": 0.0}
+
+
 def _hv(ticker: str, fallback: float = 0.28) -> float:
     """30-day historical annualised volatility."""
     try:
@@ -544,6 +583,18 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             raw  = (cur - t["entry_option_price"]) * 100 * t["contracts"]
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / t["cost_basis"], 4) if t["cost_basis"] else 0.0
+            # Greeks — long option (paying theta, earning on correct direction)
+            g = _greeks(price, t["strike"], T_rem, t["sigma"], t["opt_type"])
+            t["delta"]           = g["delta"]
+            t["theta"]           = g["theta"]
+            t["gamma"]           = g["gamma"]
+            t["vega"]            = g["vega"]
+            t["theta_dollar_day"] = round(g["theta"] * 100 * t["contracts"], 2)
+            # Moneyness: how far OTM (positive = OTM, negative = ITM)
+            if tt == "long_call":
+                t["moneyness_pct"] = round((t["strike"] - price) / price * 100, 1)
+            else:
+                t["moneyness_pct"] = round((price - t["strike"]) / price * 100, 1)
 
         elif tt in ("call_spread", "put_spread"):
             T_rem  = max((t["t_days"] - days_held) / 365.0, 0.001)
@@ -554,6 +605,13 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             raw  = (net - t["entry_net_debit"]) * 100 * t["contracts"]
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / t["cost_basis"], 4) if t["cost_basis"] else 0.0
+            # Net Greeks: long leg minus short leg (we're long the spread)
+            g_l = _greeks(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+            g_s = _greeks(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+            t["delta"]            = round(g_l["delta"] - g_s["delta"], 4)
+            t["theta"]            = round(g_l["theta"] - g_s["theta"], 4)
+            t["vega"]             = round(g_l["vega"]  - g_s["vega"],  4)
+            t["theta_dollar_day"] = round(t["theta"] * 100 * t["contracts"], 2)
 
         elif tt == "iron_condor":
             T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
@@ -567,6 +625,18 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             ml   = t.get("max_loss", 1) * 100 or 100
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / ml, 4)
+            # Net Greeks: SHORT sc, LONG lc, SHORT sp, LONG lp
+            g_sc = _greeks(price, t["short_call_k"], T_rem, t["sigma"], "call")
+            g_lc = _greeks(price, t["long_call_k"],  T_rem, t["sigma"], "call")
+            g_sp = _greeks(price, t["short_put_k"],  T_rem, t["sigma"], "put")
+            g_lp = _greeks(price, t["long_put_k"],   T_rem, t["sigma"], "put")
+            net_theta = (-g_sc["theta"] + g_lc["theta"]
+                         - g_sp["theta"] + g_lp["theta"])
+            net_delta = (-g_sc["delta"] + g_lc["delta"]
+                         - g_sp["delta"] + g_lp["delta"])
+            t["delta"]            = round(net_delta, 4)   # near-zero for condor
+            t["theta"]            = round(net_theta, 4)   # positive: collecting theta
+            t["theta_dollar_day"] = round(net_theta * 100 * t["contracts"], 2)
 
         elif tt in ("bull_put_spread", "bear_call_spread"):
             T_rem    = max((t["t_days"] - days_held) / 365.0, 0.001)
@@ -579,6 +649,16 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             ml     = t.get("max_loss", 1) * 100 or 100
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / ml, 4)
+            # Net Greeks: SHORT short_strike, LONG long_strike
+            g_s = _greeks(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+            g_l = _greeks(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+            net_delta = -g_s["delta"] + g_l["delta"]   # positive for bull_put, negative for bear_call
+            net_theta = -g_s["theta"] + g_l["theta"]   # positive: credit spread collects theta
+            t["delta"]            = round(net_delta, 4)
+            t["theta"]            = round(net_theta, 4)
+            t["theta_dollar_day"] = round(net_theta * 100 * t["contracts"], 2)
+            # % of credit already captured
+            t["credit_captured_pct"] = round((1 - cost_now / credit) * 100, 1) if credit else 0
 
         elif tt == "covered_call":
             T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
@@ -589,6 +669,13 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             cb   = t.get("cost_basis", 1) or 1
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / cb, 4)
+            # Greeks: SHORT the call → flip signs
+            g = _greeks(price, t["strike"], T_rem, t["sigma"], "call")
+            t["delta"]            = round(-g["delta"], 4)   # negative: short call
+            t["theta"]            = round(-g["theta"], 4)   # positive: collecting theta
+            t["theta_dollar_day"] = round(-g["theta"] * 100 * t["contracts"], 2)
+            # How close is the stock to being called away?
+            t["moneyness_pct"]    = round((t["strike"] - price) / price * 100, 1)
 
     except Exception:
         pass
@@ -652,18 +739,23 @@ def _should_close(t: dict) -> Optional[str]:
 
 def agent_exit_review(open_trades: list) -> dict:
     """
-    Ask Claude (Haiku) to review all open option positions and decide hold/close.
+    Ask Claude (Haiku) to review all open options/spreads and decide HOLD or CLOSE.
     Returns {trade_id: close_reason} for positions the agent wants to close.
-    Runs once per day at market close after mark_trade has updated P&L.
+    Runs at 4:05 PM ET after mark_trade has refreshed P&L and Greeks.
 
-    The agent considers: days held, P&L, DTE remaining, whether the thesis
-    still holds, and overall position health — not arbitrary percentage targets.
+    Greeks give the agent real options intuition:
+    - theta_dollar_day: how many $ you're bleeding (or earning) per day from time decay
+    - delta: directional exposure — low delta on a long call means deep OTM, stock barely moves it
+    - guaranteed_theta_cost: total theta bleed if held to expiry (dte × theta/day)
+    - credit_captured_pct: for credit spreads, how much of the max profit is already in the bag
     """
-    # Only review option/spread trades — stocks use fixed rules above
-    option_trades = [
-        t for t in open_trades
-        if t.get("trade_type") in ("long_call", "long_put", "call_spread", "put_spread")
-    ]
+    OPT_TYPES = (
+        "long_call", "long_put",
+        "call_spread", "put_spread",
+        "bull_put_spread", "bear_call_spread",
+        "covered_call", "iron_condor",
+    )
+    option_trades = [t for t in open_trades if t.get("trade_type") in OPT_TYPES]
     if not option_trades:
         return {}
 
@@ -673,53 +765,84 @@ def agent_exit_review(open_trades: list) -> dict:
 
         positions = []
         for t in option_trades:
-            dte_remaining = t.get("t_days", 30) - t.get("days_held", 0)
-            positions.append({
-                "id":            t["id"],
-                "ticker":        t["ticker"],
-                "trade_type":    t["trade_type"],
-                "direction":     t.get("opt_type", "call"),
-                "days_held":     t.get("days_held", 0),
-                "dte_remaining": max(dte_remaining, 0),
-                "pnl_pct":       round(t.get("pnl_pct", 0) * 100, 1),
-                "pnl_usd":       round(t.get("pnl", 0), 2),
-                "rsi_at_entry":  t.get("rsi_entry", 50),
-                "mtf_score":     t.get("mtf_score", 0),
-            })
+            dte  = max(t.get("t_days", 30) - t.get("days_held", 0), 0)
+            tpd  = t.get("theta_dollar_day", 0)
+            pos  = {
+                "id":                  t["id"],
+                "ticker":              t["ticker"],
+                "type":                t["trade_type"],
+                "days_held":           t.get("days_held", 0),
+                "dte_remaining":       dte,
+                "pnl_pct":             round(t.get("pnl_pct", 0) * 100, 1),
+                "pnl_usd":             round(t.get("pnl", 0), 2),
+                "delta":               t.get("delta", 0),
+                "theta_per_day_usd":   round(tpd, 2),
+                "guaranteed_theta_cost": round(tpd * dte, 2),  # total bleed/income if held to expiry
+                "mtf_score":           t.get("mtf_score", 0),
+                "rsi_at_entry":        t.get("rsi_entry", 50),
+            }
+            # Type-specific extras
+            if t["trade_type"] in ("long_call", "long_put"):
+                pos["moneyness_pct"] = t.get("moneyness_pct", 0)
+                pos["strike"]        = t.get("strike")
+                pos["vega"]          = t.get("vega", 0)
+            elif t["trade_type"] in ("bull_put_spread", "bear_call_spread"):
+                pos["credit_captured_pct"] = t.get("credit_captured_pct", 0)
+                pos["short_strike"]        = t.get("short_strike")
+                pos["long_strike"]         = t.get("long_strike")
+            elif t["trade_type"] in ("call_spread", "put_spread"):
+                pos["long_strike"]  = t.get("long_strike")
+                pos["short_strike"] = t.get("short_strike")
+            elif t["trade_type"] == "covered_call":
+                pos["strike"]        = t.get("strike")
+                pos["moneyness_pct"] = t.get("moneyness_pct", 0)  # +% = OTM (safe), 0% = at strike
+            elif t["trade_type"] == "iron_condor":
+                pos["short_put_k"]  = t.get("short_put_k")
+                pos["short_call_k"] = t.get("short_call_k")
+            positions.append(pos)
 
-        prompt = f"""You are a professional options portfolio manager reviewing open paper trading positions.
-For each position below, decide: HOLD or CLOSE.
+        prompt = f"""You are a professional options portfolio manager. Review the positions below and decide HOLD or CLOSE for each.
 
-Your job is to think like a disciplined trader — not too trigger-happy (don't close winners early),
-but also not stubborn (don't hold losers hoping for a recovery that isn't coming).
+KEY METRICS EXPLAINED:
+- theta_per_day_usd: daily P&L from time decay alone
+  • Negative = you're PAYING theta (long options — time working against you)
+  • Positive = you're EARNING theta (credit spreads, covered calls — time working for you)
+- guaranteed_theta_cost: total theta impact if held to expiry (theta/day × DTE left)
+  • A long call losing $8/day with 6 DTE = $48 of guaranteed theta loss coming
+- delta: how much the position moves per $1 stock move (× 100 shares)
+  • Long call Δ=0.12 → stock moves $1, option moves $0.12 → deep OTM, needs big move
+  • Long call Δ=0.65 → stock moves $1, option moves $0.65 → nearly ITM, working well
+- credit_captured_pct: for credit spreads, % of max profit already earned
+  • 70%+ → consider closing, you've captured most of the premium
 
-Guidelines (use judgment, not rules):
-- If DTE remaining < 7: CLOSE (theta decay accelerates sharply near expiry)
-- If in a clear profit (+20%+) and the move looks exhausted: CLOSE and bank gains
-- If the position has been losing slowly for many days with no sign of recovery: CLOSE
-- If the stock originally had good setup signals (high MTF score) and we're only slightly red: HOLD
-- Let strong conviction trades (MTF score 3) run longer than weak ones (MTF score 1)
-- Never hold a position past 21 days
+DECISION FRAMEWORK (use judgment, not rigid rules):
+- DTE < 7: CLOSE — theta decay accelerates, risk/reward degrades sharply
+- Long options, delta < 0.15, losing money: CLOSE — deep OTM, need miracle move
+- Long options: |guaranteed_theta_cost| > current position value: CLOSE — theta will eat you alive
+- Long options in clear profit (>30%) + delta fading: CLOSE — take gains before theta takes them
+- Credit spreads, credit_captured_pct > 75%: CLOSE — most of the gain is made, don't risk reversal
+- Covered calls, moneyness < 1%: careful — stock near strike, may get called away soon
+- MTF 3/3 conviction with <10 days held, slightly red: HOLD — good signal, give it time
+- Any position at >21 days: CLOSE unconditionally
 
-Open positions:
+OPEN POSITIONS:
 {json.dumps(positions, indent=2)}
 
-Respond ONLY with a JSON object in this exact format:
+Respond ONLY with valid JSON in this exact format (no markdown, no explanation outside JSON):
 {{
   "decisions": [
-    {{"id": "trade_id_here", "action": "HOLD", "reason": "brief reason"}},
-    {{"id": "trade_id_here", "action": "CLOSE", "reason": "brief reason"}}
+    {{"id": "trade_id", "action": "HOLD", "reason": "one sentence"}},
+    {{"id": "trade_id", "action": "CLOSE", "reason": "one sentence"}}
   ]
 }}"""
 
         response = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=1500,
+            max_tokens=2000,
             messages=[{"role": "user", "content": prompt}]
         )
 
         text = response.content[0].text.strip()
-        # Strip any markdown code fences the model might add
         if text.startswith("```"):
             text = "\n".join(text.split("\n")[1:])
             text = text.rsplit("```", 1)[0].strip()
@@ -729,8 +852,12 @@ Respond ONLY with a JSON object in this exact format:
         for d in result.get("decisions", []):
             if d.get("action") == "CLOSE":
                 to_close[d["id"]] = d.get("reason", "agent_decision")
-        print(f"[AgentExit] Reviewed {len(option_trades)} options: "
-              f"{len(to_close)} close, {len(option_trades)-len(to_close)} hold")
+
+        held  = len(option_trades) - len(to_close)
+        print(f"[AgentExit] Reviewed {len(option_trades)} options → "
+              f"{len(to_close)} CLOSE, {held} HOLD")
+        for tid, reason in to_close.items():
+            print(f"[AgentExit]  CLOSE {tid[:40]}: {reason}")
         return to_close
 
     except Exception as e:

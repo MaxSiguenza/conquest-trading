@@ -755,23 +755,33 @@ async def trades_cmd(ctx):
                 exp_tag = "?"
         else:
             exp_tag = "?"
+        # Greeks suffix — delta and daily theta cost
+        delta = t.get("delta")
+        tpd   = t.get("theta_dollar_day")
+        greeks_tag = ""
+        if delta is not None and tpd is not None:
+            delta_str = f"Δ{delta:+.2f}"
+            # Positive theta = earning (credit), negative = paying (debit)
+            tpd_str   = f"Θ{tpd:+.1f}/d"
+            greeks_tag = f" · {delta_str} {tpd_str}"
+
         # Strike display by type
         if tt in ("long_call", "long_put", "covered_call"):
             k = t.get("strike", "?")
-            return f"K${k} · {exp_tag}"
+            return f"K${k} · {exp_tag}{greeks_tag}"
         elif tt in ("call_spread", "put_spread"):
             lk = t.get("long_strike", "?")
             sk = t.get("short_strike", "?")
-            return f"${lk}/${sk} · {exp_tag}"
+            return f"${lk}/${sk} · {exp_tag}{greeks_tag}"
         elif tt in ("bull_put_spread", "bear_call_spread"):
-            sk = t.get("short_strike", "?")   # short is the one we sold (dominant leg)
+            sk = t.get("short_strike", "?")
             lk = t.get("long_strike", "?")
-            return f"${sk}/${lk} · {exp_tag}"
+            return f"${sk}/${lk} · {exp_tag}{greeks_tag}"
         elif tt == "iron_condor":
             sp = t.get("short_put_k", "?")
             sc = t.get("short_call_k", "?")
-            return f"${sp}–${sc} · {exp_tag}"
-        return exp_tag
+            return f"${sp}–${sc} · {exp_tag}{greeks_tag}"
+        return exp_tag + greeks_tag
 
     sorted_trades = sorted(open_trades, key=lambda t: t.get("pnl", 0), reverse=True)
     lines = []
