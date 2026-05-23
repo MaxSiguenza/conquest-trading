@@ -889,6 +889,10 @@ def generate_daily_trades(n: int = 10) -> list:
     Safe to call multiple times — skips if today's batch already exists.
     Returns list of new trades added (empty if already ran today).
     """
+    if not _is_trading_day():
+        print("[PaperTrader] Skipping trade generation — markets are closed (weekend).")
+        return []
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
     sys.path.insert(0, APP_DIR)
 
@@ -1058,11 +1062,25 @@ def generate_daily_trades(n: int = 10) -> list:
 
 # ── Daily close ────────────────────────────────────────────────────────────────
 
+def _is_trading_day(dt=None) -> bool:
+    """Return True only if dt (default: now ET) is a weekday (Mon–Fri)."""
+    if dt is None:
+        dt = datetime.now(ET)
+    return dt.weekday() < 5  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+
+
 def run_daily_close() -> dict:
     """
     Mark every open trade to market, close any that hit stop/target/max-hold.
     Call at market close (4:05 PM ET).
     """
+    if not _is_trading_day():
+        print("[PaperTrader] Skipping close run — markets are closed (weekend).")
+        trades = load_trades()
+        open_count = sum(1 for t in trades if t.get("status") == "open")
+        return {"total_open": open_count, "closed": 0, "still_open": open_count,
+                "skipped": True, "reason": "weekend"}
+
     trades = load_trades()
     open_trades = [t for t in trades if t.get("status") == "open"]
 
@@ -1155,6 +1173,13 @@ def run_daily_close() -> dict:
 def get_paper_stats() -> dict:
     """Return a comprehensive stats dict for the web dashboard and Discord."""
     trades  = load_trades()
+
+    # Backfill expiry_date for older trades that predate the field
+    for t in trades:
+        if "expiry_date" not in t and t.get("t_days") and t.get("date_entered"):
+            entry = date.fromisoformat(t["date_entered"][:10])
+            t["expiry_date"] = (entry + timedelta(days=t["t_days"])).isoformat()
+
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]
 

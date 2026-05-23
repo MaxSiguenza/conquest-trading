@@ -406,11 +406,15 @@ def paper_stats_generate():
     flash_ok = flash_err = None
     try:
         from paper_trader import generate_daily_trades
-        new = generate_daily_trades(10)
-        if new:
-            flash_ok = f"Generated {len(new)} paper trades for today."
+        from paper_trader import _is_trading_day
+        if not _is_trading_day():
+            flash_err = "Markets are closed today (weekend). Trade generation skipped."
         else:
-            flash_ok = "Today's trades already exist (or no data available). Nothing added."
+            new = generate_daily_trades(10)
+            if new:
+                flash_ok = f"Generated {len(new)} paper trades for today."
+            else:
+                flash_ok = "Today's trades already exist (or no data available). Nothing added."
     except Exception as e:
         flash_err = f"Generation failed: {e}"
     from paper_trader import get_paper_stats
@@ -425,9 +429,12 @@ def paper_stats_close():
     try:
         from paper_trader import run_daily_close
         result  = run_daily_close()
-        flash_ok = (f"Mark-to-market complete — "
-                    f"{result['closed']} trades closed, "
-                    f"{result['still_open']} still open.")
+        if result.get("skipped"):
+            flash_err = "Markets are closed today (weekend). Close run skipped."
+        else:
+            flash_ok = (f"Mark-to-market complete — "
+                        f"{result['closed']} trades closed, "
+                        f"{result['still_open']} still open.")
     except Exception as e:
         flash_err = f"Close run failed: {e}"
     from paper_trader import get_paper_stats
