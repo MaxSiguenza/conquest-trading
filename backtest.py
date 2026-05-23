@@ -36,13 +36,17 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── Default universe (same as PAPER_UNIVERSE) ─────────────────────────────────
-DEFAULT_UNIVERSE = [
-    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN",
-    "META", "TSLA", "JPM",  "XOM",   "WMT",
-    "COP",  "SPY",  "QQQ",  "AMD",   "NFLX",
-    "COST", "V",    "MA",   "BAC",   "DIS",
-]
+# ── Universe: pull from universe_screener (129 S&P 500 names) ─────────────────
+try:
+    from universe_screener import SP500_UNIVERSE as DEFAULT_UNIVERSE
+except ImportError:
+    # Fallback if screener unavailable
+    DEFAULT_UNIVERSE = [
+        "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN",
+        "META", "TSLA", "JPM",  "XOM",   "WMT",
+        "COP",  "SPY",  "QQQ",  "AMD",   "NFLX",
+        "COST", "V",    "MA",   "BAC",   "DIS",
+    ]
 
 STK_PROFIT    =  0.05
 STK_STOP      = -0.03
