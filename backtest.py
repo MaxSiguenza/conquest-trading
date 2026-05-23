@@ -57,8 +57,9 @@ MAX_HOLD_STK  =  5       # stock max hold (calendar days)
 MAX_HOLD_OPT  = 21       # options max hold (calendar days, ~1 month)
 DTE_TARGET    = 30       # buy 30 DTE options at entry
 OTM_PCT       = 0.02     # 2% OTM strike
-NOTIONAL      = 1_000
+NOTIONAL      = 1_000    # per-trade notional = 1% of $100k starting capital
 RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
+STARTING_CAPITAL = 100_000   # paper account starting value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -449,16 +450,34 @@ def _compute_stats(trades: list[dict]) -> dict:
     df["month"] = pd.to_datetime(df["exit_date"]).dt.to_period("M").astype(str)
     monthly = df.groupby("month")["pnl_dollar"].sum().round(2).to_dict()
 
+    # Portfolio-level metrics on $100k starting capital
+    ending_capital   = round(STARTING_CAPITAL + total_pnl, 2)
+    total_return_pct = round(total_pnl / STARTING_CAPITAL * 100, 2)
+
+    # Annualised return from period length
+    try:
+        start_dt = pd.to_datetime(df["entry_date"].min())
+        end_dt   = pd.to_datetime(df["exit_date"].max())
+        years    = max((end_dt - start_dt).days / 365.25, 0.01)
+        ann_return_pct = round(((ending_capital / STARTING_CAPITAL) ** (1 / years) - 1) * 100, 2)
+    except Exception:
+        ann_return_pct = None
+
     return {
-        "period":          f"{df['entry_date'].min()} to {df['exit_date'].max()}",
-        "total_trades":    total,
-        "win_rate":        round(win_rate, 1),
-        "total_pnl":       round(total_pnl, 2),
-        "avg_pnl":         round(avg_pnl, 2),
-        "avg_hold_days":   round(avg_hold, 1),
-        "profit_factor":   profit_factor,
-        "sharpe":          sharpe,
-        "max_drawdown":    max_dd,
+        "period":            f"{df['entry_date'].min()} to {df['exit_date'].max()}",
+        "total_trades":      total,
+        "win_rate":          round(win_rate, 1),
+        "total_pnl":         round(total_pnl, 2),
+        "avg_pnl":           round(avg_pnl, 2),
+        "avg_hold_days":     round(avg_hold, 1),
+        "profit_factor":     profit_factor,
+        "sharpe":            sharpe,
+        "max_drawdown":      max_dd,
+        # Portfolio accounting
+        "starting_capital":  STARTING_CAPITAL,
+        "ending_capital":    ending_capital,
+        "total_return_pct":  total_return_pct,
+        "ann_return_pct":    ann_return_pct,
         "best_trade":  {
             "ticker": best["ticker"], "date": best["exit_date"],
             "pnl": round(best["pnl_dollar"], 2), "reason": best["close_reason"],
@@ -467,13 +486,13 @@ def _compute_stats(trades: list[dict]) -> dict:
             "ticker": worst["ticker"], "date": worst["exit_date"],
             "pnl": round(worst["pnl_dollar"], 2), "reason": worst["close_reason"],
         },
-        "by_reason":       by_reason,
-        "by_trade_type":   by_type,
-        "by_mtf_score":    by_mtf,
-        "signal_breakdown": sig_stats,
-        "top_tickers":     top5,
-        "bottom_tickers":  bottom5,
-        "monthly_pnl":     monthly,
+        "by_reason":         by_reason,
+        "by_trade_type":     by_type,
+        "by_mtf_score":      by_mtf,
+        "signal_breakdown":  sig_stats,
+        "top_tickers":       top5,
+        "bottom_tickers":    bottom5,
+        "monthly_pnl":       monthly,
     }
 
 
@@ -486,19 +505,25 @@ def _format_report(stats: dict, trades: list[dict]) -> str:
     if "error" in stats:
         return f"Backtest error: {stats['error']}"
 
+    ann = stats.get("ann_return_pct")
+    ann_str = f"{ann:+.1f}%" if ann is not None else "N/A"
     lines = [
         "=" * 58,
-        "  CONQUEST TRADING — BACKTEST RESULTS",
+        "  CONQUEST BACKTEST  |  $100,000 PAPER ACCOUNT",
         "=" * 58,
-        f"  Period:         {stats['period'].replace(chr(8594), 'to')}",
-        f"  Total trades:   {stats['total_trades']}",
-        f"  Win rate:       {stats['win_rate']:.1f}%",
-        f"  Total P&L:      ${stats['total_pnl']:+,.2f}",
-        f"  Avg P&L/trade:  ${stats['avg_pnl']:+.2f}",
-        f"  Avg hold:       {stats['avg_hold_days']:.1f} days",
-        f"  Profit factor:  {stats['profit_factor']}",
-        f"  Sharpe ratio:   {stats['sharpe'] or 'N/A'}",
-        f"  Max drawdown:   ${stats['max_drawdown']:,.2f}",
+        f"  Period:            {stats['period'].replace(chr(8594), 'to')}",
+        f"  Starting capital:  ${stats['starting_capital']:,.0f}",
+        f"  Ending capital:    ${stats['ending_capital']:,.0f}",
+        f"  Total return:      {stats['total_return_pct']:+.1f}%",
+        f"  Annualised return: {ann_str}",
+        f"  Total trades:      {stats['total_trades']}",
+        f"  Win rate:          {stats['win_rate']:.1f}%",
+        f"  Total P&L:         ${stats['total_pnl']:+,.2f}",
+        f"  Avg P&L/trade:     ${stats['avg_pnl']:+.2f}",
+        f"  Avg hold:          {stats['avg_hold_days']:.1f} days",
+        f"  Profit factor:     {stats['profit_factor']}",
+        f"  Sharpe ratio:      {stats['sharpe'] or 'N/A'}",
+        f"  Max drawdown:      ${stats['max_drawdown']:,.2f}",
         "",
         "  BEST TRADE",
         f"    {stats['best_trade']['ticker']}  ${stats['best_trade']['pnl']:+.2f}  "
@@ -621,18 +646,25 @@ def _post_to_discord(report: str, stats: dict) -> None:
         pnl_color    = color_green if stats["total_pnl"] > 0 else color_red
 
         # ── Embed 1: headline numbers ─────────────────────────────────────────
+        ann = stats.get("ann_return_pct")
+        ann_str = f"{ann:+.1f}%" if ann is not None else "N/A"
         post_embed({
             "title": "Conquest Backtesting Engine — Results",
-            "description": f"**{stats['period']}  |  {stats['total_trades']} trades simulated**",
+            "description": (
+                f"**{stats['period']}  |  {stats['total_trades']} trades simulated**\n"
+                f"Starting capital: **$100,000**  →  Ending: **${stats['ending_capital']:,.0f}**"
+            ),
             "color": pnl_color,
             "fields": [
-                {"name": "Total P&L",     "value": f"**${stats['total_pnl']:+,.0f}**",  "inline": True},
-                {"name": "Win Rate",      "value": f"**{stats['win_rate']:.1f}%**",      "inline": True},
-                {"name": "Avg / Trade",   "value": f"${stats['avg_pnl']:+.2f}",          "inline": True},
-                {"name": "Profit Factor", "value": f"{stats['profit_factor']}",           "inline": True},
-                {"name": "Sharpe Ratio",  "value": f"{stats['sharpe'] or 'N/A'}",        "inline": True},
-                {"name": "Max Drawdown",  "value": f"${stats['max_drawdown']:,.0f}",     "inline": True},
-                {"name": "Avg Hold",      "value": f"{stats['avg_hold_days']:.1f} days", "inline": True},
+                {"name": "Total Return",  "value": f"**{stats['total_return_pct']:+.1f}%**", "inline": True},
+                {"name": "Ann. Return",   "value": f"**{ann_str}**",                          "inline": True},
+                {"name": "Total P&L",     "value": f"**${stats['total_pnl']:+,.0f}**",        "inline": True},
+                {"name": "Win Rate",      "value": f"{stats['win_rate']:.1f}%",               "inline": True},
+                {"name": "Avg / Trade",   "value": f"${stats['avg_pnl']:+.2f}",               "inline": True},
+                {"name": "Profit Factor", "value": f"{stats['profit_factor']}",               "inline": True},
+                {"name": "Sharpe Ratio",  "value": f"{stats['sharpe'] or 'N/A'}",             "inline": True},
+                {"name": "Max Drawdown",  "value": f"${stats['max_drawdown']:,.0f}",          "inline": True},
+                {"name": "Avg Hold",      "value": f"{stats['avg_hold_days']:.1f} days",      "inline": True},
                 {"name": "Best Trade",
                  "value": f"{stats['best_trade']['ticker']}  ${stats['best_trade']['pnl']:+,.0f}  ({stats['best_trade']['date']})",
                  "inline": True},
@@ -640,7 +672,7 @@ def _post_to_discord(report: str, stats: dict) -> None:
                  "value": f"{stats['worst_trade']['ticker']}  ${stats['worst_trade']['pnl']:+,.0f}  ({stats['worst_trade']['date']})",
                  "inline": True},
             ],
-            "footer": {"text": "Conquest Backtesting Engine  •  2-year simulation  •  Not financial advice"},
+            "footer": {"text": "Conquest Backtesting Engine  •  $100k paper account  •  1% risk/trade  •  Not financial advice"},
         })
 
         # ── Embed 2: by trade type (the key breakdown) ────────────────────────
@@ -814,6 +846,23 @@ def run_backtest(
         print(f"  Failed tickers: {', '.join(failures)}")
 
     stats  = _compute_stats(all_trades)
+
+    # Compute verdict (same logic as _format_report) and store in stats
+    _pf = stats.get("profit_factor", 0) or 0
+    _sh = stats.get("sharpe") or 0
+    _pnl = stats.get("total_pnl", 0)
+    _n  = stats.get("total_trades", 0)
+    if _pf >= 1.5 and _sh >= 1.0 and _pnl > 0:
+        stats["verdict"] = "STRONG EDGE CONFIRMED"
+    elif _pf >= 1.1 and _sh >= 0.7 and _pnl > 0 and _n >= 200:
+        stats["verdict"] = "EDGE CONFIRMED"
+    elif _pf >= 1.0 and _pnl > 0:
+        stats["verdict"] = "MARGINAL EDGE"
+    elif _pf < 1.0 or _pnl < 0:
+        stats["verdict"] = "NO EDGE DETECTED"
+    else:
+        stats["verdict"] = "INCONCLUSIVE"
+
     report = _format_report(stats, all_trades)
 
     print("\n" + report)
@@ -828,17 +877,21 @@ def run_backtest(
         from db import kv_set
         period_str = stats.get("period", period)
         kv_set("last_backtest", {
-            "total_trades":   stats.get("total_trades", 0),
-            "total_pnl":      stats.get("total_pnl", 0),
-            "win_rate":       stats.get("win_rate", 0),
-            "sharpe":         stats.get("sharpe", 0),
-            "profit_factor":  stats.get("profit_factor", 0),
-            "max_drawdown":   stats.get("max_drawdown", 0),
-            "avg_pnl":        stats.get("avg_pnl", 0),
-            "avg_hold":       stats.get("avg_hold", 0),
-            "verdict":        stats.get("verdict", ""),
-            "period":         period_str,
-            "run_at":         datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "total_trades":    stats.get("total_trades", 0),
+            "total_pnl":       stats.get("total_pnl", 0),
+            "win_rate":        stats.get("win_rate", 0),
+            "sharpe":          stats.get("sharpe", 0),
+            "profit_factor":   stats.get("profit_factor", 0),
+            "max_drawdown":    stats.get("max_drawdown", 0),
+            "avg_pnl":         stats.get("avg_pnl", 0),
+            "avg_hold":        stats.get("avg_hold_days", 0),
+            "verdict":         stats.get("verdict", ""),
+            "period":          period_str,
+            "starting_capital":stats.get("starting_capital", 100_000),
+            "ending_capital":  stats.get("ending_capital", 0),
+            "total_return_pct":stats.get("total_return_pct", 0),
+            "ann_return_pct":  stats.get("ann_return_pct"),
+            "run_at":          datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
         })
     except Exception as _db_e:
         print(f"  [DB] Could not save backtest summary: {_db_e}")
