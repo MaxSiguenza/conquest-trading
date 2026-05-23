@@ -823,6 +823,26 @@ def run_backtest(
             json.dump({"stats": stats, "trades": all_trades}, f, indent=2)
         print(f"\n  Raw trades saved to: {output}")
 
+    # Persist a summary to DB so the Discord bot can reference it in chat
+    try:
+        from db import kv_set
+        period_str = stats.get("period", period)
+        kv_set("last_backtest", {
+            "total_trades":   stats.get("total_trades", 0),
+            "total_pnl":      stats.get("total_pnl", 0),
+            "win_rate":       stats.get("win_rate", 0),
+            "sharpe":         stats.get("sharpe", 0),
+            "profit_factor":  stats.get("profit_factor", 0),
+            "max_drawdown":   stats.get("max_drawdown", 0),
+            "avg_pnl":        stats.get("avg_pnl", 0),
+            "avg_hold":       stats.get("avg_hold", 0),
+            "verdict":        stats.get("verdict", ""),
+            "period":         period_str,
+            "run_at":         datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        })
+    except Exception as _db_e:
+        print(f"  [DB] Could not save backtest summary: {_db_e}")
+
     if discord:
         _post_to_discord(report, stats)
 

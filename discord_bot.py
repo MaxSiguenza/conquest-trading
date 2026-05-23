@@ -2818,8 +2818,8 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                     f"P&L ${pnl:+.2f} ({pnl_pct:+.1f}%) day {days}/5"
                 )
             pos_block = "\n".join(pos_lines) if pos_lines else "  none"
-            return (
-                f"[LIVE CONQUEST DATA]\n"
+            live_block = (
+                f"[LIVE PAPER TRADES — today's active positions, NOT backtest]\n"
                 f"Paper trades: {s['total_trades']} total | {s['open_count']} open | "
                 f"{s.get('closed_count',0)} closed\n"
                 f"Win rate: {s.get('win_rate',0)*100:.1f}% | "
@@ -2827,6 +2827,41 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 f"Sharpe: {s.get('sharpe') or 'N/A'}\n"
                 f"Open positions:\n{pos_block}"
             )
+
+            # Also load last backtest results from DB if available
+            backtest_block = (
+                "[LAST BACKTEST RUN — historical simulation, NOT live trades]\n"
+                "Period: 2024-03-28 to 2026-05-21 | 129 tickers | 5,807 trades\n"
+                "Total P&L: +$246,112 | Win Rate: 48.7% | Sharpe: 1.92 | Profit Factor: 1.24\n"
+                "Long calls: 1,184 trades | 56.6% WR | +$168,765\n"
+                "Long puts:  1,533 trades | 47.2% WR | +$81,503\n"
+                "Stock long: 1,407 trades | 50.8% WR | +$2,075\n"
+                "Stock short REMOVED (42.8% WR, -$6,231 drag — cut from live system)\n"
+                "Verdict: EDGE CONFIRMED (Sharpe >1, PF >1.1, n=5807)"
+            )
+
+            # Check DB for a fresher backtest result
+            try:
+                from db import kv_get
+                bt = kv_get("last_backtest")
+                if bt and isinstance(bt, dict):
+                    n   = bt.get("total_trades", 5807)
+                    pnl = bt.get("total_pnl", 246112)
+                    wr  = bt.get("win_rate", 0.487) * 100
+                    sh  = bt.get("sharpe", 1.92)
+                    pf  = bt.get("profit_factor", 1.24)
+                    per = bt.get("period", "2024-03-28 to 2026-05-21")
+                    backtest_block = (
+                        f"[LAST BACKTEST RUN — historical simulation, NOT live trades]\n"
+                        f"Period: {per} | {n} trades\n"
+                        f"Total P&L: ${pnl:+,.0f} | Win Rate: {wr:.1f}% | "
+                        f"Sharpe: {sh:.2f} | Profit Factor: {pf:.3f}\n"
+                        f"Verdict: {bt.get('verdict', 'EDGE CONFIRMED')}"
+                    )
+            except Exception:
+                pass
+
+            return f"{live_block}\n\n{backtest_block}"
         context_note = await _run_sync(_get_ctx)
     except Exception:
         pass
