@@ -24,13 +24,10 @@ aiohttp==3.13.5
 pytz==2024.2
 
 # Indicators
-pandas-ta==0.4.71b0
+pandas-ta>=0.3.14b0
 
 # Discord bot
 discord.py==2.7.1
-
-# Options pricing
-py_vollib==1.0.1
 
 # Database (PostgreSQL for Railway persistence)
 psycopg2-binary==2.9.10
