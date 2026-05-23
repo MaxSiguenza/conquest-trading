@@ -44,10 +44,167 @@ DEFAULT_UNIVERSE = [
     "COST", "V",    "MA",   "BAC",   "DIS",
 ]
 
-STK_PROFIT   =  0.05
-STK_STOP     = -0.03
-MAX_HOLD_DAYS = 5
+STK_PROFIT    =  0.05
+STK_STOP      = -0.03
+OPT_PROFIT    =  0.50    # close option at +50% gain
+OPT_STOP      = -0.75    # close option at -75% loss
+MAX_HOLD_DAYS =  5       # stock max hold (kept for backward compat)
+MAX_HOLD_STK  =  5       # stock max hold (calendar days)
+MAX_HOLD_OPT  = 21       # options max hold (calendar days, ~1 month)
+DTE_TARGET    = 30       # buy 30 DTE options at entry
+OTM_PCT       = 0.02     # 2% OTM strike
 NOTIONAL      = 1_000
+RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Options pricing (Black-Scholes via scipy — no historical options data needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bs_price(S: float, K: float, T: float, r: float, sigma: float,
+              option_type: str = "call") -> float:
+    """
+    Black-Scholes option price.
+    S=spot, K=strike, T=years to expiry, r=risk-free, sigma=annualised vol.
+    Returns 0 on bad inputs.
+    """
+    from scipy.stats import norm
+    import math
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if option_type == "call":
+            return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+        else:
+            return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    except Exception:
+        return 0.0
+
+
+def _hist_vol(closes: np.ndarray, window: int = 30) -> float:
+    """30-day annualised historical volatility — proxy for IV at entry."""
+    if len(closes) < window + 1:
+        return 0.25   # fallback 25%
+    log_rets = np.diff(np.log(closes[-window - 1:]))
+    return float(np.std(log_rets) * np.sqrt(252))
+
+
+def _simulate_option_trades(ticker: str, df: pd.DataFrame,
+                            option_type: str = "call") -> list[dict]:
+    """
+    Simulate long call or long put trades.
+    Entry: next-day open after Entry_Signal (call) or bearish MACD (put).
+    Pricing: Black-Scholes with 30-day HV as IV proxy, 30 DTE, 2% OTM.
+    Exit: +50% profit | -75% stop | 21-day max hold.
+    """
+    trades  = []
+    closes  = df["Close"].values
+    opens   = df["Open"].values
+    dates   = df.index.tolist()
+    n       = len(df)
+
+    in_trade    = False
+    entry_idx   = None
+    entry_price = None   # option premium at entry
+    strike      = None
+    entry_meta  = {}
+
+    for i in range(n - 1):
+        row = df.iloc[i]
+
+        if not in_trade:
+            signal = False
+            if option_type == "call" and row.get("Entry_Signal", 0):
+                signal = True
+            elif option_type == "put" and (
+                row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0
+            ):
+                signal = True
+
+            if signal:
+                entry_idx   = i + 1
+                spot        = float(opens[entry_idx])
+                iv          = _hist_vol(closes[:i + 1])
+                T           = DTE_TARGET / 365
+
+                if option_type == "call":
+                    K = spot * (1 + OTM_PCT)
+                else:
+                    K = spot * (1 - OTM_PCT)
+
+                premium = _bs_price(spot, K, T, RISK_FREE, iv, option_type)
+                if premium <= 0.01:
+                    continue    # unpriced — skip
+
+                # $1,000 notional → how many contracts (1 contract = 100 shares)
+                n_contracts  = max(1, int(NOTIONAL / (premium * 100)))
+                entry_price  = premium
+                strike       = K
+                entry_meta   = {
+                    "iv":           round(iv, 4),
+                    "strike":       round(K, 2),
+                    "dte_entry":    DTE_TARGET,
+                    "n_contracts":  n_contracts,
+                    "mtf_score":    int(row.get("MTF_Score", 0)),
+                    "entry_signal": bool(row.get("Entry_Signal", 0)),
+                    "sqz_fired":    bool(row.get("SQZ_FIRED", 0)),
+                    "macd_cross":   bool(row.get("MACD_Cross_Up", 0)),
+                    "rsi_entry":    float(row.get("RSI", 50)),
+                    "adx_entry":    float(row.get("ADX", 0)),
+                    "option_type":  option_type,
+                }
+                in_trade = True
+                continue
+
+        else:
+            days_held = i - entry_idx + 1
+            dte_now   = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            spot_now  = float(closes[i])
+            iv_now    = _hist_vol(closes[:i + 1])
+
+            current_premium = _bs_price(spot_now, strike, dte_now,
+                                        RISK_FREE, iv_now, option_type)
+            if entry_price > 0:
+                pnl_pct = (current_premium - entry_price) / entry_price
+            else:
+                pnl_pct = 0
+
+            pnl_dollar = pnl_pct * entry_price * entry_meta["n_contracts"] * 100
+
+            hit_profit = pnl_pct >=  OPT_PROFIT
+            hit_stop   = pnl_pct <=  OPT_STOP
+            hit_max    = days_held >= MAX_HOLD_OPT
+
+            if hit_profit or hit_stop or hit_max:
+                reason = ("profit_target" if hit_profit
+                          else "stop_loss" if hit_stop
+                          else "max_hold")
+                trades.append({
+                    "ticker":       ticker,
+                    "trade_type":   f"long_{option_type}",
+                    "direction":    option_type,
+                    "entry_date":   str(dates[entry_idx].date()),
+                    "exit_date":    str(dates[i].date()),
+                    "entry_price":  round(entry_price, 4),
+                    "exit_price":   round(current_premium, 4),
+                    "strike":       round(strike, 2),
+                    "pnl_pct":      round(pnl_pct * 100, 3),
+                    "pnl_dollar":   round(pnl_dollar, 2),
+                    "days_held":    days_held,
+                    "close_reason": reason,
+                    "mtf_score":    entry_meta["mtf_score"],
+                    "sqz_fired":    entry_meta["sqz_fired"],
+                    "macd_cross":   entry_meta["macd_cross"],
+                    "rsi_entry":    round(entry_meta["rsi_entry"], 1),
+                    "adx_entry":    round(entry_meta["adx_entry"], 1),
+                    "entry_signal": entry_meta["entry_signal"],
+                    "iv_entry":     entry_meta["iv"],
+                })
+                in_trade = False
+
+    return trades
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,6 +432,15 @@ def _compute_stats(trades: list[dict]) -> dict:
                 "avg_pnl":  round(subset["pnl_dollar"].mean(), 2),
             }
 
+    # By trade type (stock_long, stock_short, long_call, long_put)
+    by_type = df.groupby("trade_type").agg(
+        count=("pnl_dollar", "count"),
+        win_rate=("pnl_dollar", lambda x: (x > 0).mean() * 100),
+        avg_pnl=("pnl_dollar", "mean"),
+        total_pnl=("pnl_dollar", "sum"),
+        avg_hold=("days_held", "mean"),
+    ).round(2).to_dict("index")
+
     # Monthly breakdown
     df["month"] = pd.to_datetime(df["exit_date"]).dt.to_period("M").astype(str)
     monthly = df.groupby("month")["pnl_dollar"].sum().round(2).to_dict()
@@ -298,6 +464,7 @@ def _compute_stats(trades: list[dict]) -> dict:
             "pnl": round(worst["pnl_dollar"], 2), "reason": worst["close_reason"],
         },
         "by_reason":       by_reason,
+        "by_trade_type":   by_type,
         "by_mtf_score":    by_mtf,
         "signal_breakdown": sig_stats,
         "top_tickers":     top5,
@@ -336,8 +503,16 @@ def _format_report(stats: dict, trades: list[dict]) -> str:
         f"    {stats['worst_trade']['ticker']}  ${stats['worst_trade']['pnl']:+.2f}  "
         f"({stats['worst_trade']['date']})  {stats['worst_trade']['reason']}",
         "",
-        "  BY EXIT REASON",
+        "  BY TRADE TYPE",
     ]
+    for ttype, r in stats.get("by_trade_type", {}).items():
+        lines.append(
+            f"    {ttype:<16}  {r['count']:3d} trades  "
+            f"{r['win_rate']:5.1f}% WR  avg ${r['avg_pnl']:+.2f}  "
+            f"hold {r['avg_hold']:.1f}d  total ${r['total_pnl']:+.2f}"
+        )
+
+    lines += ["", "  BY EXIT REASON"]
     for reason, r in stats["by_reason"].items():
         lines.append(
             f"    {reason:<16}  {r['count']:3d} trades  "
@@ -476,13 +651,19 @@ def run_backtest(
     failures: list[str]    = []
 
     def _process_one(tkr):
-        print(f"  Processing {tkr}…")
+        print(f"  Processing {tkr}...")
         df = _compute_signals(tkr, period)
         if df is None:
             return tkr, []
-        trades = _simulate_trades(tkr, df)
-        print(f"  {tkr}: {len(trades)} trades simulated")
-        return tkr, trades
+        stk_trades  = _simulate_trades(tkr, df)
+        call_trades = _simulate_option_trades(tkr, df, "call")
+        put_trades  = _simulate_option_trades(tkr, df, "put")
+        # tag trade type for reporting
+        for t in stk_trades:
+            t.setdefault("trade_type", f"stock_{t.get('direction','long')}")
+        all_t = stk_trades + call_trades + put_trades
+        print(f"  {tkr}: {len(stk_trades)} stock  {len(call_trades)} calls  {len(put_trades)} puts")
+        return tkr, all_t
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(_process_one, t): t for t in universe}
