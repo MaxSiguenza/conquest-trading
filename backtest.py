@@ -1,0 +1,545 @@
+# -*- coding: utf-8 -*-
+"""
+Conquest Trading — Backtesting Engine
+======================================
+Runs the EXACT same signal logic used in production (Entry_Signal, MTF_Score,
+MACD_Cross_Up, SQZ_FIRED) against 2–3 years of historical daily data.
+
+This answers: does the strategy have a real edge, or have we just been lucky?
+
+Trade simulation rules (mirror paper_trader.py):
+  - stock_long  : entry when Entry_Signal fires, $1,000 notional
+  - stock_short : entry when MACD_Cross_Down fires in BEAR regime, $1,000 notional
+  - Profit target : +5 %
+  - Stop loss     : -3 %
+  - Max hold      : 5 calendar days
+  - One position per ticker at a time (no pyramiding)
+  - Entry at next-day OPEN to avoid lookahead bias
+
+Usage:
+  python backtest.py                              # top 20 universe, 2 years
+  python backtest.py --tickers AAPL NVDA SPY     # specific tickers
+  python backtest.py --period 3y --top 40        # 3 years, top-40 pre-screener
+  python backtest.py --discord                   # post results to Discord
+  python backtest.py --output results.json       # save raw trades
+"""
+
+import argparse
+import json
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, date, timedelta
+
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── Default universe (same as PAPER_UNIVERSE) ─────────────────────────────────
+DEFAULT_UNIVERSE = [
+    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN",
+    "META", "TSLA", "JPM",  "XOM",   "WMT",
+    "COP",  "SPY",  "QQQ",  "AMD",   "NFLX",
+    "COST", "V",    "MA",   "BAC",   "DIS",
+]
+
+STK_PROFIT   =  0.05
+STK_STOP     = -0.03
+MAX_HOLD_DAYS = 5
+NOTIONAL      = 1_000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Signal computation (uses the live production pipeline)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_signals(ticker: str, period: str = "2y") -> pd.DataFrame | None:
+    """
+    Fetch historical OHLCV and run the full signal pipeline.
+    Returns a DataFrame with all indicator columns, or None on failure.
+    """
+    try:
+        import yfinance as yf
+        from config import Config, DataConfig
+        from data.fetcher import fetch_ohlcv, fetch_vix, get_earnings_dates
+        from signals.generator import generate_signals
+
+        # Map period string to date range
+        end   = date.today()
+        years = int(period.rstrip("y")) if period.endswith("y") else 2
+        start = end - timedelta(days=years * 365 + 60)  # +60 for indicator warmup
+
+        cfg = Config(data=DataConfig(ticker=ticker))
+        df  = fetch_ohlcv(ticker, str(start), str(end))
+        if df is None or len(df) < 100:
+            return None
+
+        try:
+            vix = fetch_vix(str(start), str(end))
+        except Exception:
+            vix = None
+
+        try:
+            ed = get_earnings_dates(ticker)
+        except Exception:
+            ed = None
+
+        df = generate_signals(df, cfg.indicators, vix=vix, earnings_dates=ed)
+        df["_ticker"] = ticker
+        return df
+
+    except Exception as e:
+        print(f"  [Backtest] {ticker}: signal error — {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trade simulation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
+    """
+    Walk through the signal DataFrame day by day, open trades on signals,
+    and close them when exit rules trigger.
+
+    Entry: next-day OPEN (avoids buying at the same close you saw the signal)
+    Exit : checked on each subsequent close
+    """
+    trades = []
+    in_trade    = False
+    entry_idx   = None
+    entry_price = None
+    entry_meta  = {}
+
+    closes  = df["Close"].values
+    opens   = df["Open"].values
+    dates   = df.index.tolist()
+    n       = len(df)
+
+    for i in range(n - 1):               # -1 so we can always peek at i+1
+        row = df.iloc[i]
+
+        if not in_trade:
+            # ── Check for long entry ───────────────────────────────────────
+            if row.get("Entry_Signal", 0):
+                entry_idx   = i + 1          # enter at NEXT day's open
+                entry_price = float(opens[i + 1])
+                entry_meta  = {
+                    "mtf_score":    int(row.get("MTF_Score", 0)),
+                    "sqz_fired":    bool(row.get("SQZ_FIRED", 0)),
+                    "macd_cross":   bool(row.get("MACD_Cross_Up", 0)),
+                    "rsi_entry":    float(row.get("RSI", 50)),
+                    "adx_entry":    float(row.get("ADX", 0)),
+                    "entry_signal": True,
+                    "direction":    "long",
+                }
+                in_trade = True
+                continue
+
+            # ── Check for short entry (bearish MACD in BEAR regime) ───────
+            if row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0:
+                entry_idx   = i + 1
+                entry_price = float(opens[i + 1])
+                entry_meta  = {
+                    "mtf_score":  int(row.get("MTF_Score", 0)),
+                    "sqz_fired":  False,
+                    "macd_cross": True,
+                    "rsi_entry":  float(row.get("RSI", 50)),
+                    "adx_entry":  float(row.get("ADX", 0)),
+                    "entry_signal": False,
+                    "direction":  "short",
+                }
+                in_trade = True
+                continue
+
+        else:
+            # ── We're in a trade — check exit conditions ───────────────────
+            days_held     = i - entry_idx + 1
+            current_close = float(closes[i])
+
+            if entry_price <= 0:          # guard against bad data
+                in_trade = False
+                continue
+
+            if entry_meta["direction"] == "long":
+                pnl_pct = (current_close - entry_price) / entry_price
+            else:
+                pnl_pct = (entry_price - current_close) / entry_price
+
+            hit_profit = pnl_pct >=  STK_PROFIT
+            hit_stop   = pnl_pct <=  STK_STOP
+            hit_max    = days_held >= MAX_HOLD_DAYS
+
+            if hit_profit or hit_stop or hit_max:
+                reason = ("profit_target" if hit_profit
+                          else "stop_loss" if hit_stop
+                          else "max_hold")
+                trades.append({
+                    "ticker":       ticker,
+                    "direction":    entry_meta["direction"],
+                    "entry_date":   str(dates[entry_idx].date()),
+                    "exit_date":    str(dates[i].date()),
+                    "entry_price":  round(entry_price, 4),
+                    "exit_price":   round(current_close, 4),
+                    "pnl_pct":      round(pnl_pct * 100, 3),
+                    "pnl_dollar":   round(NOTIONAL * pnl_pct, 2),
+                    "days_held":    days_held,
+                    "close_reason": reason,
+                    "mtf_score":    entry_meta["mtf_score"],
+                    "sqz_fired":    entry_meta["sqz_fired"],
+                    "macd_cross":   entry_meta["macd_cross"],
+                    "rsi_entry":    round(entry_meta["rsi_entry"], 1),
+                    "adx_entry":    round(entry_meta["adx_entry"], 1),
+                    "entry_signal": entry_meta["entry_signal"],
+                })
+                in_trade = False
+
+    return trades
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stats aggregation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_stats(trades: list[dict]) -> dict:
+    """Turn raw trades into a rich stats dictionary."""
+    if not trades:
+        return {"error": "no trades generated"}
+
+    df = pd.DataFrame(trades)
+
+    total      = len(df)
+    wins       = df[df["pnl_dollar"] > 0]
+    losses     = df[df["pnl_dollar"] <= 0]
+    win_rate   = len(wins) / total * 100
+    total_pnl  = df["pnl_dollar"].sum()
+    avg_pnl    = df["pnl_dollar"].mean()
+    avg_hold   = df["days_held"].mean()
+    best       = df.loc[df["pnl_dollar"].idxmax()]
+    worst      = df.loc[df["pnl_dollar"].idxmin()]
+
+    # Profit factor
+    gross_win  = wins["pnl_dollar"].sum()
+    gross_loss = abs(losses["pnl_dollar"].sum())
+    profit_factor = round(gross_win / gross_loss, 3) if gross_loss else float("inf")
+
+    # Sharpe (annualised, using daily P&L grouped by exit_date)
+    daily_pnl = df.groupby("exit_date")["pnl_dollar"].sum()
+    sharpe    = None
+    if len(daily_pnl) > 10:
+        mu     = daily_pnl.mean()
+        sigma  = daily_pnl.std()
+        sharpe = round((mu / sigma) * (252 ** 0.5), 3) if sigma else None
+
+    # Max drawdown on cumulative P&L curve
+    cum = df["pnl_dollar"].cumsum()
+    rolling_max = cum.cummax()
+    drawdown    = (cum - rolling_max)
+    max_dd      = round(drawdown.min(), 2)
+
+    # By close reason
+    by_reason = df.groupby("close_reason").agg(
+        count=("pnl_dollar", "count"),
+        win_rate=("pnl_dollar", lambda x: (x > 0).mean() * 100),
+        avg_pnl=("pnl_dollar", "mean"),
+        total_pnl=("pnl_dollar", "sum"),
+    ).round(2).to_dict("index")
+
+    # By MTF score
+    by_mtf = df.groupby("mtf_score").agg(
+        count=("pnl_dollar", "count"),
+        win_rate=("pnl_dollar", lambda x: (x > 0).mean() * 100),
+        avg_pnl=("pnl_dollar", "mean"),
+    ).round(2).to_dict("index")
+
+    # By ticker (top/bottom 5)
+    by_ticker = df.groupby("ticker").agg(
+        count=("pnl_dollar", "count"),
+        win_rate=("pnl_dollar", lambda x: (x > 0).mean() * 100),
+        total_pnl=("pnl_dollar", "sum"),
+        avg_pnl=("pnl_dollar", "mean"),
+    ).round(2)
+    top5    = by_ticker.nlargest(5,  "total_pnl").to_dict("index")
+    bottom5 = by_ticker.nsmallest(5, "total_pnl").to_dict("index")
+
+    # Signal-type win rates
+    sig_stats = {}
+    for col, label in [("entry_signal", "Entry_Signal"), ("sqz_fired", "Squeeze_Fired"),
+                       ("macd_cross", "MACD_Cross")]:
+        subset = df[df[col] == True]
+        if len(subset):
+            sig_stats[label] = {
+                "count":    len(subset),
+                "win_rate": round((subset["pnl_dollar"] > 0).mean() * 100, 1),
+                "avg_pnl":  round(subset["pnl_dollar"].mean(), 2),
+            }
+
+    # Monthly breakdown
+    df["month"] = pd.to_datetime(df["exit_date"]).dt.to_period("M").astype(str)
+    monthly = df.groupby("month")["pnl_dollar"].sum().round(2).to_dict()
+
+    return {
+        "period":          f"{df['entry_date'].min()} to {df['exit_date'].max()}",
+        "total_trades":    total,
+        "win_rate":        round(win_rate, 1),
+        "total_pnl":       round(total_pnl, 2),
+        "avg_pnl":         round(avg_pnl, 2),
+        "avg_hold_days":   round(avg_hold, 1),
+        "profit_factor":   profit_factor,
+        "sharpe":          sharpe,
+        "max_drawdown":    max_dd,
+        "best_trade":  {
+            "ticker": best["ticker"], "date": best["exit_date"],
+            "pnl": round(best["pnl_dollar"], 2), "reason": best["close_reason"],
+        },
+        "worst_trade": {
+            "ticker": worst["ticker"], "date": worst["exit_date"],
+            "pnl": round(worst["pnl_dollar"], 2), "reason": worst["close_reason"],
+        },
+        "by_reason":       by_reason,
+        "by_mtf_score":    by_mtf,
+        "signal_breakdown": sig_stats,
+        "top_tickers":     top5,
+        "bottom_tickers":  bottom5,
+        "monthly_pnl":     monthly,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Report formatting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _format_report(stats: dict, trades: list[dict]) -> str:
+    """Plain-text report for console + Discord."""
+    if "error" in stats:
+        return f"Backtest error: {stats['error']}"
+
+    lines = [
+        "=" * 58,
+        "  CONQUEST TRADING — BACKTEST RESULTS",
+        "=" * 58,
+        f"  Period:         {stats['period'].replace(chr(8594), 'to')}",
+        f"  Total trades:   {stats['total_trades']}",
+        f"  Win rate:       {stats['win_rate']:.1f}%",
+        f"  Total P&L:      ${stats['total_pnl']:+,.2f}",
+        f"  Avg P&L/trade:  ${stats['avg_pnl']:+.2f}",
+        f"  Avg hold:       {stats['avg_hold_days']:.1f} days",
+        f"  Profit factor:  {stats['profit_factor']}",
+        f"  Sharpe ratio:   {stats['sharpe'] or 'N/A'}",
+        f"  Max drawdown:   ${stats['max_drawdown']:,.2f}",
+        "",
+        "  BEST TRADE",
+        f"    {stats['best_trade']['ticker']}  ${stats['best_trade']['pnl']:+.2f}  "
+        f"({stats['best_trade']['date']})  {stats['best_trade']['reason']}",
+        "  WORST TRADE",
+        f"    {stats['worst_trade']['ticker']}  ${stats['worst_trade']['pnl']:+.2f}  "
+        f"({stats['worst_trade']['date']})  {stats['worst_trade']['reason']}",
+        "",
+        "  BY EXIT REASON",
+    ]
+    for reason, r in stats["by_reason"].items():
+        lines.append(
+            f"    {reason:<16}  {r['count']:3d} trades  "
+            f"{r['win_rate']:5.1f}% WR  avg ${r['avg_pnl']:+.2f}"
+        )
+
+    lines += ["", "  BY MTF SCORE"]
+    for score, r in sorted(stats["by_mtf_score"].items()):
+        lines.append(
+            f"    MTF {score}/3  {r['count']:3d} trades  "
+            f"{r['win_rate']:5.1f}% WR  avg ${r['avg_pnl']:+.2f}"
+        )
+
+    lines += ["", "  BY SIGNAL TYPE"]
+    for sig, r in stats["signal_breakdown"].items():
+        lines.append(
+            f"    {sig:<20}  {r['count']:3d} trades  "
+            f"{r['win_rate']:5.1f}% WR  avg ${r['avg_pnl']:+.2f}"
+        )
+
+    lines += ["", "  TOP 5 TICKERS"]
+    for tkr, r in stats["top_tickers"].items():
+        lines.append(
+            f"    {tkr:<6}  {r['count']:2d} trades  "
+            f"${r['total_pnl']:+7.2f} total  {r['win_rate']:.0f}% WR"
+        )
+
+    lines += ["", "  BOTTOM 5 TICKERS"]
+    for tkr, r in stats["bottom_tickers"].items():
+        lines.append(
+            f"    {tkr:<6}  {r['count']:2d} trades  "
+            f"${r['total_pnl']:+7.2f} total  {r['win_rate']:.0f}% WR"
+        )
+
+    lines += ["", "  MONTHLY P&L"]
+    for month, pnl in sorted(stats["monthly_pnl"].items())[-18:]:
+        bar = "#" * int(abs(pnl) / 20) if pnl else "-"
+        sign = "+" if pnl >= 0 else ""
+        lines.append(f"    {month}  {sign}${pnl:6.2f}  {bar}")
+
+    lines.append("=" * 58)
+
+    # Verdict
+    wr = stats["win_rate"]
+    pf = stats["profit_factor"]
+    sh = stats["sharpe"]
+    if wr >= 55 and pf >= 1.5 and (sh is None or sh >= 0.8):
+        verdict = "EDGE CONFIRMED — strategy shows real statistical advantage."
+    elif wr >= 50 and pf >= 1.2:
+        verdict = "MARGINAL EDGE — positive but fragile. Watch for regime changes."
+    elif wr < 45 or pf < 1.0:
+        verdict = "NO EDGE — results are consistent with random. Review signal logic."
+    else:
+        verdict = "INCONCLUSIVE — need more trades for statistical significance."
+
+    lines += ["", f"  VERDICT: {verdict}", "=" * 58]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Discord posting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _post_to_discord(report: str, stats: dict) -> None:
+    """Post backtest results to #agent-brain channel."""
+    try:
+        import requests
+        from dotenv import load_dotenv
+        load_dotenv()
+        token      = os.getenv("DISCORD_BOT_TOKEN", "")
+        channel_id = "1507449004945047602"   # #agent-brain
+        if not token:
+            print("[Discord] DISCORD_BOT_TOKEN not set — skipping.")
+            return
+        headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+
+        # Summary embed first
+        color = 0x2ecc71 if stats["total_pnl"] > 0 else 0xe74c3c
+        embed = {
+            "title": "📊 Backtest Complete",
+            "color": color,
+            "fields": [
+                {"name": "Period",         "value": stats["period"],           "inline": False},
+                {"name": "Trades",         "value": str(stats["total_trades"]), "inline": True},
+                {"name": "Win Rate",       "value": f"{stats['win_rate']:.1f}%","inline": True},
+                {"name": "Total P&L",      "value": f"${stats['total_pnl']:+,.2f}", "inline": True},
+                {"name": "Profit Factor",  "value": str(stats["profit_factor"]), "inline": True},
+                {"name": "Sharpe",         "value": str(stats["sharpe"] or "N/A"), "inline": True},
+                {"name": "Max Drawdown",   "value": f"${stats['max_drawdown']:,.2f}", "inline": True},
+            ],
+            "footer": {"text": "Conquest Backtesting Engine  •  Not financial advice"},
+        }
+        requests.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers=headers, json={"embeds": [embed]}
+        )
+
+        # Full text report in chunks
+        text = f"```\n{report}\n```"
+        while text:
+            chunk = text[:1990]
+            if len(text) > 1990:
+                split = chunk.rfind("\n")
+                if split > 500:
+                    chunk = text[:split]
+            requests.post(
+                f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                headers=headers, json={"content": chunk}
+            )
+            text = text[len(chunk):].lstrip()
+        print("[Discord] Backtest results posted to #agent-brain.")
+    except Exception as e:
+        print(f"[Discord] Post failed: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_backtest(
+    tickers: list[str] = None,
+    period: str = "2y",
+    workers: int = 8,
+    output: str = None,
+    discord: bool = False,
+) -> dict:
+    """
+    Run the full backtest. Returns stats dict.
+    """
+    universe = tickers or DEFAULT_UNIVERSE
+    print(f"\n{'='*58}")
+    print(f"  CONQUEST BACKTEST — {len(universe)} tickers  •  {period}")
+    print(f"{'='*58}\n")
+
+    all_trades: list[dict] = []
+    failures: list[str]    = []
+
+    def _process_one(tkr):
+        print(f"  Processing {tkr}…")
+        df = _compute_signals(tkr, period)
+        if df is None:
+            return tkr, []
+        trades = _simulate_trades(tkr, df)
+        print(f"  {tkr}: {len(trades)} trades simulated")
+        return tkr, trades
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_process_one, t): t for t in universe}
+        for fut in as_completed(futs):
+            tkr = futs[fut]
+            try:
+                _, trades = fut.result()
+                all_trades.extend(trades)
+            except Exception as e:
+                print(f"  {tkr}: FAILED — {e}")
+                failures.append(tkr)
+
+    print(f"\n  Total simulated trades: {len(all_trades)}")
+    if failures:
+        print(f"  Failed tickers: {', '.join(failures)}")
+
+    stats  = _compute_stats(all_trades)
+    report = _format_report(stats, all_trades)
+
+    print("\n" + report)
+
+    if output:
+        with open(output, "w") as f:
+            json.dump({"stats": stats, "trades": all_trades}, f, indent=2)
+        print(f"\n  Raw trades saved to: {output}")
+
+    if discord:
+        _post_to_discord(report, stats)
+
+    return stats
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Conquest Trading Backtester")
+    parser.add_argument("--tickers",  nargs="+", help="Override ticker list")
+    parser.add_argument("--period",   default="2y", help="History period: 1y, 2y, 3y")
+    parser.add_argument("--top",      type=int, default=0,
+                        help="Use top-N from pre-screener instead of default universe")
+    parser.add_argument("--workers",  type=int, default=8, help="Parallel workers")
+    parser.add_argument("--output",   help="Save trades to JSON file")
+    parser.add_argument("--discord",  action="store_true", help="Post results to Discord")
+    args = parser.parse_args()
+
+    tickers = args.tickers
+    if args.top > 0:
+        print(f"  Running pre-screener to select top {args.top} tickers…")
+        try:
+            from universe_screener import pre_screen
+            tickers = pre_screen(n=args.top)
+        except Exception as e:
+            print(f"  Pre-screener failed ({e}), using default universe.")
+            tickers = DEFAULT_UNIVERSE
+
+    run_backtest(
+        tickers=tickers,
+        period=args.period,
+        workers=args.workers,
+        output=args.output,
+        discord=args.discord,
+    )
