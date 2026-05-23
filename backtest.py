@@ -334,11 +334,12 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
             signal = False
             if spread_type == "bull_put":
                 if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
-                    signal = True
-            else:  # bear_call
-                if (row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0
-                        and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE):
-                    signal = True
+                    # Only sell put spreads when IV is elevated enough to collect real premium.
+                    # Cheap-IV environments give tiny credits that don't compensate for risk.
+                    hv_rank_cs = _hv_rank(closes, i)
+                    if hv_rank_cs >= 0.40:
+                        signal = True
+            # bear_call: removed — only 18 trades in 2y, inverted R:R, pure noise
 
             if signal:
                 entry_idx = i + 1
@@ -360,10 +361,11 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                 long_val  = _bs_price(spot, long_k,  T, RISK_FREE, iv, opt_type)
                 credit    = short_val - long_val
 
-                if credit <= 0.01:
-                    continue
-
                 spread_width = abs(short_k - long_k)
+                # Require credit >= 20% of spread width. Below this the payoff is too
+                # skewed: tiny premium collected vs full-width max loss.
+                if credit < spread_width * 0.20:
+                    continue
                 n_contracts  = max(1, int(NOTIONAL / (spread_width * 100)))
                 entry_credit = credit
                 entry_meta   = {
@@ -658,7 +660,13 @@ def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
         if not in_trade:
             # ── Check for long entry ───────────────────────────────────────
-            if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
+            _mtf = int(row.get("MTF_Score", 0))
+            _rsi = float(row.get("RSI", 50))
+            # MTF 3/3 entries that are already RSI-extended (>65) are late-cycle traps.
+            # All 3 timeframes aligned = stock has trended for months = often overbought.
+            # Filter: if 3/3 AND RSI > 65, skip — wait for a pullback to re-enter.
+            _mtf_extended = (_mtf == 3 and _rsi > 65)
+            if row.get("Entry_Signal", 0) and _mtf >= MTF_MIN_SCORE and not _mtf_extended:
                 entry_idx   = i + 1          # enter at NEXT day's open
                 entry_price = float(opens[i + 1])
                 entry_meta  = {
@@ -1208,16 +1216,16 @@ def run_backtest(
         call_trades       = _simulate_option_trades(tkr, df, "call")
         put_trades        = _simulate_option_trades(tkr, df, "put")
         bull_put_trades   = _simulate_credit_spread_trades(tkr, df, "bull_put")
-        bear_call_trades  = _simulate_credit_spread_trades(tkr, df, "bear_call")
+        # bear_call removed: only 18 trades/2y, inverted R:R, statistical noise
         cov_call_trades   = _simulate_covered_call_trades(tkr, df)
         # tag stock trade type for reporting
         for t in stk_trades:
             t.setdefault("trade_type", f"stock_{t.get('direction','long')}")
         all_t = (stk_trades + call_trades + put_trades
-                 + bull_put_trades + bear_call_trades + cov_call_trades)
+                 + bull_put_trades + cov_call_trades)
         print(f"  {tkr}: {len(stk_trades)} stk  {len(call_trades)} calls  "
               f"{len(put_trades)} puts  {len(bull_put_trades)} bull_put  "
-              f"{len(bear_call_trades)} bear_call  {len(cov_call_trades)} cov_call")
+              f"{len(cov_call_trades)} cov_call")
         return tkr, all_t
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
