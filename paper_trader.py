@@ -54,6 +54,19 @@ IC_PROFIT    =  0.50   # close iron condor when 50 % of max credit earned
 IC_STOP      =  2.00   # close iron condor when position costs 2× credit (loss)
 
 
+def _options_expiry(entry: date, dte: int = DTE_TARGET) -> str:
+    """
+    Return the nearest valid Friday to entry + dte days.
+    Options expire on Fridays; a raw DTE calculation often lands on Sat/Sun/Mon.
+    """
+    target    = entry + timedelta(days=dte)
+    days_back  = (target.weekday() - 4) % 7   # 0 if already Friday
+    days_ahead = (4 - target.weekday()) % 7
+    if days_back <= days_ahead:
+        return (target - timedelta(days=days_back)).isoformat()
+    return (target + timedelta(days=days_ahead)).isoformat()
+
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_trades() -> list:
@@ -289,7 +302,7 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         return None
 
     cost        = round(val * 100 * OPTION_CONTRACTS, 2)
-    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
+    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
     return {
         "id":                  f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":        ts,
@@ -343,7 +356,7 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
 
     max_gain    = round(width - debit, 4)
     cost        = round(debit * 100 * OPTION_CONTRACTS, 2)
-    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
+    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
 
     return {
         "id":                f"{ts}_{scan['ticker']}_{trade_type}",
@@ -399,7 +412,7 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         return None
 
     max_loss    = round(width - credit, 4)
-    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
+    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
 
     return {
         "id":                f"{ts}_{scan['ticker']}_iron_condor",
@@ -513,7 +526,7 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
     if premium <= 0.05:
         return None
 
-    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
+    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
 
     return {
         "id":                  f"{ts}_{scan['ticker']}_covered_call",
