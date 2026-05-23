@@ -548,27 +548,42 @@ def _format_report(stats: dict, trades: list[dict]) -> str:
         )
 
     lines += ["", "  MONTHLY P&L"]
-    for month, pnl in sorted(stats["monthly_pnl"].items())[-18:]:
-        bar = "#" * int(abs(pnl) / 20) if pnl else "-"
-        sign = "+" if pnl >= 0 else ""
-        lines.append(f"    {month}  {sign}${pnl:6.2f}  {bar}")
+    monthly = stats["monthly_pnl"]
+    max_abs  = max((abs(v) for v in monthly.values()), default=1)
+    for month, pnl in sorted(monthly.items())[-18:]:
+        bar_len = min(20, int(abs(pnl) / max_abs * 20)) if max_abs else 0
+        bar     = ("+" if pnl >= 0 else "-") * bar_len
+        sign    = "+" if pnl >= 0 else ""
+        lines.append(f"    {month}  {sign}${pnl:8,.0f}  {bar}")
 
     lines.append("=" * 58)
 
-    # Verdict
-    wr = stats["win_rate"]
-    pf = stats["profit_factor"]
-    sh = stats["sharpe"]
-    if wr >= 55 and pf >= 1.5 and (sh is None or sh >= 0.8):
-        verdict = "EDGE CONFIRMED — strategy shows real statistical advantage."
-    elif wr >= 50 and pf >= 1.2:
-        verdict = "MARGINAL EDGE — positive but fragile. Watch for regime changes."
-    elif wr < 45 or pf < 1.0:
-        verdict = "NO EDGE — results are consistent with random. Review signal logic."
-    else:
-        verdict = "INCONCLUSIVE — need more trades for statistical significance."
+    # ── Verdict (uses Sharpe + profit factor + P&L, not just win rate) ────────
+    # Options strategies win through P&L asymmetry, not raw win rate.
+    # A 50% WR strategy can still be excellent if winners are 2-3x bigger.
+    wr  = stats["win_rate"]
+    pf  = stats["profit_factor"]
+    sh  = stats.get("sharpe") or 0
+    pnl = stats["total_pnl"]
+    n   = stats["total_trades"]
 
-    lines += ["", f"  VERDICT: {verdict}", "=" * 58]
+    if pf >= 1.5 and sh >= 1.0 and pnl > 0:
+        verdict = "STRONG EDGE — Sharpe > 1.0 and profit factor > 1.5. Real statistical advantage confirmed."
+    elif pf >= 1.1 and sh >= 0.7 and pnl > 0 and n >= 200:
+        verdict = "EDGE CONFIRMED — Positive Sharpe, positive profit factor over sufficient sample. Strategy has real edge."
+    elif pf >= 1.0 and pnl > 0:
+        verdict = "MARGINAL EDGE — profitable but fragile. Monitor for regime changes. Improve signal filtering."
+    elif pf < 1.0 or pnl < 0:
+        verdict = "NO EDGE — strategy loses money historically. Do not trade live."
+    else:
+        verdict = "INCONCLUSIVE — run more tickers or extend period for stronger signal."
+
+    # Statistical note on sample size
+    import math
+    se = math.sqrt(0.25 / n) * 100 if n > 0 else 99
+    sig_note = f"  Sample: {n} trades | Win rate 95% CI: {wr:.1f}% +/- {1.96*se:.1f}%"
+
+    lines += ["", f"  VERDICT: {verdict}", sig_note, "=" * 58]
     return "\n".join(lines)
 
 
@@ -577,7 +592,7 @@ def _format_report(stats: dict, trades: list[dict]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _post_to_discord(report: str, stats: dict) -> None:
-    """Post backtest results to #agent-brain channel."""
+    """Post backtest results as clean Discord embeds to #agent-brain."""
     try:
         import requests
         from dotenv import load_dotenv
@@ -589,40 +604,154 @@ def _post_to_discord(report: str, stats: dict) -> None:
             return
         headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
 
-        # Summary embed first
-        color = 0x2ecc71 if stats["total_pnl"] > 0 else 0xe74c3c
-        embed = {
-            "title": "📊 Backtest Complete",
-            "color": color,
-            "fields": [
-                {"name": "Period",         "value": stats["period"],           "inline": False},
-                {"name": "Trades",         "value": str(stats["total_trades"]), "inline": True},
-                {"name": "Win Rate",       "value": f"{stats['win_rate']:.1f}%","inline": True},
-                {"name": "Total P&L",      "value": f"${stats['total_pnl']:+,.2f}", "inline": True},
-                {"name": "Profit Factor",  "value": str(stats["profit_factor"]), "inline": True},
-                {"name": "Sharpe",         "value": str(stats["sharpe"] or "N/A"), "inline": True},
-                {"name": "Max Drawdown",   "value": f"${stats['max_drawdown']:,.2f}", "inline": True},
-            ],
-            "footer": {"text": "Conquest Backtesting Engine  •  Not financial advice"},
-        }
-        requests.post(
-            f"https://discord.com/api/v10/channels/{channel_id}/messages",
-            headers=headers, json={"embeds": [embed]}
-        )
-
-        # Full text report in chunks
-        text = f"```\n{report}\n```"
-        while text:
-            chunk = text[:1990]
-            if len(text) > 1990:
-                split = chunk.rfind("\n")
-                if split > 500:
-                    chunk = text[:split]
+        def post_embed(embed):
             requests.post(
                 f"https://discord.com/api/v10/channels/{channel_id}/messages",
-                headers=headers, json={"content": chunk}
+                headers=headers, json={"embeds": [embed]}
             )
-            text = text[len(chunk):].lstrip()
+
+        color_green  = 0x2ecc71
+        color_red    = 0xe74c3c
+        color_gold   = 0xd4af37
+        color_purple = 0x9b59b6
+        pnl_color    = color_green if stats["total_pnl"] > 0 else color_red
+
+        # ── Embed 1: headline numbers ─────────────────────────────────────────
+        post_embed({
+            "title": "Conquest Backtesting Engine — Results",
+            "description": f"**{stats['period']}  |  {stats['total_trades']} trades simulated**",
+            "color": pnl_color,
+            "fields": [
+                {"name": "Total P&L",     "value": f"**${stats['total_pnl']:+,.0f}**",  "inline": True},
+                {"name": "Win Rate",      "value": f"**{stats['win_rate']:.1f}%**",      "inline": True},
+                {"name": "Avg / Trade",   "value": f"${stats['avg_pnl']:+.2f}",          "inline": True},
+                {"name": "Profit Factor", "value": f"{stats['profit_factor']}",           "inline": True},
+                {"name": "Sharpe Ratio",  "value": f"{stats['sharpe'] or 'N/A'}",        "inline": True},
+                {"name": "Max Drawdown",  "value": f"${stats['max_drawdown']:,.0f}",     "inline": True},
+                {"name": "Avg Hold",      "value": f"{stats['avg_hold_days']:.1f} days", "inline": True},
+                {"name": "Best Trade",
+                 "value": f"{stats['best_trade']['ticker']}  ${stats['best_trade']['pnl']:+,.0f}  ({stats['best_trade']['date']})",
+                 "inline": True},
+                {"name": "Worst Trade",
+                 "value": f"{stats['worst_trade']['ticker']}  ${stats['worst_trade']['pnl']:+,.0f}  ({stats['worst_trade']['date']})",
+                 "inline": True},
+            ],
+            "footer": {"text": "Conquest Backtesting Engine  •  2-year simulation  •  Not financial advice"},
+        })
+
+        # ── Embed 2: by trade type (the key breakdown) ────────────────────────
+        type_lines = []
+        for ttype, r in stats.get("by_trade_type", {}).items():
+            icon = "📈" if "call" in ttype or ttype == "stock_long" else "📉"
+            type_lines.append(
+                f"{icon} **{ttype.replace('_',' ').title()}** — "
+                f"{r['count']} trades | {r['win_rate']:.1f}% WR | "
+                f"avg ${r['avg_pnl']:+.2f} | hold {r['avg_hold']:.1f}d | "
+                f"total **${r['total_pnl']:+,.0f}**"
+            )
+        post_embed({
+            "title": "By Trade Type",
+            "color": color_gold,
+            "description": "\n".join(type_lines) or "No data",
+        })
+
+        # ── Embed 3: MTF score breakdown ──────────────────────────────────────
+        mtf_lines = []
+        for score, r in sorted(stats.get("by_mtf_score", {}).items()):
+            bar = ">" * int(r["win_rate"] / 10)
+            mtf_lines.append(
+                f"**MTF {score}/3** — {r['count']} trades | "
+                f"{r['win_rate']:.1f}% WR | avg ${r['avg_pnl']:+.2f}  `{bar}`"
+            )
+        post_embed({
+            "title": "By MTF Score (Signal Conviction)",
+            "color": color_purple,
+            "description": "\n".join(mtf_lines) or "No data",
+        })
+
+        # ── Embed 4: top/bottom tickers ───────────────────────────────────────
+        top_lines = [
+            f"**{tkr}** — ${r['total_pnl']:+,.0f} total | {r['win_rate']:.0f}% WR | {r['count']} trades"
+            for tkr, r in stats.get("top_tickers", {}).items()
+        ]
+        bot_lines = [
+            f"**{tkr}** — ${r['total_pnl']:+,.0f} total | {r['win_rate']:.0f}% WR | {r['count']} trades"
+            for tkr, r in stats.get("bottom_tickers", {}).items()
+        ]
+        post_embed({
+            "title": "Best & Worst Tickers",
+            "color": color_gold,
+            "fields": [
+                {"name": "Top Performers",    "value": "\n".join(top_lines) or "—", "inline": False},
+                {"name": "Worst Performers",  "value": "\n".join(bot_lines) or "—", "inline": False},
+            ],
+        })
+
+        # ── Embed 5: monthly P&L (clean, no bars) ────────────────────────────
+        monthly = stats.get("monthly_pnl", {})
+        month_lines = []
+        for month, pnl in sorted(monthly.items())[-18:]:
+            icon = "+" if pnl >= 0 else "-"
+            month_lines.append(f"`{month}`  {icon}${abs(pnl):>8,.0f}")
+        # Split into two columns
+        half = len(month_lines) // 2
+        col1 = "\n".join(month_lines[:half]) or "—"
+        col2 = "\n".join(month_lines[half:]) or "—"
+        post_embed({
+            "title": "Monthly P&L",
+            "color": pnl_color,
+            "fields": [
+                {"name": "Earlier months", "value": col1, "inline": True},
+                {"name": "Recent months",  "value": col2, "inline": True},
+            ],
+        })
+
+        # ── Embed 6: verdict ──────────────────────────────────────────────────
+        wr  = stats["win_rate"]
+        pf  = stats["profit_factor"]
+        sh  = stats.get("sharpe") or 0
+        pnl = stats["total_pnl"]
+        n   = stats["total_trades"]
+
+        if pf >= 1.5 and sh >= 1.0 and pnl > 0:
+            verdict_title = "STRONG EDGE CONFIRMED"
+            verdict_color = color_green
+            verdict_desc  = (
+                f"Sharpe {sh:.2f} > 1.0 and profit factor {pf} > 1.5. "
+                "Real statistical advantage confirmed over 2 years."
+            )
+        elif pf >= 1.1 and sh >= 0.7 and pnl > 0 and n >= 200:
+            verdict_title = "EDGE CONFIRMED"
+            verdict_color = color_green
+            verdict_desc  = (
+                f"Positive Sharpe ({sh:.2f}), positive profit factor ({pf}), "
+                f"+${pnl:,.0f} over {n} trades. Strategy has demonstrated real edge."
+            )
+        elif pf >= 1.0 and pnl > 0:
+            verdict_title = "MARGINAL EDGE"
+            verdict_color = color_gold
+            verdict_desc  = (
+                f"Profitable over {n} trades but fragile. "
+                "Monitor for regime changes. Continue improving signal filtering."
+            )
+        else:
+            verdict_title = "NO EDGE DETECTED"
+            verdict_color = color_red
+            verdict_desc  = "Strategy loses money historically. Do not go live."
+
+        import math
+        se = math.sqrt(0.25 / n) * 100 if n > 0 else 99
+        verdict_desc += (
+            f"\n\n**Sample stats:** {n} trades | "
+            f"Win rate 95% CI: {wr:.1f}% ± {1.96*se:.1f}%"
+        )
+        post_embed({
+            "title": f"Verdict: {verdict_title}",
+            "description": verdict_desc,
+            "color": verdict_color,
+            "footer": {"text": "Conquest Backtesting Engine  •  Not financial advice"},
+        })
+
         print("[Discord] Backtest results posted to #agent-brain.")
     except Exception as e:
         print(f"[Discord] Post failed: {e}")
