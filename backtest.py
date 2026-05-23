@@ -118,6 +118,26 @@ def _hist_vol(closes: np.ndarray, window: int = 30) -> float:
     return float(np.std(log_rets) * np.sqrt(252))
 
 
+def _hv_rank(closes: np.ndarray, current_idx: int, lookback: int = 252) -> float:
+    """
+    Where is today's 30-day HV relative to the trailing year?
+    Returns 0.0–1.0. Low = vol is cheap vs history, high = vol is expensive.
+    Below 0.35 = options are cheap enough to buy directional exposure.
+    """
+    if current_idx < 60:
+        return 0.50  # insufficient history — neutral default
+    iv_today = _hist_vol(closes[:current_idx + 1])
+    start    = max(0, current_idx - lookback)
+    # Sample every 5 bars for efficiency (~50 data points over a year)
+    samples  = np.array([
+        _hist_vol(closes[max(0, j - 30):j + 1])
+        for j in range(start + 30, current_idx, 5)
+    ])
+    if len(samples) < 10:
+        return 0.50
+    return float(np.searchsorted(np.sort(samples), iv_today) / len(samples))
+
+
 def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                             option_type: str = "call") -> list[dict]:
     """
@@ -154,6 +174,24 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
             if signal and int(row.get("MTF_Score", 0)) < MTF_MIN_SCORE:
                 signal = False
 
+            # IV rank gate: only buy long options when vol is cheap (< 35th percentile).
+            # Buying options when IV is elevated means overpaying — the premium erodes
+            # the trade before it even starts. Low HV rank = markets are calm = options
+            # are priced on low expected vol = cheap time to own directional exposure.
+            _hv_rank_now = 0.50
+            if signal:
+                _hv_rank_now = _hv_rank(closes, i)
+                if _hv_rank_now > 0.35:
+                    signal = False  # IV too expensive, skip — sell premium instead
+
+            # Squeeze gate: only enter on confirmed TTM Squeeze momentum releases.
+            # SQZ_FIRED is a LEADING indicator — it fires BEFORE the explosive move.
+            # Without it, we're entering on lagging MACD signals and buying into moves
+            # already in progress. Squeeze-fired entries are the source of the 100% WR
+            # rsi_take_profit exits seen in backtest analysis.
+            if signal and not bool(row.get("SQZ_FIRED", 0)):
+                signal = False  # no squeeze = no confirmed momentum release
+
             if signal:
                 entry_idx   = i + 1
                 spot        = float(opens[entry_idx])
@@ -177,6 +215,7 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                 strike       = K
                 entry_meta   = {
                     "iv":           round(iv, 4),
+                    "iv_rank":      round(_hv_rank_now, 3),
                     "strike":       round(K, 2),
                     "dte_entry":    DTE_TARGET,
                     "n_contracts":  n_contracts,
@@ -258,6 +297,7 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                     "adx_entry":    round(entry_meta["adx_entry"], 1),
                     "entry_signal": entry_meta["entry_signal"],
                     "iv_entry":     entry_meta["iv"],
+                    "iv_rank":      entry_meta.get("iv_rank", 0.50),
                 })
                 in_trade = False
 
@@ -446,10 +486,18 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
         if not in_trade:
             if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
+                iv_raw_cc = _hist_vol(closes[:i + 1])
+                # Covered calls are a premium-SELLING strategy. Enter only when IV
+                # is moderate-to-high (rank ≥ 40) so the premium collected is worth
+                # the stock risk. In low-IV environments the call premium is tiny —
+                # you take full stock downside for almost no income.
+                hv_rank_cc = _hv_rank(closes, i)
+                if hv_rank_cc < 0.40:
+                    continue  # IV too cheap — not worth selling a covered call here
+
                 entry_idx         = i + 1
                 spot              = float(opens[entry_idx])
-                iv_raw            = _hist_vol(closes[:i + 1])
-                iv                = iv_raw * IV_PREMIUM_FACTOR
+                iv                = iv_raw_cc * IV_PREMIUM_FACTOR
                 T                 = DTE_TARGET / 365
                 strike_k          = spot * 1.03   # sell 3% OTM call
 
@@ -501,8 +549,11 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
             hit_premium = current_premium <= entry_premium * 0.20   # kept 80% of the premium
             hit_called  = spot_now >= strike                          # stock at/above strike → called away
-            hit_stop    = (current_premium >= entry_premium * 2.0    # call doubled AND
-                           and spot_now < entry_s)                    # stock is falling → stop
+            # Stock-based stop: close when stock falls more than 4%.
+            # The original stop (call premium doubled) never fires on slow declines because
+            # the option premium DECREASES as the stock moves away from the OTM strike.
+            # A 4% stock drop means the position is net-negative (stock loss > premium income).
+            hit_stop    = (spot_now - entry_s) / entry_s < -0.04
             hit_max     = days_held >= MAX_HOLD_OPT
 
             if hit_premium or hit_called or hit_stop or hit_max:

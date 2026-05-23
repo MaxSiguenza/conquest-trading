@@ -319,6 +319,8 @@ HV Rank: {sc.get('hv_rank', 50):.0f}/100
 
 Based purely on the signal picture — do these signals justify entering a trade?
 A BUY means signals are aligned and high quality. HOLD means signals are weak or mixed. SELL means signals are bearish.
+IV RANK RULE: Only suggest long_call or long_put when HV Rank < 35 (options are cheap). HV Rank > 65 → suggest iron_condor, bull_put_spread, or bear_call_spread instead (collect expensive premium, don't pay it).
+SQUEEZE RULE: long_call/long_put entries are highest-quality when Squeeze Fired=True — this is the leading indicator that fires BEFORE explosive moves.
 Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short"}}""",
 
         "valuation": f"""You are a fundamental valuation agent.
@@ -345,6 +347,7 @@ Max 6M drawdown: {td.max_dd:.1%}
 
 What is the technical setup? BUY = strong trend + healthy momentum. SELL = downtrend/breakdown.
 HOLD = choppy/consolidating. WATCH = setup forming but not confirmed.
+IV RANK RULE: Only suggest long_call or long_put when HV Rank < 35. When HV Rank > 65, options are expensive — suggest iron_condor or credit spreads instead.
 Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|put_spread|long_call|long_put|iron_condor|stock_long|stock_short"}}""",
 
         "catalysts": f"""You are a catalyst analysis agent.

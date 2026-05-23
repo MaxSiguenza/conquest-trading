@@ -179,7 +179,7 @@ def _assign_trade_type(scan: dict) -> str:
     daily      = scan.get("daily",  "BULL")
     weekly     = scan.get("weekly", "BULL")
     rsi        = scan.get("rsi",    50.0)
-    hv_rank    = scan.get("hv_rank", 0.30)
+    hv_rank    = scan.get("hv_rank", 50.0)   # scanner returns 0-100 scale
     sqz_fired  = scan.get("sqz_fired", False)
     sqz_mom    = scan.get("sqz_momentum", 0.0)
     adx        = scan.get("adx",   20.0)
@@ -188,9 +188,12 @@ def _assign_trade_type(scan: dict) -> str:
     bullish  = (daily == "BULL") and (weekly == "BULL")
     bearish  = (daily == "BEAR") and (weekly == "BEAR")
     trending = adx > 22
+    # Options are cheap when HV rank is below 35th percentile — good time to buy.
+    # Above that, the IV premium erodes directional trades before they start.
+    iv_cheap = hv_rank < 35
 
     # ── High IV: premium is expensive → SELL it, don't buy it ───────────────
-    if hv_rank > 0.65 and not sqz_fired:
+    if hv_rank > 65 and not sqz_fired:
         if bullish and trending:
             # Bull put spread: collect fat premium, profit if stock holds above short put
             return random.choice(["bull_put_spread", "bull_put_spread", "covered_call"])
@@ -202,25 +205,37 @@ def _assign_trade_type(scan: dict) -> str:
     # ── Strong bullish + squeeze firing: directional momentum play ────────────
     if bullish and trending:
         if sqz_fired and sqz_mom > 0:
-            # Squeeze breaking out → mix directional and income
-            return random.choice(["long_call", "bull_put_spread", "covered_call", "stock_long"])
+            # Squeeze breakout + cheap IV = ideal conditions for long calls.
+            # Expensive IV → collect premium instead; the move is already priced in.
+            if iv_cheap:
+                return random.choice(["long_call", "bull_put_spread", "covered_call", "stock_long"])
+            else:
+                return random.choice(["bull_put_spread", "covered_call", "stock_long"])
         if entry_sig and rsi < 45:
-            # Clean entry signal, not overbought → best setups, lean directional
-            return random.choice(["long_call", "stock_long", "bull_put_spread"])
-        # General bullish → blend income (credit) with directional
+            # Clean entry signal, not overbought. Only buy calls if IV is cheap.
+            if iv_cheap:
+                return random.choice(["long_call", "stock_long", "bull_put_spread"])
+            else:
+                return random.choice(["stock_long", "bull_put_spread"])
+        # General bullish without squeeze or cheap IV → lean income
         return random.choice(["bull_put_spread", "covered_call", "stock_long",
-                               "long_call", "bull_put_spread", "covered_call"])
+                               "covered_call", "bull_put_spread"])
 
     # ── Bearish: lean credit over debit (IV premium problem on long puts) ─────
     if bearish and trending:
         if sqz_fired and sqz_mom < 0:
-            return random.choice(["bear_call_spread", "long_put", "bear_call_spread"])
+            # Only buy puts when IV is genuinely cheap
+            if iv_cheap:
+                return random.choice(["bear_call_spread", "long_put", "bear_call_spread"])
+            else:
+                return random.choice(["bear_call_spread", "bear_call_spread"])
         if rsi > 58:
-            return random.choice(["bear_call_spread", "long_put"])
-        return random.choice(["bear_call_spread", "bear_call_spread", "long_put"])
+            return random.choice(["bear_call_spread", "long_put"]) if iv_cheap else "bear_call_spread"
+        return random.choice(["bear_call_spread", "bear_call_spread", "long_put"]) if iv_cheap \
+            else random.choice(["bear_call_spread", "bear_call_spread"])
 
     # ── Neutral / mixed: range-bound → premium collection is king ────────────
-    if hv_rank > 0.40:
+    if hv_rank > 40:
         return random.choice(["iron_condor", "bull_put_spread", "bear_call_spread"])
     return random.choice(["iron_condor", "covered_call", "bull_put_spread"])
 
