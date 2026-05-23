@@ -2913,6 +2913,23 @@ async def ask_cmd(ctx, *, question: str = ""):
     await _conquest_ai_reply(ctx.message, question)
 
 
+@bot.command(name="broker", aliases=["brokerstatus", "alpaca"])
+async def broker_cmd(ctx):
+    """Show Alpaca broker connection status and account info."""
+    def _get():
+        from broker import broker_status_embed
+        return broker_status_embed()
+    embed_data = await _run_sync(_get)
+    embed = discord.Embed(
+        title       = embed_data["title"],
+        description = embed_data["description"],
+        color       = embed_data["color"],
+        timestamp   = _ts(),
+    )
+    embed.set_footer(text="Conquest Trading  •  Broker Layer")
+    await ctx.send(embed=embed)
+
+
 @bot.command(name="backtest", aliases=["bt", "runbacktest"])
 async def backtest_cmd(ctx, *args):
     """

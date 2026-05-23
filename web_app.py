@@ -315,6 +315,18 @@ def _run_paper_close_job():
             print(f"[Scheduler] Paper close job failed: {e}")
 
 
+def _run_intraday_monitor_job():
+    """APScheduler job: check stop losses and profit targets every 30 min during market hours."""
+    with app.app_context():
+        try:
+            from broker import check_intraday_stops
+            closed = check_intraday_stops()
+            if closed:
+                print(f"[Scheduler] Intraday monitor: closed {len(closed)} positions")
+        except Exception as e:
+            print(f"[Scheduler] Intraday monitor failed: {e}")
+
+
 def _start_scheduler():
     """Start APScheduler background scheduler for automated jobs."""
     try:
@@ -359,6 +371,16 @@ def _start_scheduler():
             replace_existing=True,
             misfire_grace_time=300,
         )
+        # Intraday stop monitor — every 30 min, 10 AM – 3:30 PM ET
+        for _minute in (0, 30):
+            scheduler.add_job(
+                _run_intraday_monitor_job,
+                CronTrigger(day_of_week="mon-fri", hour="10-15", minute=_minute,
+                            timezone="America/New_York"),
+                id=f"intraday_monitor_{_minute}",
+                replace_existing=True,
+                misfire_grace_time=120,
+            )
 
         scheduler.start()
         print("✓ Scheduler running — brief 8:45 AM · briefing 9:00 AM · "

@@ -596,6 +596,31 @@ def generate_daily_trades(n: int = 10) -> list:
     all_trades.extend(new_trades)
     save_trades(all_trades)
 
+    # Submit stock trades to Alpaca (options stay simulated)
+    try:
+        from broker import execute_trade, broker_available
+        if broker_available():
+            stock_trades = [t for t in new_trades
+                            if t["trade_type"] in ("stock_long", "stock_short")]
+            for t in stock_trades:
+                updated = execute_trade(t)
+                # Update broker fields in saved trades
+                idx = next((i for i, s in enumerate(all_trades)
+                            if s.get("id") == t.get("id")), None)
+                if idx is not None:
+                    all_trades[idx].update({
+                        k: updated[k] for k in
+                        ("broker_order_id", "broker_status", "broker_mode", "broker_note")
+                        if k in updated
+                    })
+            if stock_trades:
+                save_trades(all_trades)
+                print(f"[PaperTrader] Submitted {len(stock_trades)} stock orders to Alpaca.")
+        else:
+            print("[PaperTrader] Alpaca not configured — all trades simulated.")
+    except Exception as e:
+        print(f"[PaperTrader] Broker execution skipped: {e}")
+
     # Log each new trade to Notion Trade Journal
     try:
         from notion_journal import log_trade_open
