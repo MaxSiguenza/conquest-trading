@@ -349,10 +349,14 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
             spot_now   = float(closes[i])
             iv_now     = _hist_vol(closes[:i + 1])
 
+            # Apply IV_PREMIUM_FACTOR at exit too — the market still overprices options
+            # when we close the position. Without this, exit prices are cheaper than
+            # real life, inflating credit spread P&L. Both entry and exit are symmetric.
+            iv_exit = iv_now * IV_PREMIUM_FACTOR
             sv_now = _bs_price(spot_now, entry_meta["short_k"], dte_now,
-                               RISK_FREE, iv_now, entry_meta["opt_type"])
+                               RISK_FREE, iv_exit, entry_meta["opt_type"])
             lv_now = _bs_price(spot_now, entry_meta["long_k"],  dte_now,
-                               RISK_FREE, iv_now, entry_meta["opt_type"])
+                               RISK_FREE, iv_exit, entry_meta["opt_type"])
             cost_to_close = max(sv_now - lv_now, 0)
 
             pnl_gross  = (entry_credit - cost_to_close) * entry_meta["n_contracts"] * 100
@@ -406,12 +410,24 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
 
 def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
     """
-    Simulate covered calls: sell 30 DTE call 3% OTM on top of a virtual stock long.
-    Pure premium income — collect theta decay every day the stock doesn't run too hard.
+    Simulate covered calls PROPERLY: own 100 shares + sell 1 call 3% OTM.
 
-    Exit: when 80% of the premium has decayed (keep most of it), or if the stock
-    blows through the strike (option doubled → stock ran, take the loss and move on),
-    or at 21-day max hold.
+    Previous version sized by premium (e.g. 3 contracts on $3 premium), measured
+    ROI against just the premium collected ($900 basis on AAPL) — that made 80% ROI
+    trades look common. Real covered calls require owning the stock, so your actual
+    capital deployed is spot × 100. A 1-2% monthly return on the position is realistic.
+
+    This version:
+      • Always 1 contract (the natural unit — you must own 100 shares)
+      • cost_basis = entry_stock_price × 100 (the real capital tied up)
+      • P&L = stock gain (capped at strike) + premium decay — both legs accounted for
+      • Commission includes both option legs AND stock round-trip
+
+    Exit rules:
+      • Premium decayed 80% → take the income, close everything
+      • Stock at/above strike → being called away, book the capped combined gain
+      • Option doubled AND stock below entry → stock falling, call isn't saving you → stop
+      • 21-day max hold
     """
     trades     = []
     closes     = df["Close"].values
@@ -420,6 +436,7 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
     n          = len(df)
     in_trade   = False
     entry_idx  = None
+    entry_stock_price = None
     entry_premium = None
     strike     = None
     entry_meta = {}
@@ -429,29 +446,32 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
         if not in_trade:
             if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
-                entry_idx = i + 1
-                spot      = float(opens[entry_idx])
-                iv_raw    = _hist_vol(closes[:i + 1])
-                iv        = iv_raw * IV_PREMIUM_FACTOR
-                T         = DTE_TARGET / 365
-                strike_k  = spot * 1.03   # sell 3% OTM call
+                entry_idx         = i + 1
+                spot              = float(opens[entry_idx])
+                iv_raw            = _hist_vol(closes[:i + 1])
+                iv                = iv_raw * IV_PREMIUM_FACTOR
+                T                 = DTE_TARGET / 365
+                strike_k          = spot * 1.03   # sell 3% OTM call
 
                 prem = _bs_price(spot, strike_k, T, RISK_FREE, iv, "call")
                 if prem <= 0.01:
                     continue
 
-                n_contracts   = max(1, int(NOTIONAL / (prem * 100)))
-                entry_premium = prem
-                strike        = strike_k
-                entry_meta    = {
-                    "n_contracts": n_contracts,
-                    "iv":          round(iv, 4),
-                    "mtf_score":   int(row.get("MTF_Score", 0)),
-                    "rsi_entry":   float(row.get("RSI", 50)),
-                    "entry_signal":bool(row.get("Entry_Signal", 0)),
-                    "sqz_fired":   bool(row.get("SQZ_FIRED", 0)),
-                    "macd_cross":  bool(row.get("MACD_Cross_Up", 0)),
-                    "adx_entry":   float(row.get("ADX", 0)),
+                entry_stock_price = spot
+                entry_premium     = prem
+                strike            = strike_k
+                # Always 1 contract — you need 100 shares to sell 1 covered call.
+                # Sizing by premium value (NOTIONAL / prem*100) inflates n_contracts
+                # and makes ROI look 50-80x too good.
+                entry_meta        = {
+                    "entry_stock_price": spot,
+                    "iv":                round(iv, 4),
+                    "mtf_score":         int(row.get("MTF_Score", 0)),
+                    "rsi_entry":         float(row.get("RSI", 50)),
+                    "entry_signal":      bool(row.get("Entry_Signal", 0)),
+                    "sqz_fired":         bool(row.get("SQZ_FIRED", 0)),
+                    "macd_cross":        bool(row.get("MACD_Cross_Up", 0)),
+                    "adx_entry":         float(row.get("ADX", 0)),
                 }
                 in_trade = True
                 continue
@@ -463,20 +483,32 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
             iv_now          = _hist_vol(closes[:i + 1])
             current_premium = _bs_price(spot_now, strike, dte_now, RISK_FREE, iv_now, "call")
 
-            # Short call P&L: positive when option loses value (theta decay working for us)
-            pnl_gross  = (entry_premium - current_premium) * entry_meta["n_contracts"] * 100
-            commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
+            # Combined P&L:
+            # Stock leg: gain from price move, but CAPPED at the strike (upside is sold away)
+            entry_s   = entry_meta["entry_stock_price"]
+            stock_gain = min(
+                (spot_now - entry_s) * 100,          # uncapped move
+                (strike   - entry_s) * 100            # cap at strike (above strike = called away)
+            )
+            opt_gain   = (entry_premium - current_premium) * 100  # positive when call decays
+            pnl_gross  = stock_gain + opt_gain
+            commission = (OPT_COMMISSION_PER_CONTRACT * 2 +        # open + close option
+                          STK_COMMISSION_PER_SHARE * 100 * 2)       # buy + sell 100 shares
             pnl_dollar = pnl_gross - commission
 
-            hit_profit = current_premium <= entry_premium * 0.20  # kept 80% of premium
-            hit_stop   = current_premium >= entry_premium * 2.0   # stock blew through strike
-            hit_max    = days_held >= MAX_HOLD_OPT
+            # Capital basis = the stock position (the real capital committed)
+            cost_basis = entry_s * 100
 
-            if hit_profit or hit_stop or hit_max:
-                reason = ("profit_target" if hit_profit
-                          else "stop_loss" if hit_stop
+            hit_premium = current_premium <= entry_premium * 0.20   # kept 80% of the premium
+            hit_called  = spot_now >= strike                          # stock at/above strike → called away
+            hit_stop    = (current_premium >= entry_premium * 2.0    # call doubled AND
+                           and spot_now < entry_s)                    # stock is falling → stop
+            hit_max     = days_held >= MAX_HOLD_OPT
+
+            if hit_premium or hit_called or hit_stop or hit_max:
+                reason = ("profit_target" if (hit_premium or hit_called)
+                          else "stop_loss"  if hit_stop
                           else "max_hold")
-                cost_basis = entry_premium * entry_meta["n_contracts"] * 100
                 trades.append({
                     "ticker":       ticker,
                     "trade_type":   "covered_call",
