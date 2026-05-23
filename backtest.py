@@ -61,6 +61,15 @@ NOTIONAL      = 1_000    # per-trade notional = 1% of $100k starting capital
 RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
 STARTING_CAPITAL = 100_000   # paper account starting value
 
+# ── Realistic friction costs (backtest realism) ────────────────────────────────
+# Real markets have bid-ask spreads and commissions. These adjustments bring
+# the backtest closer to live performance.
+OPT_COMMISSION_PER_CONTRACT = 0.65   # $0.65/contract (Robinhood/TastyTrade)
+STK_COMMISSION_PER_SHARE    = 0.003  # $0.003/share (most zero-commission + spread)
+IV_PREMIUM_FACTOR           = 1.20   # real IV ≈ HV × 1.20 (volatility risk premium)
+# What this means: options cost ~20% more than Black-Scholes on raw HV predicts.
+# This is the most impactful adjustment — it directly reduces options entry P&L.
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Options pricing (Black-Scholes via scipy — no historical options data needed)
@@ -131,7 +140,9 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
             if signal:
                 entry_idx   = i + 1
                 spot        = float(opens[entry_idx])
-                iv          = _hist_vol(closes[:i + 1])
+                iv_raw      = _hist_vol(closes[:i + 1])
+                # Apply IV premium: real options trade above raw HV due to vol risk premium
+                iv          = iv_raw * IV_PREMIUM_FACTOR
                 T           = DTE_TARGET / 365
 
                 if option_type == "call":
@@ -176,7 +187,10 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
             else:
                 pnl_pct = 0
 
-            pnl_dollar = pnl_pct * entry_price * entry_meta["n_contracts"] * 100
+            pnl_gross  = pnl_pct * entry_price * entry_meta["n_contracts"] * 100
+            # Deduct round-trip commissions: open + close = 2× per contract
+            commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
+            pnl_dollar = pnl_gross - commission
 
             hit_profit = pnl_pct >=  OPT_PROFIT
             hit_stop   = pnl_pct <=  OPT_STOP
@@ -197,6 +211,7 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                     "strike":       round(strike, 2),
                     "pnl_pct":      round(pnl_pct * 100, 3),
                     "pnl_dollar":   round(pnl_dollar, 2),
+                    "commission":   round(commission, 2),
                     "days_held":    days_held,
                     "close_reason": reason,
                     "mtf_score":    entry_meta["mtf_score"],
@@ -337,6 +352,11 @@ def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                 reason = ("profit_target" if hit_profit
                           else "stop_loss" if hit_stop
                           else "max_hold")
+                shares     = NOTIONAL / entry_price if entry_price else 0
+                # Round-trip commission: entry + exit shares
+                commission = STK_COMMISSION_PER_SHARE * shares * 2
+                pnl_gross  = NOTIONAL * pnl_pct
+                pnl_dollar = pnl_gross - commission
                 trades.append({
                     "ticker":       ticker,
                     "direction":    entry_meta["direction"],
@@ -345,7 +365,8 @@ def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                     "entry_price":  round(entry_price, 4),
                     "exit_price":   round(current_close, 4),
                     "pnl_pct":      round(pnl_pct * 100, 3),
-                    "pnl_dollar":   round(NOTIONAL * pnl_pct, 2),
+                    "pnl_dollar":   round(pnl_dollar, 2),
+                    "commission":   round(commission, 2),
                     "days_held":    days_held,
                     "close_reason": reason,
                     "mtf_score":    entry_meta["mtf_score"],
@@ -378,6 +399,7 @@ def _compute_stats(trades: list[dict]) -> dict:
     total_pnl  = df["pnl_dollar"].sum()
     avg_pnl    = df["pnl_dollar"].mean()
     avg_hold   = df["days_held"].mean()
+    total_commissions = df["commission"].sum() if "commission" in df.columns else 0
     best       = df.loc[df["pnl_dollar"].idxmax()]
     worst      = df.loc[df["pnl_dollar"].idxmin()]
 
@@ -478,6 +500,7 @@ def _compute_stats(trades: list[dict]) -> dict:
         "ending_capital":    ending_capital,
         "total_return_pct":  total_return_pct,
         "ann_return_pct":    ann_return_pct,
+        "total_commissions": round(total_commissions, 2),
         "best_trade":  {
             "ticker": best["ticker"], "date": best["exit_date"],
             "pnl": round(best["pnl_dollar"], 2), "reason": best["close_reason"],
@@ -524,6 +547,7 @@ def _format_report(stats: dict, trades: list[dict]) -> str:
         f"  Profit factor:     {stats['profit_factor']}",
         f"  Sharpe ratio:      {stats['sharpe'] or 'N/A'}",
         f"  Max drawdown:      ${stats['max_drawdown']:,.2f}",
+        f"  Commissions paid:  ${stats.get('total_commissions', 0):,.2f}  (IV+20% + $0.65/contract)",
         "",
         "  BEST TRADE",
         f"    {stats['best_trade']['ticker']}  ${stats['best_trade']['pnl']:+.2f}  "
