@@ -36,7 +36,7 @@ import json
 import os
 import sys
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as _date, timedelta
 
 APP_DIR      = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(APP_DIR, "alerts_settings.json")
@@ -713,19 +713,65 @@ async def trades_cmd(ctx):
     # ── Position lines ────────────────────────────────────────────────────────
     def _conviction(mtf):
         if mtf >= 3:   return "HIGH"
-        if mtf >= 2:   return "MEDIUM"
+        if mtf >= 2:   return "MED"
         return "LOW"
 
     def _direction(trade_type):
         return {
-            "stock_long":  "LONG",
-            "stock_short": "SHORT",
-            "long_call":   "LONG CALL",
-            "long_put":    "LONG PUT",
-            "call_spread": "CALL SPD",
-            "put_spread":  "PUT SPD",
-            "iron_condor": "CONDOR",
+            "stock_long":       "LONG",
+            "stock_short":      "SHORT",
+            "long_call":        "LONG CALL",
+            "long_put":         "LONG PUT",
+            "call_spread":      "CALL SPD",
+            "put_spread":       "PUT SPD",
+            "iron_condor":      "CONDOR",
+            "bull_put_spread":  "BULL PUT SPD",
+            "bear_call_spread": "BEAR CALL SPD",
+            "covered_call":     "COV CALL",
         }.get(trade_type, trade_type.upper())
+
+    def _opt_detail(t: dict) -> str:
+        """Returns a compact strike/expiry string for options trades."""
+        tt = t["trade_type"]
+        if tt in ("stock_long", "stock_short"):
+            return ""
+        # Compute expiry date: stored or derived from date_entered + t_days
+        expiry_str = t.get("expiry_date", "")
+        if not expiry_str:
+            try:
+                entry  = _date.fromisoformat(t["date_entered"][:10])
+                expiry = entry + timedelta(days=int(t.get("t_days", 30)))
+                expiry_str = expiry.isoformat()
+            except Exception:
+                expiry_str = ""
+        # Format expiry and DTE remaining
+        if expiry_str:
+            try:
+                expiry_dt  = _date.fromisoformat(expiry_str)
+                exp_disp   = expiry_dt.strftime("%b %d")
+                dte_remain = max((expiry_dt - _date.today()).days, 0)
+                exp_tag    = f"{exp_disp} ({dte_remain}d)"
+            except Exception:
+                exp_tag = "?"
+        else:
+            exp_tag = "?"
+        # Strike display by type
+        if tt in ("long_call", "long_put", "covered_call"):
+            k = t.get("strike", "?")
+            return f"K${k} · {exp_tag}"
+        elif tt in ("call_spread", "put_spread"):
+            lk = t.get("long_strike", "?")
+            sk = t.get("short_strike", "?")
+            return f"${lk}/${sk} · {exp_tag}"
+        elif tt in ("bull_put_spread", "bear_call_spread"):
+            sk = t.get("short_strike", "?")   # short is the one we sold (dominant leg)
+            lk = t.get("long_strike", "?")
+            return f"${sk}/${lk} · {exp_tag}"
+        elif tt == "iron_condor":
+            sp = t.get("short_put_k", "?")
+            sc = t.get("short_call_k", "?")
+            return f"${sp}–${sc} · {exp_tag}"
+        return exp_tag
 
     sorted_trades = sorted(open_trades, key=lambda t: t.get("pnl", 0), reverse=True)
     lines = []
@@ -735,12 +781,20 @@ async def trades_cmd(ctx):
         dot   = "🟢" if pnl >= 0 else "🔴"
         conv  = _conviction(t.get("mtf_score", 0))
         dirn  = _direction(t["trade_type"])
-        weight= (abs(t.get("cost_basis", 0)) / total_cost * 100) if total_cost else 0
         days  = t.get("days_held", 0)
-        lines.append(
-            f"{dot} **{t['ticker']}** ({dirn}) | "
-            f"{pct:+.1f}% | {conv} | {weight:.1f}% | day {days}"
-        )
+        detail= _opt_detail(t)
+        if detail:
+            lines.append(
+                f"{dot} **{t['ticker']}** ({dirn})  {pct:+.1f}% | "
+                f"{detail} | {conv} | day {days}"
+            )
+        else:
+            # Stock — show entry price
+            entry = t.get("entry_price", 0)
+            lines.append(
+                f"{dot} **{t['ticker']}** ({dirn})  {pct:+.1f}% | "
+                f"entry ${entry:.2f} | {conv} | day {days}"
+            )
 
     if lines:
         mid = len(lines) // 2
@@ -1680,16 +1734,62 @@ async def paper_trading_loop():
                             color = COLOR_GREEN if total_pnl >= 0 else COLOR_RED
                             label_display = "Midday" if label == "noon" else "Pre-Close"
 
+                            _DIR_MAP = {
+                                "stock_long": "LONG", "stock_short": "SHORT",
+                                "long_call": "LONG CALL", "long_put": "LONG PUT",
+                                "call_spread": "CALL SPD", "put_spread": "PUT SPD",
+                                "iron_condor": "CONDOR",
+                                "bull_put_spread": "BULL PUT SPD",
+                                "bear_call_spread": "BEAR CALL SPD",
+                                "covered_call": "COV CALL",
+                            }
+                            def _auto_opt_detail(t):
+                                tt2 = t["trade_type"]
+                                if tt2 in ("stock_long", "stock_short"):
+                                    return ""
+                                exp_str = t.get("expiry_date", "")
+                                if not exp_str:
+                                    try:
+                                        ent = _date.fromisoformat(t["date_entered"][:10])
+                                        exp_str = (ent + timedelta(days=int(t.get("t_days", 30)))).isoformat()
+                                    except Exception:
+                                        exp_str = ""
+                                if exp_str:
+                                    try:
+                                        ed = _date.fromisoformat(exp_str)
+                                        dte = max((ed - _date.today()).days, 0)
+                                        exp_disp = f"{ed.strftime('%b %d')} ({dte}d)"
+                                    except Exception:
+                                        exp_disp = "?"
+                                else:
+                                    exp_disp = "?"
+                                if tt2 in ("long_call", "long_put", "covered_call"):
+                                    return f"K${t.get('strike','?')} · {exp_disp}"
+                                elif tt2 in ("call_spread", "put_spread"):
+                                    return f"${t.get('long_strike','?')}/{t.get('short_strike','?')} · {exp_disp}"
+                                elif tt2 in ("bull_put_spread", "bear_call_spread"):
+                                    return f"${t.get('short_strike','?')}/{t.get('long_strike','?')} · {exp_disp}"
+                                elif tt2 == "iron_condor":
+                                    return f"${t.get('short_put_k','?')}–${t.get('short_call_k','?')} · {exp_disp}"
+                                return exp_disp
+
                             lines = []
                             for t in sorted(open_trades, key=lambda x: x.get("pnl", 0), reverse=True):
                                 pnl  = t.get("pnl", 0)
                                 ppct = t.get("pnl_pct", 0) * 100
                                 dot  = "🟢" if pnl >= 0 else "🔴"
-                                tt   = t["trade_type"].replace("_", " ").title()
-                                lines.append(
-                                    f"{dot} **{t['ticker']}** ({tt}) | "
-                                    f"{ppct:+.1f}% | day {t.get('days_held', 0)}"
-                                )
+                                dirn2 = _DIR_MAP.get(t["trade_type"], t["trade_type"].upper())
+                                detail2 = _auto_opt_detail(t)
+                                if detail2:
+                                    lines.append(
+                                        f"{dot} **{t['ticker']}** ({dirn2})  {ppct:+.1f}% | "
+                                        f"{detail2} | day {t.get('days_held', 0)}"
+                                    )
+                                else:
+                                    lines.append(
+                                        f"{dot} **{t['ticker']}** ({dirn2})  {ppct:+.1f}% | "
+                                        f"entry ${t.get('entry_price',0):.2f} | day {t.get('days_held',0)}"
+                                    )
 
                             pos_embed = discord.Embed(
                                 title=(

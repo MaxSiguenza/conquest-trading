@@ -14,7 +14,7 @@ import json
 import os
 import random
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 import pytz
@@ -234,7 +234,8 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     if val <= 0.05:
         return None
 
-    cost = round(val * 100 * OPTION_CONTRACTS, 2)
+    cost        = round(val * 100 * OPTION_CONTRACTS, 2)
+    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
     return {
         "id":                  f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":        ts,
@@ -244,6 +245,7 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "opt_type":            opt_type,
         "strike":              strike,
         "t_days":              DTE_TARGET,
+        "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(val, 4),
@@ -285,8 +287,9 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     if debit <= 0.05:
         return None
 
-    max_gain = round(width - debit, 4)
-    cost     = round(debit * 100 * OPTION_CONTRACTS, 2)
+    max_gain    = round(width - debit, 4)
+    cost        = round(debit * 100 * OPTION_CONTRACTS, 2)
+    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
 
     return {
         "id":                f"{ts}_{scan['ticker']}_{trade_type}",
@@ -299,6 +302,7 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "short_strike":      short_k,
         "spread_width":      width,
         "t_days":            DTE_TARGET,
+        "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
         "entry_stock_price": round(price, 4),
         "entry_net_debit":   debit,
@@ -336,11 +340,12 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
     sp = _bs(price, sp_k, T, sigma, "put")
     lp = _bs(price, lp_k, T, sigma, "put")
 
-    credit = round((sc - lc) + (sp - lp), 4)
+    credit      = round((sc - lc) + (sp - lp), 4)
     if credit <= 0.05:
         return None
 
-    max_loss = round(width - credit, 4)
+    max_loss    = round(width - credit, 4)
+    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
 
     return {
         "id":                f"{ts}_{scan['ticker']}_iron_condor",
@@ -354,6 +359,7 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         "long_put_k":        lp_k,
         "spread_width":      width,
         "t_days":            DTE_TARGET,
+        "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
         "entry_stock_price": round(price, 4),
         "entry_net_credit":  credit,
@@ -404,6 +410,7 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
 
     spread_width = round(abs(short_k - long_k), 2)
     max_loss     = round(spread_width - credit, 4)
+    expiry_date  = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
 
     return {
         "id":                 f"{ts}_{scan['ticker']}_{trade_type}",
@@ -416,6 +423,7 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         "long_strike":        long_k,
         "spread_width":       spread_width,
         "t_days":             DTE_TARGET,
+        "expiry_date":        expiry_date,
         "sigma":              round(sigma, 4),
         "entry_stock_price":  round(price, 4),
         "entry_net_credit":   credit,
@@ -447,9 +455,11 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
     step    = _strike_step(price)
     strike  = _round_strike(price * 1.03, step)   # 3% OTM
 
-    premium = _bs(price, strike, T, sigma, "call")
+    premium     = _bs(price, strike, T, sigma, "call")
     if premium <= 0.05:
         return None
+
+    expiry_date = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
 
     return {
         "id":                  f"{ts}_{scan['ticker']}_covered_call",
@@ -460,6 +470,7 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
         "opt_type":            "call",
         "strike":              strike,
         "t_days":              DTE_TARGET,
+        "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(premium, 4),
