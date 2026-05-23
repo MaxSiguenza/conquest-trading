@@ -18,7 +18,7 @@ from data.fetcher import fetch_ohlcv, fetch_vix, get_earnings_dates
 from signals.generator import generate_signals
 from indicators.volatility import calculate_hv_rank, calculate_adx
 from forecast.monte_carlo import run_monte_carlo, forecast_summary
-from backtest.engine import BacktestEngine
+from backtest_engine import BacktestEngine
 from models.kelly_criterion import kelly_criterion
 
 # Theme colors matching the web app
