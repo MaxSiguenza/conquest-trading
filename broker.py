@@ -257,7 +257,7 @@ def check_intraday_stops() -> list:
             trade = mark_trade(trade, price)
             reason = _should_close(trade)
 
-            if reason in ("stop_loss", "profit_target"):
+            if reason in ("stop_loss", "profit_target", "backstop_stop", "agent_decision"):
                 trade["status"]       = "closed"
                 trade["close_reason"] = reason
                 trade["date_closed"]  = now_str

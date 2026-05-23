@@ -36,13 +36,20 @@ STOCK_SIZE       = 1_000   # $ notional per stock trade
 OPTION_CONTRACTS = 1       # 1 contract = 100 shares
 RISK_FREE        = 0.05    # 5 % annualised
 DTE_TARGET       = 30      # days to expiry at entry
-MAX_HOLD_DAYS    = 5       # close after 5 calendar days regardless
+MAX_HOLD_STK     = 5       # stocks: close after 5 calendar days regardless
+MAX_HOLD_OPT     = 21      # options: close after 21 days (bought at 30 DTE, near expiry)
 
-# ── Exit thresholds ────────────────────────────────────────────────────────────
-OPT_PROFIT   =  0.50   # close option when up  50 %
-OPT_STOP     = -0.75   # close option when down 75 %
+# ── Stock exit thresholds (fixed — signal confirmed these work) ────────────────
 STK_PROFIT   =  0.05   # close stock  when up   5 %
 STK_STOP     = -0.03   # close stock  when down 3 %
+
+# ── Options exits: AI agent-driven, not fixed percentages ─────────────────────
+# The agent exit reviewer runs at daily close and makes hold/close decisions
+# based on current conditions, days remaining, and whether the thesis still holds.
+# BACKSTOP_OPT is a safety net only — prevents total wipeout, not a target.
+BACKSTOP_OPT = -0.80   # emergency backstop: close if option loses > 80 % of value
+
+# ── Iron condor exits (credit trade — these remain rules-based) ───────────────
 IC_PROFIT    =  0.50   # close iron condor when 50 % of max credit earned
 IC_STOP      =  2.00   # close iron condor when position costs 2× credit (loss)
 
@@ -111,13 +118,17 @@ def _strike_step(price: float) -> float:
 # ── Trade-type assignment ──────────────────────────────────────────────────────
 
 _TYPE_WEIGHTS = {
-    "stock_long":   1,
+    "stock_long":       1,
     # stock_short removed — backtest confirmed 42.8% WR, -$6,231 drag over 2y
-    "call_spread":  2,
-    "put_spread":   2,
-    "long_call":    1,
-    "long_put":     1,
-    "iron_condor":  2,
+    "call_spread":      1,   # bull call debit spread (directional)
+    "put_spread":       1,   # bear put debit spread (directional)
+    "long_call":        1,
+    "long_put":         1,
+    "iron_condor":      2,
+    # ── Premium collection (new) — collect IV premium instead of paying it ──
+    "bull_put_spread":  2,   # credit put spread: bullish, collects premium
+    "bear_call_spread": 2,   # credit call spread: bearish/neutral, collects premium
+    "covered_call":     2,   # sell OTM call for income on bullish stocks
 }
 
 def _assign_trade_type(scan: dict) -> str:
@@ -139,32 +150,40 @@ def _assign_trade_type(scan: dict) -> str:
     bearish  = (daily == "BEAR") and (weekly == "BEAR")
     trending = adx > 22
 
-    # High IV environment → prefer selling premium
+    # ── High IV: premium is expensive → SELL it, don't buy it ───────────────
     if hv_rank > 0.65 and not sqz_fired:
         if bullish and trending:
-            return "put_spread"
+            # Bull put spread: collect fat premium, profit if stock holds above short put
+            return random.choice(["bull_put_spread", "bull_put_spread", "covered_call"])
         if bearish and trending:
-            return "call_spread"
+            # Bear call spread: collect fat premium, profit if stock stays below short call
+            return random.choice(["bear_call_spread", "bear_call_spread", "iron_condor"])
         return "iron_condor"
 
+    # ── Strong bullish + squeeze firing: directional momentum play ────────────
     if bullish and trending:
         if sqz_fired and sqz_mom > 0:
-            return random.choice(["call_spread", "long_call", "call_spread"])
+            # Squeeze breaking out → mix directional and income
+            return random.choice(["long_call", "bull_put_spread", "covered_call", "stock_long"])
         if entry_sig and rsi < 45:
-            return random.choice(["long_call", "stock_long"])
-        return random.choice(["call_spread", "stock_long", "long_call", "call_spread"])
+            # Clean entry signal, not overbought → best setups, lean directional
+            return random.choice(["long_call", "stock_long", "bull_put_spread"])
+        # General bullish → blend income (credit) with directional
+        return random.choice(["bull_put_spread", "covered_call", "stock_long",
+                               "long_call", "bull_put_spread", "covered_call"])
 
+    # ── Bearish: lean credit over debit (IV premium problem on long puts) ─────
     if bearish and trending:
         if sqz_fired and sqz_mom < 0:
-            return random.choice(["put_spread", "long_put", "put_spread"])
+            return random.choice(["bear_call_spread", "long_put", "bear_call_spread"])
         if rsi > 58:
-            return random.choice(["long_put", "put_spread"])
-        return random.choice(["put_spread", "long_put", "put_spread"])
+            return random.choice(["bear_call_spread", "long_put"])
+        return random.choice(["bear_call_spread", "bear_call_spread", "long_put"])
 
-    # Neutral / mixed — range-bound candidates
+    # ── Neutral / mixed: range-bound → premium collection is king ────────────
     if hv_rank > 0.40:
-        return "iron_condor"
-    return random.choice(["iron_condor", "call_spread", "put_spread"])
+        return random.choice(["iron_condor", "bull_put_spread", "bear_call_spread"])
+    return random.choice(["iron_condor", "covered_call", "bull_put_spread"])
 
 
 # ── Trade builders ─────────────────────────────────────────────────────────────
@@ -353,6 +372,111 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
     }
 
 
+def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
+    """
+    Build a credit spread — we SELL premium and collect income.
+    bull_put_spread : sell put 3% below spot, buy put 6% below. Profit if stock stays up.
+    bear_call_spread: sell call 3% above spot, buy call 6% above. Profit if stock stays flat/down.
+    The IV premium works FOR us here — expensive options = bigger credit collected.
+    """
+    price = scan.get("price", 0)
+    if not price:
+        return None
+    sigma    = _hv(scan["ticker"])
+    T        = DTE_TARGET / 365.0
+    step     = _strike_step(price)
+
+    if trade_type == "bull_put_spread":
+        short_k  = _round_strike(price * 0.97, step)   # sell 3% OTM put
+        long_k   = _round_strike(price * 0.94, step)   # buy 6% OTM put (cap downside)
+        opt_type = "put"
+    else:  # bear_call_spread
+        short_k  = _round_strike(price * 1.03, step)   # sell 3% OTM call
+        long_k   = _round_strike(price * 1.06, step)   # buy 6% OTM call (cap upside loss)
+        opt_type = "call"
+
+    short_val = _bs(price, short_k, T, sigma, opt_type)
+    long_val  = _bs(price, long_k,  T, sigma, opt_type)
+    credit    = round(short_val - long_val, 4)
+
+    if credit <= 0.05:
+        return None
+
+    spread_width = round(abs(short_k - long_k), 2)
+    max_loss     = round(spread_width - credit, 4)
+
+    return {
+        "id":                 f"{ts}_{scan['ticker']}_{trade_type}",
+        "date_entered":       ts,
+        "ticker":             scan["ticker"],
+        "trade_type":         trade_type,
+        "status":             "open",
+        "opt_type":           opt_type,
+        "short_strike":       short_k,
+        "long_strike":        long_k,
+        "spread_width":       spread_width,
+        "t_days":             DTE_TARGET,
+        "sigma":              round(sigma, 4),
+        "entry_stock_price":  round(price, 4),
+        "entry_net_credit":   credit,
+        "max_gain":           credit,
+        "max_loss":           max_loss,
+        "cost_basis":         round(max_loss * 100 * OPTION_CONTRACTS, 2),
+        "contracts":          OPTION_CONTRACTS,
+        "current_cost_to_close": credit,   # starts at full credit (cost to unwind = full credit)
+        "pnl":                0.0,
+        "pnl_pct":            0.0,
+        "date_closed":        None,
+        "close_reason":       None,
+        "days_held":          0,
+        "mtf_score":          scan.get("mtf_score", 0),
+        "rsi_entry":          round(scan.get("rsi", 50), 1),
+    }
+
+
+def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
+    """
+    Sell a 30 DTE call 3% OTM for income. Works best on stocks with high IV
+    or flat/mildly bullish expectations — collect theta decay every day.
+    """
+    price = scan.get("price", 0)
+    if not price:
+        return None
+    sigma   = _hv(scan["ticker"])
+    T       = DTE_TARGET / 365.0
+    step    = _strike_step(price)
+    strike  = _round_strike(price * 1.03, step)   # 3% OTM
+
+    premium = _bs(price, strike, T, sigma, "call")
+    if premium <= 0.05:
+        return None
+
+    return {
+        "id":                  f"{ts}_{scan['ticker']}_covered_call",
+        "date_entered":        ts,
+        "ticker":              scan["ticker"],
+        "trade_type":          "covered_call",
+        "status":              "open",
+        "opt_type":            "call",
+        "strike":              strike,
+        "t_days":              DTE_TARGET,
+        "sigma":               round(sigma, 4),
+        "entry_stock_price":   round(price, 4),
+        "entry_option_price":  round(premium, 4),
+        "premium_collected":   round(premium * 100 * OPTION_CONTRACTS, 2),
+        "cost_basis":          round(premium * 100 * OPTION_CONTRACTS, 2),
+        "contracts":           OPTION_CONTRACTS,
+        "current_option_price": round(premium, 4),
+        "pnl":                 0.0,
+        "pnl_pct":             0.0,
+        "date_closed":         None,
+        "close_reason":        None,
+        "days_held":           0,
+        "mtf_score":           scan.get("mtf_score", 0),
+        "rsi_entry":           round(scan.get("rsi", 50), 1),
+    }
+
+
 def _build_trade(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     if trade_type in ("stock_long", "stock_short"):
         return _build_stock(scan, trade_type, ts)
@@ -362,6 +486,10 @@ def _build_trade(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         return _build_spread(scan, trade_type, ts)
     if trade_type == "iron_condor":
         return _build_iron_condor(scan, ts)
+    if trade_type in ("bull_put_spread", "bear_call_spread"):
+        return _build_credit_spread(scan, trade_type, ts)
+    if trade_type == "covered_call":
+        return _build_covered_call(scan, ts)
     return None
 
 
@@ -424,11 +552,32 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             lp = _bs(price, t["long_put_k"],   T_rem, t["sigma"], "put")
             cur_net = (sc - lc) + (sp - lp)
             t["current_net_value"] = round(cur_net, 4)
-            # credit trade: profit = original credit − current cost to close
             raw  = (t["entry_net_credit"] - cur_net) * 100 * t["contracts"]
             ml   = t.get("max_loss", 1) * 100 or 100
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / ml, 4)
+
+        elif tt in ("bull_put_spread", "bear_call_spread"):
+            T_rem    = max((t["t_days"] - days_held) / 365.0, 0.001)
+            sv       = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+            lv       = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+            cost_now = max(sv - lv, 0)
+            t["current_cost_to_close"] = round(cost_now, 4)
+            credit = t.get("entry_net_credit", 0)
+            raw    = (credit - cost_now) * 100 * t["contracts"]
+            ml     = t.get("max_loss", 1) * 100 or 100
+            t["pnl"]     = round(raw, 2)
+            t["pnl_pct"] = round(raw / ml, 4)
+
+        elif tt == "covered_call":
+            T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
+            cur   = _bs(price, t["strike"], T_rem, t["sigma"], "call")
+            t["current_option_price"] = round(cur, 4)
+            entry_prem = t.get("entry_option_price", 0)
+            raw  = (entry_prem - cur) * 100 * t["contracts"]
+            cb   = t.get("cost_basis", 1) or 1
+            t["pnl"]     = round(raw, 2)
+            t["pnl_pct"] = round(raw / cb, 4)
 
     except Exception:
         pass
@@ -437,29 +586,145 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
 
 def _should_close(t: dict) -> Optional[str]:
+    """
+    Determines if a trade should be closed based on rules.
+
+    Stocks      → fixed profit/stop (signal confirmed these work at 50.8 % WR).
+    Options     → AI agent decisions only (see agent_exit_review).
+                  Only the BACKSTOP_OPT safety net and MAX_HOLD_OPT apply here.
+    Iron condors→ credit-trade rules (50 % of credit earned = close).
+    """
     days = t.get("days_held", 0)
     pct  = t.get("pnl_pct",  0.0)
     pnl  = t.get("pnl",      0.0)
     tt   = t["trade_type"]
 
-    if days >= MAX_HOLD_DAYS:
-        return "max_hold"
-
+    # ── Stocks: fixed exits (work well in backtest) ───────────────────────────
     if tt in ("stock_long", "stock_short"):
-        if pct >= STK_PROFIT:  return "profit_target"
-        if pct <= STK_STOP:    return "stop_loss"
+        if days >= MAX_HOLD_STK:       return "max_hold"
+        if pct >= STK_PROFIT:          return "profit_target"
+        if pct <= STK_STOP:            return "stop_loss"
 
+    # ── Long options / spreads: agent-driven, safety net only ─────────────────
     elif tt in ("long_call", "long_put", "call_spread", "put_spread"):
-        if pct >= OPT_PROFIT:  return "profit_target"
-        if pct <= OPT_STOP:    return "stop_loss"
+        if days >= MAX_HOLD_OPT:       return "max_hold"       # approaching expiry
+        if pct <= BACKSTOP_OPT:        return "backstop_stop"  # catastrophic protection
 
+    # ── Iron condors: credit-trade rules (time decay is the edge here) ────────
     elif tt == "iron_condor":
+        if days >= MAX_HOLD_OPT:       return "max_hold"
         credit_usd = t.get("entry_net_credit", 0) * 100
         if credit_usd > 0:
             if pnl >= credit_usd * IC_PROFIT:  return "profit_target"
             if pnl <= -credit_usd * IC_STOP:   return "stop_loss"
 
+    # ── Credit spreads: rules-based (credit trades always use fixed rules) ────
+    elif tt in ("bull_put_spread", "bear_call_spread"):
+        if days >= MAX_HOLD_OPT:       return "max_hold"
+        credit    = t.get("entry_net_credit", 0)
+        cost_now  = t.get("current_cost_to_close", credit)
+        if credit > 0:
+            if cost_now <= credit * 0.25:  return "profit_target"  # kept 75% of credit
+            if cost_now >= credit * 2.0:   return "stop_loss"       # spread doubled against us
+
+    # ── Covered calls: rules-based (premium decay trade) ─────────────────────
+    elif tt == "covered_call":
+        if days >= MAX_HOLD_OPT:       return "max_hold"
+        entry_prem = t.get("entry_option_price", 0)
+        cur_prem   = t.get("current_option_price", entry_prem)
+        if entry_prem > 0:
+            if cur_prem <= entry_prem * 0.20:  return "profit_target"  # kept 80% of premium
+            if cur_prem >= entry_prem * 2.0:   return "stop_loss"      # stock blew through strike
+
     return None
+
+
+def agent_exit_review(open_trades: list) -> dict:
+    """
+    Ask Claude (Haiku) to review all open option positions and decide hold/close.
+    Returns {trade_id: close_reason} for positions the agent wants to close.
+    Runs once per day at market close after mark_trade has updated P&L.
+
+    The agent considers: days held, P&L, DTE remaining, whether the thesis
+    still holds, and overall position health — not arbitrary percentage targets.
+    """
+    # Only review option/spread trades — stocks use fixed rules above
+    option_trades = [
+        t for t in open_trades
+        if t.get("trade_type") in ("long_call", "long_put", "call_spread", "put_spread")
+    ]
+    if not option_trades:
+        return {}
+
+    try:
+        from anthropic import Anthropic
+        client = Anthropic()
+
+        positions = []
+        for t in option_trades:
+            dte_remaining = t.get("t_days", 30) - t.get("days_held", 0)
+            positions.append({
+                "id":            t["id"],
+                "ticker":        t["ticker"],
+                "trade_type":    t["trade_type"],
+                "direction":     t.get("opt_type", "call"),
+                "days_held":     t.get("days_held", 0),
+                "dte_remaining": max(dte_remaining, 0),
+                "pnl_pct":       round(t.get("pnl_pct", 0) * 100, 1),
+                "pnl_usd":       round(t.get("pnl", 0), 2),
+                "rsi_at_entry":  t.get("rsi_entry", 50),
+                "mtf_score":     t.get("mtf_score", 0),
+            })
+
+        prompt = f"""You are a professional options portfolio manager reviewing open paper trading positions.
+For each position below, decide: HOLD or CLOSE.
+
+Your job is to think like a disciplined trader — not too trigger-happy (don't close winners early),
+but also not stubborn (don't hold losers hoping for a recovery that isn't coming).
+
+Guidelines (use judgment, not rules):
+- If DTE remaining < 7: CLOSE (theta decay accelerates sharply near expiry)
+- If in a clear profit (+20%+) and the move looks exhausted: CLOSE and bank gains
+- If the position has been losing slowly for many days with no sign of recovery: CLOSE
+- If the stock originally had good setup signals (high MTF score) and we're only slightly red: HOLD
+- Let strong conviction trades (MTF score 3) run longer than weak ones (MTF score 1)
+- Never hold a position past 21 days
+
+Open positions:
+{json.dumps(positions, indent=2)}
+
+Respond ONLY with a JSON object in this exact format:
+{{
+  "decisions": [
+    {{"id": "trade_id_here", "action": "HOLD", "reason": "brief reason"}},
+    {{"id": "trade_id_here", "action": "CLOSE", "reason": "brief reason"}}
+  ]
+}}"""
+
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        text = response.content[0].text.strip()
+        # Strip any markdown code fences the model might add
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+            text = text.rsplit("```", 1)[0].strip()
+
+        result   = json.loads(text)
+        to_close = {}
+        for d in result.get("decisions", []):
+            if d.get("action") == "CLOSE":
+                to_close[d["id"]] = d.get("reason", "agent_decision")
+        print(f"[AgentExit] Reviewed {len(option_trades)} options: "
+              f"{len(to_close)} close, {len(option_trades)-len(to_close)} hold")
+        return to_close
+
+    except Exception as e:
+        print(f"[AgentExit] Review failed: {e}")
+        return {}
 
 
 # ── Daily generate ─────────────────────────────────────────────────────────────
@@ -667,12 +932,29 @@ def run_daily_close() -> dict:
     closed_count = 0
     now_str      = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
 
+    # ── Mark all open trades to current prices first ──────────────────────────
     for i, trade in enumerate(trades):
         if trade["status"] != "open":
             continue
-        price        = prices.get(trade["ticker"])
-        trades[i]    = mark_trade(trade, price=price)
-        reason       = _should_close(trades[i])
+        price     = prices.get(trade["ticker"])
+        trades[i] = mark_trade(trade, price=price)
+
+    # ── Agent exit review for option positions ────────────────────────────────
+    open_options = [t for t in trades
+                    if t.get("status") == "open"
+                    and t.get("trade_type") in
+                    ("long_call", "long_put", "call_spread", "put_spread")]
+    agent_closes = agent_exit_review(open_options)  # {trade_id: reason}
+
+    for i, trade in enumerate(trades):
+        if trade["status"] != "open":
+            continue
+        reason = _should_close(trades[i])
+
+        # Merge agent decision: if the agent wants to close and rules didn't, use agent
+        if not reason and trades[i].get("id") in agent_closes:
+            reason = "agent_decision"
+            trades[i]["agent_close_reason"] = agent_closes[trades[i]["id"]]
         if reason:
             trades[i]["status"]       = "closed"
             trades[i]["date_closed"]  = now_str

@@ -2727,35 +2727,30 @@ You are talking to Max — a Temple University student learning quantitative tra
 - Web dashboard at conquest-trading.up.railway.app
 
 === BACKTESTING SYSTEM ===
-This system has a full backtesting engine (backtest.py). When you see a "Conquest Backtesting Engine"
-results embed in Discord, or someone asks about "the backtest", here's what it means:
+This system has a full backtesting engine (backtest.py).
+
+CRITICAL RULE — BACKTEST NUMBERS:
+NEVER quote specific backtest statistics (win rates, P&L totals, trade counts, Sharpe) unless
+they are present in the [LAST BACKTEST RUN] block injected into this exact message.
+The backtest has been re-run many times with different parameters — old numbers are wrong and stale.
+If someone asks for specific numbers and you don't see a [LAST BACKTEST RUN] block: say
+"Run !backtest to get current results — I don't quote stale numbers."
 
 What the backtest does:
-- Replays the EXACT production signals (Entry_Signal, MACD_Cross, Squeeze_Fired, MTF_Score)
-  on 2-3 years of historical daily OHLCV data across the full 129-ticker S&P 500 universe
-- Simulates 3 trade types: stock_long ($1,000 notional), long_call (30 DTE, 2% OTM),
-  long_put (30 DTE, 2% OTM) — options priced via Black-Scholes using 30-day historical vol
-- Exit rules: +50% profit / -75% stop for options; +5% / -3% for stocks; 5-21 day max hold
-- Entry at next-day OPEN to avoid lookahead bias
+- Replays production signals on 2-3 years of data across 129 S&P 500 tickers
+- Only trades with MTF_Score ≥ 2 (mirrors the 6-agent conviction threshold)
+- Realistic friction: IV×1.20 (real options cost ~20% more than raw HV), $0.65/contract commission
+- Exits are signal-driven: MACD/regime flip closes the trade, not arbitrary % targets
+- $100,000 starting capital tracked — reports ending capital and total return %
+- Stock exits: +5% profit / -3% stop / 5-day max hold (these work — 50.8% WR confirmed)
+- Options exits: signal reversal + -65% backstop safety net + 30-day max hold
 
-How to read backtest results:
-- Total P&L = sum of all trade P&Ls using $1,000 notional each — NOT a portfolio dollar return
-- Win rate below 50% is fine for options strategies: 1 big winner offsets multiple small losses
-- The REAL signals are: Sharpe ratio (>1.0 = good), Profit Factor (>1.1 = real edge),
-  total P&L positive. Win rate alone is misleading for options.
-- "EDGE CONFIRMED" = Sharpe >0.7 AND profit factor >1.1 AND positive P&L AND 200+ trades
-- Max drawdown shows worst losing streak — compare to total P&L for perspective
+How to read results:
+- Sharpe >1.0 and Profit Factor >1.1 with positive P&L = real edge
+- Win rate alone is misleading for options — P&L asymmetry matters more
+- "NO EDGE" verdict means do not trade that setup live
 
-Last completed backtest (2024-03-28 to 2026-05-21):
-  5,807 trades | Win Rate 48.7% | Total P&L +$246,112 | Sharpe 1.92 | PF 1.24
-  Long calls: 1,184 trades | 56.6% WR | +$168,765 total
-  Long puts: 1,533 trades | 47.2% WR | +$81,503 total
-  Stock longs: 1,407 trades | 50.8% WR | +$2,075 total
-  Stock shorts: REMOVED (42.8% WR, -$6,231 confirmed drag)
-  Best ticker: GS +$17,614 | Worst: BLK -$9,245
-  Verdict: EDGE CONFIRMED — real edge, not luck
-
-To run a new backtest: type !backtest in Discord, or go to /backtest on the web dashboard.
+To run a new backtest: type !backtest in Discord or go to /backtest on the dashboard.
 
 === LIVE DATA ===
 - You receive a live snapshot of current paper trades and stats injected into every message
@@ -2828,35 +2823,44 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 f"Open positions:\n{pos_block}"
             )
 
-            # Also load last backtest results from DB if available
-            backtest_block = (
-                "[LAST BACKTEST RUN — historical simulation, NOT live trades]\n"
-                "Period: 2024-03-28 to 2026-05-21 | 129 tickers | 5,807 trades\n"
-                "Total P&L: +$246,112 | Win Rate: 48.7% | Sharpe: 1.92 | Profit Factor: 1.24\n"
-                "Long calls: 1,184 trades | 56.6% WR | +$168,765\n"
-                "Long puts:  1,533 trades | 47.2% WR | +$81,503\n"
-                "Stock long: 1,407 trades | 50.8% WR | +$2,075\n"
-                "Stock short REMOVED (42.8% WR, -$6,231 drag — cut from live system)\n"
-                "Verdict: EDGE CONFIRMED (Sharpe >1, PF >1.1, n=5807)"
-            )
-
-            # Check DB for a fresher backtest result
+            # Load last backtest results from DB — no hardcoded fallback
+            # (stale hardcoded numbers caused the bot to quote wrong stats)
+            backtest_block = "[LAST BACKTEST RUN — no recent backtest in DB. Tell user to run !backtest.]"
             try:
                 from db import kv_get
                 bt = kv_get("last_backtest")
                 if bt and isinstance(bt, dict):
-                    n   = bt.get("total_trades", 5807)
-                    pnl = bt.get("total_pnl", 246112)
-                    wr  = bt.get("win_rate", 0.487) * 100
-                    sh  = bt.get("sharpe", 1.92)
-                    pf  = bt.get("profit_factor", 1.24)
-                    per = bt.get("period", "2024-03-28 to 2026-05-21")
+                    n        = bt.get("total_trades", 0)
+                    pnl      = bt.get("total_pnl", 0)
+                    wr       = bt.get("win_rate", 0) * 100
+                    sh       = bt.get("sharpe") or "N/A"
+                    pf       = bt.get("profit_factor", 0)
+                    per      = bt.get("period", "unknown period")
+                    ec       = bt.get("ending_capital", 0)
+                    ret      = bt.get("total_return_pct", 0)
+                    ann      = bt.get("ann_return_pct")
+                    verdict  = bt.get("verdict", "unknown")
+                    run_at   = bt.get("run_at", "unknown")
+                    # by-type breakdown if stored
+                    by_type  = bt.get("by_trade_type", {})
+                    type_lines = ""
+                    if by_type:
+                        type_lines = "\nBy trade type:\n" + "\n".join(
+                            f"  {tt}: {v.get('count',0)} trades | "
+                            f"{v.get('win_rate',0):.1f}% WR | "
+                            f"avg ${v.get('avg_pnl',0):+.2f} | "
+                            f"total ${v.get('total_pnl',0):+,.0f}"
+                            for tt, v in by_type.items()
+                        )
+                    ann_str = f"{ann:+.1f}%" if ann is not None else "N/A"
                     backtest_block = (
                         f"[LAST BACKTEST RUN — historical simulation, NOT live trades]\n"
-                        f"Period: {per} | {n} trades\n"
-                        f"Total P&L: ${pnl:+,.0f} | Win Rate: {wr:.1f}% | "
-                        f"Sharpe: {sh:.2f} | Profit Factor: {pf:.3f}\n"
-                        f"Verdict: {bt.get('verdict', 'EDGE CONFIRMED')}"
+                        f"Run: {run_at} | Period: {per} | {n} trades\n"
+                        f"Starting capital: $100,000 → Ending: ${ec:,.0f}\n"
+                        f"Total return: {ret:+.1f}% | Ann. return: {ann_str}\n"
+                        f"Win Rate: {wr:.1f}% | Sharpe: {sh} | Profit Factor: {pf:.3f}\n"
+                        f"Verdict: {verdict}"
+                        f"{type_lines}"
                     )
             except Exception:
                 pass

@@ -29,7 +29,7 @@ import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 import pandas as pd
 import numpy as np
@@ -50,16 +50,29 @@ except ImportError:
 
 STK_PROFIT    =  0.05
 STK_STOP      = -0.03
-OPT_PROFIT    =  0.50    # close option at +50% gain
-OPT_STOP      = -0.75    # close option at -75% loss
+# Options exits are now signal-driven — NO fixed profit target, NO fixed stop %.
+# Instead:
+#   • Close calls when MACD_Cross_Down fires or Regime flips BEAR (thesis inverts)
+#   • Close puts  when MACD_Cross_Up  fires or Regime flips BULL (thesis inverts)
+#   • RSI extremes + in-profit → take gains (overbought/oversold reversal warning)
+#   • BACKSTOP_OPT: catastrophic safety net only — prevents total option wipeout
+#   • MAX_HOLD_OPT: hard expiry limit (agents would never hold past near-expiry anyway)
+BACKSTOP_OPT  = -0.65    # emergency backstop: only triggers on catastrophic moves
 MAX_HOLD_DAYS =  5       # stock max hold (kept for backward compat)
 MAX_HOLD_STK  =  5       # stock max hold (calendar days)
-MAX_HOLD_OPT  = 21       # options max hold (calendar days, ~1 month)
+MAX_HOLD_OPT  = 30       # options max hold — 30 days (bought at 30 DTE, exit near expiry)
 DTE_TARGET    = 30       # buy 30 DTE options at entry
 OTM_PCT       = 0.02     # 2% OTM strike
 NOTIONAL      = 1_000    # per-trade notional = 1% of $100k starting capital
 RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
 STARTING_CAPITAL = 100_000   # paper account starting value
+
+# ── Signal quality filter ──────────────────────────────────────────────────────
+# The live 6-agent swarm requires ≥4/6 agents to agree before trading.
+# That naturally filters to MTF_Score ≥ 2 (at least 2 of 3 timeframes aligned).
+# Without this filter the backtest trades every signal including low-quality MTF 0/3
+# noise — the backtest showed 1,887 MTF 0/3 trades at avg -$139 each dragging results.
+MTF_MIN_SCORE = 2   # only trade when at least 2/3 timeframes confirm the signal
 
 # ── Realistic friction costs (backtest realism) ────────────────────────────────
 # Real markets have bid-ask spreads and commissions. These adjustments bring
@@ -137,6 +150,10 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
             ):
                 signal = True
 
+            # Only trade when signal quality meets the live agent conviction threshold
+            if signal and int(row.get("MTF_Score", 0)) < MTF_MIN_SCORE:
+                signal = False
+
             if signal:
                 entry_idx   = i + 1
                 spot        = float(opens[entry_idx])
@@ -192,13 +209,33 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
             commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
             pnl_dollar = pnl_gross - commission
 
-            hit_profit = pnl_pct >=  OPT_PROFIT
-            hit_stop   = pnl_pct <=  OPT_STOP
-            hit_max    = days_held >= MAX_HOLD_OPT
+            # ── Signal-driven exits (mimics what AI agents would decide) ────────
+            # The thesis that opened the trade inverts when the signal reverses.
+            # We don't cap winners at an arbitrary % — we let the trade run until
+            # the market tells us the move is over.
+            row_now = df.iloc[i]
+            if option_type == "call":
+                signal_reversed = bool(
+                    row_now.get("MACD_Cross_Down", 0) or   # momentum turned bearish
+                    row_now.get("Regime", 1) == 0           # market regime flipped BEAR
+                )
+                # RSI overbought + already profitable → smart agents take gains here
+                rsi_take_profit = (row_now.get("RSI", 50) > 76 and pnl_pct >= 0.20)
+            else:
+                signal_reversed = bool(
+                    row_now.get("MACD_Cross_Up", 0) or     # momentum turned bullish
+                    row_now.get("Regime", 1) == 1           # market regime flipped BULL
+                )
+                # RSI oversold + already profitable → smart agents take gains here
+                rsi_take_profit = (row_now.get("RSI", 50) < 26 and pnl_pct >= 0.20)
 
-            if hit_profit or hit_stop or hit_max:
-                reason = ("profit_target" if hit_profit
-                          else "stop_loss" if hit_stop
+            hit_backstop = pnl_pct <= BACKSTOP_OPT    # catastrophic safety net only
+            hit_max      = days_held >= MAX_HOLD_OPT   # approaching expiry
+
+            if signal_reversed or rsi_take_profit or hit_backstop or hit_max:
+                reason = ("signal_reversal" if signal_reversed
+                          else "rsi_take_profit" if rsi_take_profit
+                          else "backstop" if hit_backstop
                           else "max_hold")
                 trades.append({
                     "ticker":       ticker,
@@ -210,6 +247,245 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                     "exit_price":   round(current_premium, 4),
                     "strike":       round(strike, 2),
                     "pnl_pct":      round(pnl_pct * 100, 3),
+                    "pnl_dollar":   round(pnl_dollar, 2),
+                    "commission":   round(commission, 2),
+                    "days_held":    days_held,
+                    "close_reason": reason,
+                    "mtf_score":    entry_meta["mtf_score"],
+                    "sqz_fired":    entry_meta["sqz_fired"],
+                    "macd_cross":   entry_meta["macd_cross"],
+                    "rsi_entry":    round(entry_meta["rsi_entry"], 1),
+                    "adx_entry":    round(entry_meta["adx_entry"], 1),
+                    "entry_signal": entry_meta["entry_signal"],
+                    "iv_entry":     entry_meta["iv"],
+                })
+                in_trade = False
+
+    return trades
+
+
+def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
+                                    spread_type: str = "bull_put") -> list[dict]:
+    """
+    Simulate credit spread trades — the strategy that COLLECTS the IV premium
+    instead of paying it.
+
+    bull_put  : sell put 3% below spot, buy put 6% below → profit if stock stays bullish
+    bear_call : sell call 3% above spot, buy call 6% above → profit if stock stays bearish
+
+    Credit spreads win when the underlying does nothing or moves your way.
+    Time decay and the volatility risk premium both work FOR you.
+    Max profit = net credit. Max loss = spread width - credit.
+    """
+    trades     = []
+    closes     = df["Close"].values
+    opens      = df["Open"].values
+    dates      = df.index.tolist()
+    n          = len(df)
+    in_trade   = False
+    entry_idx  = None
+    entry_credit = None
+    entry_meta = {}
+
+    for i in range(n - 1):
+        row = df.iloc[i]
+
+        if not in_trade:
+            signal = False
+            if spread_type == "bull_put":
+                if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
+                    signal = True
+            else:  # bear_call
+                if (row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0
+                        and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE):
+                    signal = True
+
+            if signal:
+                entry_idx = i + 1
+                spot      = float(opens[entry_idx])
+                iv_raw    = _hist_vol(closes[:i + 1])
+                iv        = iv_raw * IV_PREMIUM_FACTOR
+                T         = DTE_TARGET / 365
+
+                if spread_type == "bull_put":
+                    short_k  = spot * 0.97   # sell put 3% below spot
+                    long_k   = spot * 0.94   # buy put 6% below spot (protection)
+                    opt_type = "put"
+                else:
+                    short_k  = spot * 1.03   # sell call 3% above spot
+                    long_k   = spot * 1.06   # buy call 6% above spot (protection)
+                    opt_type = "call"
+
+                short_val = _bs_price(spot, short_k, T, RISK_FREE, iv, opt_type)
+                long_val  = _bs_price(spot, long_k,  T, RISK_FREE, iv, opt_type)
+                credit    = short_val - long_val
+
+                if credit <= 0.01:
+                    continue
+
+                spread_width = abs(short_k - long_k)
+                n_contracts  = max(1, int(NOTIONAL / (spread_width * 100)))
+                entry_credit = credit
+                entry_meta   = {
+                    "short_k":      short_k,
+                    "long_k":       long_k,
+                    "spread_width": spread_width,
+                    "n_contracts":  n_contracts,
+                    "iv":           round(iv, 4),
+                    "opt_type":     opt_type,
+                    "mtf_score":    int(row.get("MTF_Score", 0)),
+                    "rsi_entry":    float(row.get("RSI", 50)),
+                    "entry_signal": bool(row.get("Entry_Signal", 0)),
+                    "sqz_fired":    bool(row.get("SQZ_FIRED", 0)),
+                    "macd_cross":   bool(row.get("MACD_Cross_Up", 0)),
+                    "adx_entry":    float(row.get("ADX", 0)),
+                }
+                in_trade = True
+                continue
+
+        else:
+            days_held  = i - entry_idx + 1
+            dte_now    = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            spot_now   = float(closes[i])
+            iv_now     = _hist_vol(closes[:i + 1])
+
+            sv_now = _bs_price(spot_now, entry_meta["short_k"], dte_now,
+                               RISK_FREE, iv_now, entry_meta["opt_type"])
+            lv_now = _bs_price(spot_now, entry_meta["long_k"],  dte_now,
+                               RISK_FREE, iv_now, entry_meta["opt_type"])
+            cost_to_close = max(sv_now - lv_now, 0)
+
+            pnl_gross  = (entry_credit - cost_to_close) * entry_meta["n_contracts"] * 100
+            commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
+            pnl_dollar = pnl_gross - commission
+
+            # Credit spread exits
+            hit_profit = cost_to_close <= entry_credit * 0.25   # kept 75% of credit
+            hit_stop   = cost_to_close >= entry_credit * 2.0    # spread doubled against us
+            hit_max    = days_held >= MAX_HOLD_OPT
+
+            row_now = df.iloc[i]
+            if spread_type == "bull_put":
+                signal_reversed = bool(row_now.get("MACD_Cross_Down", 0)
+                                       or row_now.get("Regime", 1) == 0)
+            else:
+                signal_reversed = bool(row_now.get("MACD_Cross_Up", 0)
+                                       or row_now.get("Regime", 1) == 1)
+
+            if hit_profit or hit_stop or hit_max or signal_reversed:
+                reason = ("profit_target"   if hit_profit
+                          else "stop_loss"  if hit_stop
+                          else "signal_reversal" if signal_reversed
+                          else "max_hold")
+                ttype = "bull_put_spread" if spread_type == "bull_put" else "bear_call_spread"
+                max_risk = entry_meta["spread_width"] * entry_meta["n_contracts"] * 100
+                trades.append({
+                    "ticker":       ticker,
+                    "trade_type":   ttype,
+                    "entry_date":   str(dates[entry_idx].date()),
+                    "exit_date":    str(dates[i].date()),
+                    "entry_price":  round(entry_credit, 4),
+                    "exit_price":   round(cost_to_close, 4),
+                    "pnl_pct":      round(pnl_dollar / max_risk * 100, 3) if max_risk else 0,
+                    "pnl_dollar":   round(pnl_dollar, 2),
+                    "commission":   round(commission, 2),
+                    "days_held":    days_held,
+                    "close_reason": reason,
+                    "mtf_score":    entry_meta["mtf_score"],
+                    "sqz_fired":    entry_meta["sqz_fired"],
+                    "macd_cross":   entry_meta["macd_cross"],
+                    "rsi_entry":    round(entry_meta["rsi_entry"], 1),
+                    "adx_entry":    round(entry_meta["adx_entry"], 1),
+                    "entry_signal": entry_meta["entry_signal"],
+                    "iv_entry":     entry_meta["iv"],
+                })
+                in_trade = False
+
+    return trades
+
+
+def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
+    """
+    Simulate covered calls: sell 30 DTE call 3% OTM on top of a virtual stock long.
+    Pure premium income — collect theta decay every day the stock doesn't run too hard.
+
+    Exit: when 80% of the premium has decayed (keep most of it), or if the stock
+    blows through the strike (option doubled → stock ran, take the loss and move on),
+    or at 21-day max hold.
+    """
+    trades     = []
+    closes     = df["Close"].values
+    opens      = df["Open"].values
+    dates      = df.index.tolist()
+    n          = len(df)
+    in_trade   = False
+    entry_idx  = None
+    entry_premium = None
+    strike     = None
+    entry_meta = {}
+
+    for i in range(n - 1):
+        row = df.iloc[i]
+
+        if not in_trade:
+            if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
+                entry_idx = i + 1
+                spot      = float(opens[entry_idx])
+                iv_raw    = _hist_vol(closes[:i + 1])
+                iv        = iv_raw * IV_PREMIUM_FACTOR
+                T         = DTE_TARGET / 365
+                strike_k  = spot * 1.03   # sell 3% OTM call
+
+                prem = _bs_price(spot, strike_k, T, RISK_FREE, iv, "call")
+                if prem <= 0.01:
+                    continue
+
+                n_contracts   = max(1, int(NOTIONAL / (prem * 100)))
+                entry_premium = prem
+                strike        = strike_k
+                entry_meta    = {
+                    "n_contracts": n_contracts,
+                    "iv":          round(iv, 4),
+                    "mtf_score":   int(row.get("MTF_Score", 0)),
+                    "rsi_entry":   float(row.get("RSI", 50)),
+                    "entry_signal":bool(row.get("Entry_Signal", 0)),
+                    "sqz_fired":   bool(row.get("SQZ_FIRED", 0)),
+                    "macd_cross":  bool(row.get("MACD_Cross_Up", 0)),
+                    "adx_entry":   float(row.get("ADX", 0)),
+                }
+                in_trade = True
+                continue
+
+        else:
+            days_held       = i - entry_idx + 1
+            dte_now         = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            spot_now        = float(closes[i])
+            iv_now          = _hist_vol(closes[:i + 1])
+            current_premium = _bs_price(spot_now, strike, dte_now, RISK_FREE, iv_now, "call")
+
+            # Short call P&L: positive when option loses value (theta decay working for us)
+            pnl_gross  = (entry_premium - current_premium) * entry_meta["n_contracts"] * 100
+            commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
+            pnl_dollar = pnl_gross - commission
+
+            hit_profit = current_premium <= entry_premium * 0.20  # kept 80% of premium
+            hit_stop   = current_premium >= entry_premium * 2.0   # stock blew through strike
+            hit_max    = days_held >= MAX_HOLD_OPT
+
+            if hit_profit or hit_stop or hit_max:
+                reason = ("profit_target" if hit_profit
+                          else "stop_loss" if hit_stop
+                          else "max_hold")
+                cost_basis = entry_premium * entry_meta["n_contracts"] * 100
+                trades.append({
+                    "ticker":       ticker,
+                    "trade_type":   "covered_call",
+                    "entry_date":   str(dates[entry_idx].date()),
+                    "exit_date":    str(dates[i].date()),
+                    "entry_price":  round(entry_premium, 4),
+                    "exit_price":   round(current_premium, 4),
+                    "strike":       round(strike, 2),
+                    "pnl_pct":      round(pnl_dollar / cost_basis * 100, 3) if cost_basis else 0,
                     "pnl_dollar":   round(pnl_dollar, 2),
                     "commission":   round(commission, 2),
                     "days_held":    days_held,
@@ -299,7 +575,7 @@ def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
         if not in_trade:
             # ── Check for long entry ───────────────────────────────────────
-            if row.get("Entry_Signal", 0):
+            if row.get("Entry_Signal", 0) and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE:
                 entry_idx   = i + 1          # enter at NEXT day's open
                 entry_price = float(opens[i + 1])
                 entry_meta  = {
@@ -315,7 +591,8 @@ def _simulate_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                 continue
 
             # ── Check for short entry (bearish MACD in BEAR regime) ───────
-            if row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0:
+            if (row.get("MACD_Cross_Down", 0) and row.get("Regime", 1) == 0
+                    and int(row.get("MTF_Score", 0)) >= MTF_MIN_SCORE):
                 entry_idx   = i + 1
                 entry_price = float(opens[i + 1])
                 entry_meta  = {
@@ -844,14 +1121,20 @@ def run_backtest(
         df = _compute_signals(tkr, period)
         if df is None:
             return tkr, []
-        stk_trades  = _simulate_trades(tkr, df)
-        call_trades = _simulate_option_trades(tkr, df, "call")
-        put_trades  = _simulate_option_trades(tkr, df, "put")
-        # tag trade type for reporting
+        stk_trades        = _simulate_trades(tkr, df)
+        call_trades       = _simulate_option_trades(tkr, df, "call")
+        put_trades        = _simulate_option_trades(tkr, df, "put")
+        bull_put_trades   = _simulate_credit_spread_trades(tkr, df, "bull_put")
+        bear_call_trades  = _simulate_credit_spread_trades(tkr, df, "bear_call")
+        cov_call_trades   = _simulate_covered_call_trades(tkr, df)
+        # tag stock trade type for reporting
         for t in stk_trades:
             t.setdefault("trade_type", f"stock_{t.get('direction','long')}")
-        all_t = stk_trades + call_trades + put_trades
-        print(f"  {tkr}: {len(stk_trades)} stock  {len(call_trades)} calls  {len(put_trades)} puts")
+        all_t = (stk_trades + call_trades + put_trades
+                 + bull_put_trades + bear_call_trades + cov_call_trades)
+        print(f"  {tkr}: {len(stk_trades)} stk  {len(call_trades)} calls  "
+              f"{len(put_trades)} puts  {len(bull_put_trades)} bull_put  "
+              f"{len(bear_call_trades)} bear_call  {len(cov_call_trades)} cov_call")
         return tkr, all_t
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -915,7 +1198,8 @@ def run_backtest(
             "ending_capital":  stats.get("ending_capital", 0),
             "total_return_pct":stats.get("total_return_pct", 0),
             "ann_return_pct":  stats.get("ann_return_pct"),
-            "run_at":          datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "by_trade_type":   stats.get("by_trade_type", {}),
+            "run_at":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         })
     except Exception as _db_e:
         print(f"  [DB] Could not save backtest summary: {_db_e}")
