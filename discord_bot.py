@@ -35,6 +35,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 
 APP_DIR      = os.path.dirname(os.path.abspath(__file__))
@@ -2755,19 +2756,25 @@ _AI_CHAT_CHANNELS = {
 }
 
 
+# ── Per-channel conversation history (last 12 turns, in-memory) ──────────────
+# Keyed by channel_id → deque of {"role": "user"/"assistant", "content": str}
+_chat_history: dict = defaultdict(lambda: deque(maxlen=12))
+
+
 async def _conquest_ai_reply(message: discord.Message, question: str):
-    """Core AI response function. Calls Claude, handles chunking, posts reply."""
+    """Core AI response function. Maintains per-channel history, posts reply."""
     if not question.strip():
         return
 
-    # Inject a rich live snapshot of paper trading state into every AI reply
+    channel_id = str(message.channel.id)
+
+    # ── Build live data snapshot injected into the system context ────────────
     context_note = ""
     try:
         def _get_ctx():
             from paper_trader import get_paper_stats
             s = get_paper_stats()
-            open_t  = s.get("open_trades", [])
-            # Build per-position lines
+            open_t = s.get("open_trades", [])
             pos_lines = []
             for t in open_t:
                 pnl     = t.get("pnl", 0) or 0
@@ -2791,15 +2798,22 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
     except Exception:
         pass
 
+    # Prepend live data to this turn's user message
+    user_content = f"{context_note}\n\nUser: {question}" if context_note else question
+
+    # Add user turn to history
+    _chat_history[channel_id].append({"role": "user", "content": user_content})
+
     async with message.channel.typing():
         def _call_ai():
             from conquest_brain import _get_client
-            full_question = f"{context_note}\n\nUser question: {question}" if context_note else question
+            # Build full multi-turn messages list from history
+            messages = list(_chat_history[channel_id])
             msg = _get_client().messages.create(
                 model     = "claude-haiku-4-5",
-                max_tokens= 600,
+                max_tokens= 700,
                 system    = _AI_SYSTEM_PROMPT,
-                messages  = [{"role": "user", "content": full_question}],
+                messages  = messages,
             )
             return msg.content[0].text.strip()
 
@@ -2808,11 +2822,13 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
         except Exception as e:
             answer = f"⚠ AI unavailable right now: {str(e)[:100]}"
 
+    # Store assistant reply in history so next turn has full context
+    _chat_history[channel_id].append({"role": "assistant", "content": answer})
+
     # Discord message limit is 2000 chars — split cleanly if needed
     while answer:
         chunk = answer[:1900]
         if len(answer) > 1900:
-            # Break at last sentence boundary
             last_period = chunk.rfind(". ")
             if last_period > 800:
                 chunk = answer[:last_period + 1]
