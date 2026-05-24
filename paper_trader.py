@@ -53,6 +53,15 @@ IC_PROFIT    =  0.50   # close iron condor when 50 % of max credit earned
 IC_STOP      =  2.00   # close iron condor when position costs 2× credit (loss)
 
 
+# US market holidays where the third-Friday options expiry shifts to Thursday.
+# When June 19 (Juneteenth) or another holiday falls on a Friday, the exchange
+# is closed and expiry moves to the Thursday before. Add new dates as needed.
+_EXPIRY_HOLIDAY_SHIFTS: frozenset = frozenset([
+    date(2026, 6, 19),  # Juneteenth — Friday → expiry moves to June 18
+    date(2027, 7, 4),   # Independence Day — Sunday obs. Friday Jul 2 (check annually)
+])
+
+
 def _third_friday(year: int, month: int) -> date:
     """Third Friday of a given month — standard US options expiration date."""
     d = date(year, month, 1)
@@ -63,10 +72,9 @@ def _third_friday(year: int, month: int) -> date:
 def _options_expiry(entry: date, dte: int = DTE_TARGET) -> str:
     """
     Standard monthly options expiration closest to entry + dte days.
-    Uses the third Friday of the month — the date every broker (Robinhood,
-    Tastytrade, etc.) lists for standard options on every ticker.
-    Requires at least 21 days from entry so we don't pick an expiry that's
-    already too close to worthless at the time we enter.
+    Uses the third Friday of the month, shifted back to Thursday when that
+    Friday is a US market holiday (e.g. Juneteenth 2026 = June 19 → June 18).
+    Always prefer _live_chain() over this — use this only as a fallback.
     """
     target = entry + timedelta(days=dte)
 
@@ -76,7 +84,11 @@ def _options_expiry(entry: date, dte: int = DTE_TARGET) -> str:
         m = target.month + delta_m
         y = target.year + (m - 1) // 12
         m = ((m - 1) % 12) + 1
-        candidates.append(_third_friday(y, m))
+        friday = _third_friday(y, m)
+        # If that Friday is a market holiday, expiry moves to Thursday
+        if friday in _EXPIRY_HOLIDAY_SHIFTS:
+            friday -= timedelta(days=1)
+        candidates.append(friday)
 
     # Must be at least 21 DTE from entry (no point buying near-expiry options)
     valid = [c for c in candidates if (c - entry).days >= 21]
@@ -1446,17 +1458,6 @@ def _normalize_trade(t: dict) -> dict:
 def get_paper_stats() -> dict:
     """Return a comprehensive stats dict for the web dashboard and Discord."""
     trades  = [_normalize_trade(t) for t in load_trades()]
-
-    # Backfill expiry_date for older auto-generated trades that predate the field,
-    # and fix any raw DTE dates that landed on a weekend
-    for t in trades:
-        entry_d = t.get("date_entered", "")[:10]
-        t_days  = t.get("t_days")
-        if entry_d and t_days:
-            entry = date.fromisoformat(entry_d)
-            proper = _options_expiry(entry, t_days)
-            if "expiry_date" not in t or date.fromisoformat(t["expiry_date"]).weekday() >= 5:
-                t["expiry_date"] = proper
 
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]
