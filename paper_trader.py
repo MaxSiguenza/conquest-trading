@@ -272,6 +272,70 @@ def _assign_trade_type(scan: dict) -> str:
     return random.choice(["iron_condor", "covered_call", "bull_put_spread"])
 
 
+# ── Live options chain query ───────────────────────────────────────────────────
+
+def _live_chain(ticker: str, opt_type: str, target_strike: float,
+                entry: "date", dte_target: int = DTE_TARGET) -> dict | None:
+    """
+    Query yfinance for the real options chain and return the best matching
+    contract for our trade.  Falls back to None on any failure so callers
+    can gracefully use Black-Scholes instead.
+
+    Returns:
+        {expiry, strike, mid, bid, ask, iv, dte_actual, source="live"}
+    """
+    try:
+        import yfinance as yf
+        tk   = yf.Ticker(ticker)
+        exps = tk.options          # tuple of "YYYY-MM-DD" strings
+        if not exps:
+            return None
+
+        # Filter expirations: must be at least 14 DTE from entry
+        valid = [e for e in exps if (date.fromisoformat(e) - entry).days >= 14]
+        if not valid:
+            return None
+
+        # Pick the expiry closest to our target DTE
+        best_exp  = min(valid, key=lambda e: abs((date.fromisoformat(e) - entry).days - dte_target))
+        actual_dte = (date.fromisoformat(best_exp) - entry).days
+
+        # Pull the chain for that expiry
+        chain = tk.option_chain(best_exp)
+        df    = chain.calls if opt_type == "call" else chain.puts
+        if df is None or df.empty:
+            return None
+
+        # Prefer liquid contracts (has an ask price)
+        liquid = df[df["ask"].fillna(0) > 0]
+        pool   = liquid if not liquid.empty else df
+
+        # Find the strike nearest our target
+        idx = (pool["strike"] - target_strike).abs().idxmin()
+        row = pool.loc[idx]
+
+        bid = float(row.get("bid") or 0)
+        ask = float(row.get("ask") or 0)
+        mid = round((bid + ask) / 2, 4) if ask > 0 else 0.0
+        iv  = float(row.get("impliedVolatility") or 0)
+
+        if mid <= 0.01:   # no real market — too illiquid
+            return None
+
+        return {
+            "expiry":     best_exp,
+            "strike":     float(row["strike"]),
+            "mid":        mid,
+            "bid":        round(bid, 4),
+            "ask":        round(ask, 4),
+            "iv":         round(iv, 4),
+            "dte_actual": actual_dte,
+            "source":     "live",
+        }
+    except Exception:
+        return None
+
+
 # ── Trade builders ─────────────────────────────────────────────────────────────
 
 def _build_stock(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
@@ -305,23 +369,34 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
-    sigma  = _hv(scan["ticker"])
-    T      = DTE_TARGET / 365.0
-    step   = _strike_step(price)
 
-    if trade_type == "long_call":
-        strike   = _round_strike(price * 1.02, step)
-        opt_type = "call"
+    opt_type    = "call" if trade_type == "long_call" else "put"
+    step        = _strike_step(price)
+    target_k    = _round_strike(price * (1.02 if opt_type == "call" else 0.98), step)
+    entry_d     = date.fromisoformat(ts[:10])
+
+    # Try live options chain first — real expiry, real strike, real mid price
+    live = _live_chain(scan["ticker"], opt_type, target_k, entry_d)
+    if live:
+        strike      = live["strike"]
+        val         = live["mid"]
+        expiry_date = live["expiry"]
+        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+        t_days      = live["dte_actual"]
+        chain_src   = "live"
     else:
-        strike   = _round_strike(price * 0.98, step)
-        opt_type = "put"
+        # Fallback: Black-Scholes with standard monthly expiry
+        sigma       = _hv(scan["ticker"])
+        val         = _bs(price, target_k, DTE_TARGET / 365.0, sigma, opt_type)
+        strike      = target_k
+        expiry_date = _options_expiry(entry_d)
+        t_days      = DTE_TARGET
+        chain_src   = "synthetic"
 
-    val = _bs(price, strike, T, sigma, opt_type)
     if val <= 0.05:
         return None
 
-    cost        = round(val * 100 * OPTION_CONTRACTS, 2)
-    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
+    cost = round(val * 100 * OPTION_CONTRACTS, 2)
     return {
         "id":                  f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":        ts,
@@ -330,9 +405,10 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "status":              "open",
         "opt_type":            opt_type,
         "strike":              strike,
-        "t_days":              DTE_TARGET,
+        "t_days":              t_days,
         "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
+        "chain_source":        chain_src,
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(val, 4),
         "cost_basis":          cost,
@@ -352,10 +428,8 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
-    sigma    = _hv(scan["ticker"])
-    T        = DTE_TARGET / 365.0
-    step     = _strike_step(price)
-    width    = step * 2   # e.g. 5-wide on $200 stock, 2-wide on $60 stock
+    step  = _strike_step(price)
+    width = step * 2   # e.g. 5-wide on $200 stock, 2-wide on $60 stock
 
     if trade_type == "call_spread":
         long_k   = _round_strike(price * 1.01, step)
@@ -366,6 +440,21 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         short_k  = long_k - width
         opt_type = "put"
 
+    # Try live chain on the near-ATM long leg — gives us real expiry + real IV
+    entry_d = date.fromisoformat(ts[:10])
+    live = _live_chain(scan["ticker"], opt_type, long_k, entry_d)
+    if live:
+        expiry_date = live["expiry"]
+        t_days      = live["dte_actual"]
+        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+        chain_src   = "live"
+    else:
+        expiry_date = _options_expiry(entry_d)
+        t_days      = DTE_TARGET
+        sigma       = _hv(scan["ticker"])
+        chain_src   = "synthetic"
+
+    T         = t_days / 365.0
     long_val  = _bs(price, long_k,  T, sigma, opt_type)
     short_val = _bs(price, short_k, T, sigma, opt_type)
     debit     = round(long_val - short_val, 4)
@@ -373,9 +462,8 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     if debit <= 0.05:
         return None
 
-    max_gain    = round(width - debit, 4)
-    cost        = round(debit * 100 * OPTION_CONTRACTS, 2)
-    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
+    max_gain = round(width - debit, 4)
+    cost     = round(debit * 100 * OPTION_CONTRACTS, 2)
 
     return {
         "id":                f"{ts}_{scan['ticker']}_{trade_type}",
@@ -387,9 +475,10 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "long_strike":       long_k,
         "short_strike":      short_k,
         "spread_width":      width,
-        "t_days":            DTE_TARGET,
+        "t_days":            t_days,
         "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
+        "chain_source":      chain_src,
         "entry_stock_price": round(price, 4),
         "entry_net_debit":   debit,
         "max_gain":          max_gain,
@@ -410,10 +499,8 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
-    sigma    = _hv(scan["ticker"])
-    T        = DTE_TARGET / 365.0
-    step     = _strike_step(price)
-    width    = step * 2
+    step  = _strike_step(price)
+    width = step * 2
 
     # Short strangle ≈10 % OTM, long wings one width further out
     sc_k = _round_strike(price * 1.08, step)
@@ -421,17 +508,31 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
     sp_k = _round_strike(price * 0.92, step)
     lp_k = sp_k - width
 
+    # Use live chain on the short call leg — gets us real expiry + IV for all four legs
+    entry_d = date.fromisoformat(ts[:10])
+    live = _live_chain(scan["ticker"], "call", sc_k, entry_d)
+    if live:
+        expiry_date = live["expiry"]
+        t_days      = live["dte_actual"]
+        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+        chain_src   = "live"
+    else:
+        expiry_date = _options_expiry(entry_d)
+        t_days      = DTE_TARGET
+        sigma       = _hv(scan["ticker"])
+        chain_src   = "synthetic"
+
+    T  = t_days / 365.0
     sc = _bs(price, sc_k, T, sigma, "call")
     lc = _bs(price, lc_k, T, sigma, "call")
     sp = _bs(price, sp_k, T, sigma, "put")
     lp = _bs(price, lp_k, T, sigma, "put")
 
-    credit      = round((sc - lc) + (sp - lp), 4)
+    credit = round((sc - lc) + (sp - lp), 4)
     if credit <= 0.05:
         return None
 
-    max_loss    = round(width - credit, 4)
-    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
+    max_loss = round(width - credit, 4)
 
     return {
         "id":                f"{ts}_{scan['ticker']}_iron_condor",
@@ -444,9 +545,10 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         "short_put_k":       sp_k,
         "long_put_k":        lp_k,
         "spread_width":      width,
-        "t_days":            DTE_TARGET,
+        "t_days":            t_days,
         "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
+        "chain_source":      chain_src,
         "entry_stock_price": round(price, 4),
         "entry_net_credit":  credit,
         "max_gain":          credit,
@@ -474,9 +576,7 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
     price = scan.get("price", 0)
     if not price:
         return None
-    sigma    = _hv(scan["ticker"])
-    T        = DTE_TARGET / 365.0
-    step     = _strike_step(price)
+    step = _strike_step(price)
 
     if trade_type == "bull_put_spread":
         short_k  = _round_strike(price * 0.97, step)   # sell 3% OTM put
@@ -487,6 +587,21 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         long_k   = _round_strike(price * 1.06, step)   # buy 6% OTM call (cap upside loss)
         opt_type = "call"
 
+    # Use live chain on the short leg — we're selling that one, so its pricing matters most
+    entry_d = date.fromisoformat(ts[:10])
+    live = _live_chain(scan["ticker"], opt_type, short_k, entry_d)
+    if live:
+        expiry_date = live["expiry"]
+        t_days      = live["dte_actual"]
+        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+        chain_src   = "live"
+    else:
+        expiry_date = _options_expiry(entry_d)
+        t_days      = DTE_TARGET
+        sigma       = _hv(scan["ticker"])
+        chain_src   = "synthetic"
+
+    T         = t_days / 365.0
     short_val = _bs(price, short_k, T, sigma, opt_type)
     long_val  = _bs(price, long_k,  T, sigma, opt_type)
     credit    = round(short_val - long_val, 4)
@@ -496,7 +611,6 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
 
     spread_width = round(abs(short_k - long_k), 2)
     max_loss     = round(spread_width - credit, 4)
-    expiry_date  = (date.fromisoformat(ts[:10]) + timedelta(days=DTE_TARGET)).isoformat()
 
     return {
         "id":                 f"{ts}_{scan['ticker']}_{trade_type}",
@@ -508,9 +622,10 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         "short_strike":       short_k,
         "long_strike":        long_k,
         "spread_width":       spread_width,
-        "t_days":             DTE_TARGET,
+        "t_days":             t_days,
         "expiry_date":        expiry_date,
         "sigma":              round(sigma, 4),
+        "chain_source":       chain_src,
         "entry_stock_price":  round(price, 4),
         "entry_net_credit":   credit,
         "max_gain":           credit,
@@ -536,16 +651,28 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
-    sigma   = _hv(scan["ticker"])
-    T       = DTE_TARGET / 365.0
-    step    = _strike_step(price)
-    strike  = _round_strike(price * 1.03, step)   # 3% OTM
+    step         = _strike_step(price)
+    target_k     = _round_strike(price * 1.03, step)   # 3% OTM
+    entry_d      = date.fromisoformat(ts[:10])
 
-    premium     = _bs(price, strike, T, sigma, "call")
+    live = _live_chain(scan["ticker"], "call", target_k, entry_d)
+    if live:
+        strike      = live["strike"]
+        premium     = live["mid"]
+        expiry_date = live["expiry"]
+        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+        t_days      = live["dte_actual"]
+        chain_src   = "live"
+    else:
+        sigma       = _hv(scan["ticker"])
+        premium     = _bs(price, target_k, DTE_TARGET / 365.0, sigma, "call")
+        strike      = target_k
+        expiry_date = _options_expiry(entry_d)
+        t_days      = DTE_TARGET
+        chain_src   = "synthetic"
+
     if premium <= 0.05:
         return None
-
-    expiry_date = _options_expiry(date.fromisoformat(ts[:10]))
 
     return {
         "id":                  f"{ts}_{scan['ticker']}_covered_call",
@@ -555,9 +682,10 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
         "status":              "open",
         "opt_type":            "call",
         "strike":              strike,
-        "t_days":              DTE_TARGET,
+        "t_days":              t_days,
         "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
+        "chain_source":        chain_src,
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(premium, 4),
         "premium_collected":   round(premium * 100 * OPTION_CONTRACTS, 2),
