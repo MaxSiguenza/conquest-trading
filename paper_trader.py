@@ -1463,7 +1463,7 @@ def get_paper_stats() -> dict:
     # Only fills MISSING values — never overwrites a live chain date already present.
     # Uses the fixed _options_expiry() which handles market holidays (e.g. Juneteenth).
     for t in trades:
-        if "expiry_date" not in t and t.get("t_days") and t.get("date_entered"):
+        if not t.get("expiry_date") and t.get("t_days") and t.get("date_entered"):
             try:
                 entry = date.fromisoformat(t["date_entered"][:10])
                 t["expiry_date"] = _options_expiry(entry, t["t_days"])
