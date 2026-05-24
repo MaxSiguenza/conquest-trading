@@ -206,16 +206,19 @@ canvas { width: 100% !important; }
 
   <div class="stat-tile">
     <div class="label">Total P&amp;L</div>
-    {% if stats.total_pnl is defined %}
-      <div class="value {% if stats.total_pnl >= 0 %}green{% else %}red{% endif %}">
-        ${{ "%.2f" | format(stats.total_pnl) }}
-      </div>
-      <div style="font-size:11px;color:#64748b;margin-top:4px;">
+    {% set combined = (stats.total_pnl or 0) + (stats.open_pnl or 0) %}
+    <div class="value {% if combined >= 0 %}green{% else %}red{% endif %}">
+      ${{ "%.2f" | format(combined) }}
+    </div>
+    <div style="font-size:11px;color:#64748b;margin-top:4px;">
+      {% if stats.open_pnl %}
+        <span style="color:{% if stats.open_pnl >= 0 %}#4ade80{% else %}#f87171{% endif %}">
+          open ${{ "%.2f"|format(stats.open_pnl) }}</span>
+        {% if stats.total_pnl %} · closed ${{ "%.2f"|format(stats.total_pnl) }}{% endif %}
+      {% elif stats.total_pnl %}
         avg ${{ "%.2f" | format(stats.avg_pnl) }}/trade
-      </div>
-    {% else %}
-      <div class="value" style="color:#475569">—</div>
-    {% endif %}
+      {% else %}—{% endif %}
+    </div>
   </div>
 
   <div class="stat-tile">

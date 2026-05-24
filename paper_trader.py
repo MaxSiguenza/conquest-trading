@@ -1480,8 +1480,11 @@ def get_paper_stats() -> dict:
         "closed_trades": sorted(closed, key=lambda t: t.get("date_closed") or "", reverse=True),
     }
 
+    open_pnl = round(sum(t.get("pnl", 0) for t in open_), 2)
+
     if not closed:
         return {**base,
+                "open_pnl": open_pnl,
                 "win_rate": 0, "total_pnl": 0, "avg_pnl": 0,
                 "avg_hold": 0, "best_trade": None, "worst_trade": None,
                 "by_type": {}, "by_ticker": {},
@@ -1566,6 +1569,7 @@ def get_paper_stats() -> dict:
 
     return {
         **base,
+        "open_pnl":      open_pnl,
         "win_rate":      round(len(wins) / len(closed), 3),
         "total_pnl":     total_pnl,
         "avg_pnl":       avg_pnl,
