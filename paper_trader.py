@@ -1459,6 +1459,17 @@ def get_paper_stats() -> dict:
     """Return a comprehensive stats dict for the web dashboard and Discord."""
     trades  = [_normalize_trade(t) for t in load_trades()]
 
+    # Fill in expiry_date for trades that don't have it stored.
+    # Only fills MISSING values — never overwrites a live chain date already present.
+    # Uses the fixed _options_expiry() which handles market holidays (e.g. Juneteenth).
+    for t in trades:
+        if "expiry_date" not in t and t.get("t_days") and t.get("date_entered"):
+            try:
+                entry = date.fromisoformat(t["date_entered"][:10])
+                t["expiry_date"] = _options_expiry(entry, t["t_days"])
+            except Exception:
+                pass
+
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]
 

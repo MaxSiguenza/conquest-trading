@@ -226,7 +226,9 @@ def check_intraday_stops() -> list:
         ET  = pytz.timezone("America/New_York")
         now = datetime.now(ET)
 
-        # Only run during market hours (9:30 AM – 4:00 PM ET)
+        # Only run on weekdays during market hours (9:30 AM – 4:00 PM ET)
+        if now.weekday() >= 5:
+            return []
         if not (9 * 60 + 30 <= now.hour * 60 + now.minute <= 16 * 60):
             return []
 
