@@ -1956,10 +1956,22 @@ def get_paper_stats() -> dict:
             except Exception:
                 pass
 
-    # Refresh open marks for display. This does not close trades or change
-    # strategy state; it just makes the dashboard use current live option mids
-    # when available instead of stale model marks.
+    # Repair legacy option entries in the same process that renders Railway's
+    # dashboard. This lets Railway fix its own DB rows instead of depending on
+    # a local one-off CLI repair against a possibly different DATABASE_URL.
+    changed = False
+    for i, t in enumerate(trades):
+        if t.get("status") == "open" and t.get("trade_type") in OPT_TYPES:
+            repaired, ok = _repair_option_entry_from_history(t)
+            if ok:
+                trades[i] = repaired
+                changed = True
+
+    # Refresh open marks for display. This does not close trades; it makes the
+    # dashboard use current live option mids when available.
     trades = [mark_trade(t) if t.get("status") == "open" else t for t in trades]
+    if changed:
+        save_trades(trades)
 
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]
