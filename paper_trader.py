@@ -37,6 +37,10 @@ RISK_FREE        = 0.05    # 5 % annualised
 DTE_TARGET       = 30      # days to expiry at entry
 MAX_HOLD_STK     = 5       # stocks: close after 5 calendar days regardless
 MAX_HOLD_OPT     = 21      # options: close after 21 days (bought at 30 DTE, near expiry)
+MAX_OPEN_POSITIONS = 20
+MAX_TRADE_RISK_USD = 1_000
+MAX_STOCK_NOTIONAL_USD = 1_500
+MAX_OPTION_BA_SPREAD_PCT = 0.35
 
 # ── Stock exit thresholds (fixed — signal confirmed these work) ────────────────
 STK_PROFIT   =  0.05   # close stock  when up   5 %
@@ -503,6 +507,78 @@ def _set_option_risk(t: dict) -> dict:
         t["max_gain"] = None
         t["risk_defined"] = False
     return t
+
+
+def _quote_spread_pct(bid: float | None, ask: float | None, mid: float | None) -> float | None:
+    try:
+        bid_f = float(bid or 0)
+        ask_f = float(ask or 0)
+        mid_f = float(mid or 0)
+        if bid_f <= 0 or ask_f <= 0 or mid_f <= 0:
+            return None
+        return round((ask_f - bid_f) / mid_f, 4)
+    except Exception:
+        return None
+
+
+def _entry_quote_pairs(t: dict) -> list[tuple[str, float | None, float | None, float | None]]:
+    pairs = []
+    if t.get("entry_bid") is not None or t.get("entry_ask") is not None:
+        pairs.append(("option", t.get("entry_bid"), t.get("entry_ask"), t.get("entry_mid")))
+    for prefix in ("long", "short", "short_call", "long_call", "short_put", "long_put"):
+        if t.get(f"{prefix}_entry_bid") is not None or t.get(f"{prefix}_entry_ask") is not None:
+            pairs.append((
+                prefix,
+                t.get(f"{prefix}_entry_bid"),
+                t.get(f"{prefix}_entry_ask"),
+                t.get(f"{prefix}_entry_mid"),
+            ))
+    return pairs
+
+
+def _pretrade_risk_check(t: dict, existing_trades: list, batch: list | None = None) -> tuple[bool, list[str]]:
+    """Hard autonomous gate. AI can suggest; this code can veto."""
+    batch = batch or []
+    reasons = []
+    open_existing = [x for x in existing_trades if x.get("status") == "open"]
+    open_batch = [x for x in batch if x.get("status") == "open"]
+    ticker = t.get("ticker")
+    tt = t.get("trade_type", "")
+
+    if len(open_existing) + len(open_batch) >= MAX_OPEN_POSITIONS:
+        reasons.append("portfolio_position_limit")
+    if ticker and any(x.get("ticker") == ticker for x in open_existing + open_batch):
+        reasons.append("ticker_already_open")
+
+    if tt in ("stock_long", "stock_short"):
+        if float(t.get("cost_basis", 0) or 0) > MAX_STOCK_NOTIONAL_USD:
+            reasons.append("stock_notional_too_large")
+    elif tt in OPT_TYPES:
+        _set_option_risk(t)
+        if t.get("chain_source") != "live":
+            reasons.append("entry_not_live_chain")
+        if not t.get("risk_defined"):
+            reasons.append("risk_not_defined")
+        if float(t.get("max_loss", 0) or 0) <= 0:
+            reasons.append("missing_max_loss")
+        if float(t.get("max_loss", 0) or 0) > MAX_TRADE_RISK_USD:
+            reasons.append("trade_risk_too_large")
+        if tt in ("iron_condor", "bull_put_spread", "bear_call_spread") and float(t.get("entry_net_credit", 0) or 0) <= 0:
+            reasons.append("non_positive_credit")
+        if tt in ("call_spread", "put_spread") and float(t.get("entry_net_debit", 0) or 0) <= 0:
+            reasons.append("non_positive_debit")
+        for name, bid, ask, mid in _entry_quote_pairs(t):
+            spread_pct = _quote_spread_pct(bid, ask, mid)
+            if spread_pct is None:
+                reasons.append(f"{name}_missing_bid_ask")
+            elif spread_pct > MAX_OPTION_BA_SPREAD_PCT:
+                reasons.append(f"{name}_wide_bid_ask")
+    else:
+        reasons.append("unknown_trade_type")
+
+    t["risk_approved"] = not reasons
+    t["risk_reasons"] = reasons
+    return not reasons, reasons
 
 
 def _historical_contract_price(contract_symbol: str, entry_date: date) -> tuple[float | None, str | None]:
@@ -1086,6 +1162,20 @@ def _build_trade(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     return None
 
 
+def _apply_pretrade_risk_gate(new_trades: list, existing_trades: list) -> list:
+    approved = []
+    rejected = []
+    for t in new_trades:
+        ok, reasons = _pretrade_risk_check(t, existing_trades, approved)
+        if ok:
+            approved.append(t)
+        else:
+            rejected.append((t.get("ticker"), t.get("trade_type"), reasons))
+    if rejected:
+        print(f"[RiskGate] Rejected {len(rejected)} trade(s): {rejected[:8]}")
+    return approved
+
+
 # ── Mark-to-market ─────────────────────────────────────────────────────────────
 
 def _days_since(date_str: str) -> int:
@@ -1639,6 +1729,12 @@ def generate_daily_trades(n: int = 10) -> list:
 
         # Merge fallback scans into master list for reasoning generation
         scans.extend(fallback_scans)
+
+    if new_trades:
+        before_gate = len(new_trades)
+        new_trades = _apply_pretrade_risk_gate(new_trades, all_trades)
+        if len(new_trades) != before_gate:
+            print(f"[RiskGate] Approved {len(new_trades)}/{before_gate} generated trade(s).")
 
     # ── Generate entry reasoning for every new trade ──────────────────────────
     if new_trades:
