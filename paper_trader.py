@@ -349,6 +349,82 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
 
 # ── Trade builders ─────────────────────────────────────────────────────────────
 
+def _trade_expiry(t: dict) -> str:
+    """Best known expiry for an existing trade."""
+    exp = (t.get("expiry_date") or t.get("expiry") or "")[:10]
+    if exp:
+        return exp
+    if t.get("date_entered") and t.get("t_days"):
+        try:
+            entry = date.fromisoformat(t["date_entered"][:10])
+            return _options_expiry(entry, int(t["t_days"]))
+        except Exception:
+            return ""
+    return ""
+
+
+def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
+                    strike: float) -> tuple[dict | None, str | None]:
+    """
+    Return an exact live quote for one option leg.
+    Existing paper positions must map to real listed contracts; this helper
+    never silently substitutes a nearby strike.
+    """
+    if not expiry:
+        return None, "missing_expiry"
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+        if expiry not in tk.options:
+            return None, "expiry_not_listed"
+        chain = tk.option_chain(expiry)
+        df = chain.calls if opt_type == "call" else chain.puts
+        if df is None or df.empty:
+            return None, "empty_chain"
+        row = df[df["strike"].astype(float) == float(strike)]
+        if row.empty:
+            return None, "strike_not_listed"
+        row = row.iloc[0]
+        bid = float(row.get("bid") or 0)
+        ask = float(row.get("ask") or 0)
+        last = float(row.get("lastPrice") or 0)
+        iv = float(row.get("impliedVolatility") or 0)
+        if bid > 0 and ask > 0:
+            mid = round((bid + ask) / 2, 4)
+        elif last > 0:
+            mid = round(last, 4)
+        elif ask > 0:
+            mid = round(ask, 4)
+        else:
+            return None, "no_usable_quote"
+        return {
+            "bid": round(bid, 4),
+            "ask": round(ask, 4),
+            "mid": mid,
+            "last": round(last, 4),
+            "iv": round(iv, 4),
+        }, None
+    except Exception as e:
+        return None, f"chain_error:{e}"
+
+
+def _mark_invalid(t: dict, reason: str) -> dict:
+    """Flag a trade whose exact listed contract cannot be found."""
+    t.setdefault("chain_source", "legacy")
+    t["mark_source"] = "invalid"
+    t["mark_error"] = reason
+    return t
+
+
+def _mark_synthetic(t: dict, reason: str) -> dict:
+    """Record that the current mark had to fall back to model pricing."""
+    t["mark_source"] = "synthetic"
+    t["mark_error"] = reason
+    if not t.get("chain_source"):
+        t["chain_source"] = "legacy"
+    return t
+
+
 def _build_stock(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
@@ -764,7 +840,24 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
         elif tt in ("long_call", "long_put"):
             T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
-            cur   = _bs(price, t["strike"], T_rem, t["sigma"], t["opt_type"])
+            expiry = _trade_expiry(t)
+            quote, qerr = _live_leg_quote(t["ticker"], expiry, t["opt_type"], t["strike"])
+            if quote:
+                cur = quote["mid"]
+                t.setdefault("chain_source", "legacy")
+                t["mark_source"] = "live"
+                t["mark_error"] = None
+                t["expiry_date"] = expiry
+                t["option_bid"] = quote["bid"]
+                t["option_ask"] = quote["ask"]
+                t["option_last"] = quote["last"]
+                if quote["iv"] > 0:
+                    t["sigma"] = quote["iv"]
+            elif qerr in ("strike_not_listed", "expiry_not_listed"):
+                return _mark_invalid(t, qerr)
+            else:
+                cur = _bs(price, t["strike"], T_rem, t["sigma"], t["opt_type"])
+                _mark_synthetic(t, qerr or "live_quote_unavailable")
             t["current_option_price"] = round(cur, 4)
             raw  = (cur - t["entry_option_price"]) * 100 * t["contracts"]
             t["pnl"]     = round(raw, 2)
@@ -784,8 +877,29 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
         elif tt in ("call_spread", "put_spread"):
             T_rem  = max((t["t_days"] - days_held) / 365.0, 0.001)
-            lv     = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
-            sv     = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+            expiry = _trade_expiry(t)
+            lq, lerr = _live_leg_quote(t["ticker"], expiry, t["opt_type"], t["long_strike"])
+            sq, serr = _live_leg_quote(t["ticker"], expiry, t["opt_type"], t["short_strike"])
+            if lq and sq:
+                lv = lq["mid"]
+                sv = sq["mid"]
+                t.setdefault("chain_source", "legacy")
+                t["mark_source"] = "live"
+                t["mark_error"] = None
+                t["expiry_date"] = expiry
+                t["long_bid"] = lq["bid"]
+                t["long_ask"] = lq["ask"]
+                t["short_bid"] = sq["bid"]
+                t["short_ask"] = sq["ask"]
+                ivs = [q["iv"] for q in (lq, sq) if q["iv"] > 0]
+                if ivs:
+                    t["sigma"] = round(sum(ivs) / len(ivs), 4)
+            elif lerr in ("strike_not_listed", "expiry_not_listed") or serr in ("strike_not_listed", "expiry_not_listed"):
+                return _mark_invalid(t, f"long:{lerr};short:{serr}")
+            else:
+                lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+                sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+                _mark_synthetic(t, f"long:{lerr};short:{serr}")
             net    = lv - sv
             t["current_net_value"] = round(net, 4)
             raw  = (net - t["entry_net_debit"]) * 100 * t["contracts"]
@@ -801,10 +915,32 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
         elif tt == "iron_condor":
             T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
-            sc = _bs(price, t["short_call_k"], T_rem, t["sigma"], "call")
-            lc = _bs(price, t["long_call_k"],  T_rem, t["sigma"], "call")
-            sp = _bs(price, t["short_put_k"],  T_rem, t["sigma"], "put")
-            lp = _bs(price, t["long_put_k"],   T_rem, t["sigma"], "put")
+            expiry = _trade_expiry(t)
+            scq, scerr = _live_leg_quote(t["ticker"], expiry, "call", t["short_call_k"])
+            lcq, lcerr = _live_leg_quote(t["ticker"], expiry, "call", t["long_call_k"])
+            spq, sperr = _live_leg_quote(t["ticker"], expiry, "put",  t["short_put_k"])
+            lpq, lperr = _live_leg_quote(t["ticker"], expiry, "put",  t["long_put_k"])
+            if scq and lcq and spq and lpq:
+                sc, lc, sp, lp = scq["mid"], lcq["mid"], spq["mid"], lpq["mid"]
+                t.setdefault("chain_source", "legacy")
+                t["mark_source"] = "live"
+                t["mark_error"] = None
+                t["expiry_date"] = expiry
+                t["short_call_bid"], t["short_call_ask"] = scq["bid"], scq["ask"]
+                t["long_call_bid"],  t["long_call_ask"]  = lcq["bid"], lcq["ask"]
+                t["short_put_bid"],  t["short_put_ask"]  = spq["bid"], spq["ask"]
+                t["long_put_bid"],   t["long_put_ask"]   = lpq["bid"], lpq["ask"]
+                ivs = [q["iv"] for q in (scq, lcq, spq, lpq) if q["iv"] > 0]
+                if ivs:
+                    t["sigma"] = round(sum(ivs) / len(ivs), 4)
+            elif any(e in ("strike_not_listed", "expiry_not_listed") for e in (scerr, lcerr, sperr, lperr)):
+                return _mark_invalid(t, f"sc:{scerr};lc:{lcerr};sp:{sperr};lp:{lperr}")
+            else:
+                sc = _bs(price, t["short_call_k"], T_rem, t["sigma"], "call")
+                lc = _bs(price, t["long_call_k"],  T_rem, t["sigma"], "call")
+                sp = _bs(price, t["short_put_k"],  T_rem, t["sigma"], "put")
+                lp = _bs(price, t["long_put_k"],   T_rem, t["sigma"], "put")
+                _mark_synthetic(t, f"sc:{scerr};lc:{lcerr};sp:{sperr};lp:{lperr}")
             cur_net = (sc - lc) + (sp - lp)
             t["current_net_value"] = round(cur_net, 4)
             raw  = (t["entry_net_credit"] - cur_net) * 100 * t["contracts"]
@@ -826,8 +962,26 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
         elif tt in ("bull_put_spread", "bear_call_spread"):
             T_rem    = max((t["t_days"] - days_held) / 365.0, 0.001)
-            sv       = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
-            lv       = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+            expiry = _trade_expiry(t)
+            sq, serr = _live_leg_quote(t["ticker"], expiry, t["opt_type"], t["short_strike"])
+            lq, lerr = _live_leg_quote(t["ticker"], expiry, t["opt_type"], t["long_strike"])
+            if sq and lq:
+                sv, lv = sq["mid"], lq["mid"]
+                t.setdefault("chain_source", "legacy")
+                t["mark_source"] = "live"
+                t["mark_error"] = None
+                t["expiry_date"] = expiry
+                t["short_bid"], t["short_ask"] = sq["bid"], sq["ask"]
+                t["long_bid"],  t["long_ask"]  = lq["bid"], lq["ask"]
+                ivs = [q["iv"] for q in (sq, lq) if q["iv"] > 0]
+                if ivs:
+                    t["sigma"] = round(sum(ivs) / len(ivs), 4)
+            elif lerr in ("strike_not_listed", "expiry_not_listed") or serr in ("strike_not_listed", "expiry_not_listed"):
+                return _mark_invalid(t, f"short:{serr};long:{lerr}")
+            else:
+                sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+                lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+                _mark_synthetic(t, f"short:{serr};long:{lerr}")
             cost_now = max(sv - lv, 0)
             t["current_cost_to_close"] = round(cost_now, 4)
             credit = t.get("entry_net_credit", 0)
@@ -848,7 +1002,24 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
 
         elif tt == "covered_call":
             T_rem = max((t["t_days"] - days_held) / 365.0, 0.001)
-            cur   = _bs(price, t["strike"], T_rem, t["sigma"], "call")
+            expiry = _trade_expiry(t)
+            quote, qerr = _live_leg_quote(t["ticker"], expiry, "call", t["strike"])
+            if quote:
+                cur = quote["mid"]
+                t.setdefault("chain_source", "legacy")
+                t["mark_source"] = "live"
+                t["mark_error"] = None
+                t["expiry_date"] = expiry
+                t["option_bid"] = quote["bid"]
+                t["option_ask"] = quote["ask"]
+                t["option_last"] = quote["last"]
+                if quote["iv"] > 0:
+                    t["sigma"] = quote["iv"]
+            elif qerr in ("strike_not_listed", "expiry_not_listed"):
+                return _mark_invalid(t, qerr)
+            else:
+                cur = _bs(price, t["strike"], T_rem, t["sigma"], "call")
+                _mark_synthetic(t, qerr or "live_quote_unavailable")
             t["current_option_price"] = round(cur, 4)
             entry_prem = t.get("entry_option_price", 0)
             raw  = (entry_prem - cur) * 100 * t["contracts"]
@@ -1468,6 +1639,11 @@ def get_paper_stats() -> dict:
                 t["expiry_date"] = _options_expiry(entry, t["t_days"])
             except Exception:
                 pass
+
+    # Refresh open marks for display. This does not close trades or change
+    # strategy state; it just makes the dashboard use current live option mids
+    # when available instead of stale model marks.
+    trades = [mark_trade(t) if t.get("status") == "open" else t for t in trades]
 
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]

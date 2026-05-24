@@ -98,6 +98,7 @@ tr:hover td { background: #1e2235; }
 }
 .pricing-live { background: #123524; color: #4ade80; }
 .pricing-synthetic { background: #3a2c12; color: #fbbf24; }
+.pricing-invalid { background: #451a1a; color: #f87171; }
 .pricing-legacy { background: #2d3148; color: #94a3b8; }
 .pricing-meta {
   margin-top: 4px;
@@ -430,11 +431,13 @@ canvas { width: 100% !important; }
               <div class="pricing-meta">mark ${{ "%.2f"|format(t.current_price) }}</div>
             {%- endif -%}
           {%- else -%}
-            {%- set src = t.get('chain_source') -%}
+            {%- set src = t.get('mark_source') or t.get('chain_source') -%}
             {%- if src == 'live' -%}
               <span class="pricing-badge pricing-live">LIVE</span>
             {%- elif src == 'synthetic' -%}
               <span class="pricing-badge pricing-synthetic">SYNTH</span>
+            {%- elif src == 'invalid' -%}
+              <span class="pricing-badge pricing-invalid">INVALID</span>
             {%- else -%}
               <span class="pricing-badge pricing-legacy">LEGACY</span>
             {%- endif -%}
@@ -447,6 +450,7 @@ canvas { width: 100% !important; }
               {%- elif t.get('current_cost_to_close') is not none -%}
                 · close ${{ "%.2f"|format(t.current_cost_to_close) }}
               {%- endif -%}
+              {%- if t.get('mark_error') %}<br>{{ t.mark_error }}{%- endif -%}
             </div>
           {%- endif -%}
         </td>
@@ -531,11 +535,13 @@ canvas { width: 100% !important; }
               <div class="pricing-meta">mark ${{ "%.2f"|format(t.current_price) }}</div>
             {%- endif -%}
           {%- else -%}
-            {%- set src = t.get('chain_source') -%}
+            {%- set src = t.get('mark_source') or t.get('chain_source') -%}
             {%- if src == 'live' -%}
               <span class="pricing-badge pricing-live">LIVE</span>
             {%- elif src == 'synthetic' -%}
               <span class="pricing-badge pricing-synthetic">SYNTH</span>
+            {%- elif src == 'invalid' -%}
+              <span class="pricing-badge pricing-invalid">INVALID</span>
             {%- else -%}
               <span class="pricing-badge pricing-legacy">LEGACY</span>
             {%- endif -%}
@@ -548,6 +554,7 @@ canvas { width: 100% !important; }
               {%- elif t.get('current_cost_to_close') is not none -%}
                 · close ${{ "%.2f"|format(t.current_cost_to_close) }}
               {%- endif -%}
+              {%- if t.get('mark_error') %}<br>{{ t.mark_error }}{%- endif -%}
             </div>
           {%- endif -%}
         </td>
