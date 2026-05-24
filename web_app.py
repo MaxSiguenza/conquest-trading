@@ -20,8 +20,6 @@ from flask import Flask, render_template, request, redirect, url_for
 
 app = Flask(__name__)
 
-SETTINGS_FILE = os.path.join(APP_DIR, "alerts_settings.json")
-
 # ── One-time migration: seed PostgreSQL from local JSON files on first deploy ─
 try:
     from db import migrate_files_to_db, db_available

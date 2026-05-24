@@ -11,8 +11,7 @@ Storage: watchlist.json  (excluded from git via .gitignore)
 import os, sys, json, time
 from datetime import datetime, timezone, date as _date
 
-APP_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(APP_DIR, "watchlist.json")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 

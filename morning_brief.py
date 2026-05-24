@@ -19,8 +19,7 @@ import sys
 import json
 from datetime import datetime, timezone, date as _date
 
-APP_DIR    = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(APP_DIR, "morning_brief.json")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 

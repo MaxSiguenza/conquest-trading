@@ -38,9 +38,8 @@ import sys
 from collections import defaultdict, deque
 from datetime import datetime, timezone, date as _date, timedelta
 
-APP_DIR      = os.path.dirname(os.path.abspath(__file__))
-SETTINGS_FILE = os.path.join(APP_DIR, "alerts_settings.json")
-ENV_FILE      = os.path.join(APP_DIR, ".env")
+APP_DIR  = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(APP_DIR, ".env")
 sys.path.insert(0, APP_DIR)
 
 # Discord embed colours
