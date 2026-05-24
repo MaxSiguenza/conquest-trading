@@ -1109,7 +1109,8 @@ class ConquestAgentSystem:
             if type_counts.get(trade_type, 0) >= 3:
                 alts = [tt for tt in [
                     "call_spread","put_spread","long_call","long_put",
-                    "iron_condor","stock_long","stock_short"
+                    "iron_condor","stock_long","stock_short",
+                    "bull_put_spread","covered_call",
                 ] if type_counts.get(tt, 0) < 3]
                 if not alts:
                     break
@@ -1162,12 +1163,31 @@ class ConquestAgentSystem:
 
     # ── Learning: update weights after trade closes ───────────────────────────
 
+    # Trade type → required market direction for the trade to profit
+    # This determines which agent signals were "correct" after a close.
+    _TRADE_DIRECTION = {
+        "stock_long":      "BUY",   # needs price up
+        "long_call":       "BUY",
+        "call_spread":     "BUY",
+        "covered_call":    "BUY",   # profits when stock stays flat/up above cost basis
+        "bull_put_spread": "BUY",   # profits when stock stays above short put strike
+        "stock_short":     "SELL",  # needs price down
+        "long_put":        "SELL",
+        "put_spread":      "SELL",
+        "bear_call_spread":"SELL",
+        # iron_condor profits from STILLNESS — neither BUY nor SELL is correct,
+        # so we skip learning on these to avoid corrupting directional weights
+    }
+
     def update_weights_from_trade(self, trade: dict):
         """
         Called when a trade closes. Reward agents that correctly predicted
         the outcome, penalize agents that were wrong.
-        Win  → agents who said BUY (for a BUY trade that won) gain weight
+
+        Win  → agents whose signal matched the trade direction gain weight
         Loss → those same agents lose weight
+        Iron condors are skipped — they profit from low volatility, not direction,
+        and mapping them to BUY/SELL would corrupt directional agent weights.
         """
         try:
             from db import kv_get
@@ -1176,8 +1196,11 @@ class ConquestAgentSystem:
             if not entry:
                 return
 
-            trade_direction = "BUY" if trade["trade_type"] in (
-                "stock_long","call_spread","long_call") else "SELL"
+            trade_direction = self._TRADE_DIRECTION.get(trade["trade_type"])
+            if trade_direction is None:
+                # iron_condor or unknown type — skip learning for this trade
+                return
+
             won = trade.get("pnl", 0) > 0
 
             for agent_name, vote_data in entry["votes"].items():
@@ -1192,7 +1215,8 @@ class ConquestAgentSystem:
 
             self._save_weights()
             print(f"[AgentSystem] Weights updated from {trade['ticker']} "
-                  f"{'WIN' if won else 'LOSS'}. Weights: {self.weights}")
+                  f"({trade['trade_type']}) {'WIN' if won else 'LOSS'}. "
+                  f"Weights: {self.weights}")
 
         except Exception as e:
             print(f"[AgentSystem] Weight update failed: {e}")

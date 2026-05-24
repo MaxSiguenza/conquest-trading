@@ -1079,6 +1079,9 @@ def generate_daily_trades(n: int = 10) -> list:
         print(f"[PaperTrader] Pre-screener unavailable ({_ps_err}), using base universe.")
         scan_universe = PAPER_UNIVERSE
 
+    # scans always defined — used later by reasoning generation regardless of which path ran
+    scans: list = []
+
     # ── Primary path: ConquestAgentSystem (6-agent swarm) ─────────────────────
     try:
         from conquest_agents import get_agent_system
@@ -1090,6 +1093,15 @@ def generate_daily_trades(n: int = 10) -> list:
         for t in new_trades:
             type_counts[t["trade_type"]] = type_counts.get(t["trade_type"], 0) + 1
             used_tickers.add(t["ticker"])
+            # Build a minimal scan record so reasoning generation has context
+            # for agent trades (full scan lives inside TickerData, not on the trade dict)
+            scans.append({
+                "ticker":    t["ticker"],
+                "price":     t.get("entry_stock_price", 0),
+                "mtf_score": t.get("mtf_score", 0),
+                "rsi":       t.get("rsi_entry", 50),
+                "adx":       t.get("adx_entry", 0),
+            })
         print(f"[PaperTrader] Agent system produced {len(new_trades)} high-conviction trades.")
     except Exception as e:
         print(f"[PaperTrader] Agent system unavailable ({e}), using signal scanner.")
@@ -1101,23 +1113,23 @@ def generate_daily_trades(n: int = 10) -> list:
         print(f"[PaperTrader] Filling {remaining_needed} slot(s) via signal scanner …")
         from alerts.scanner import scan_ticker
 
-        scans = []
+        fallback_scans = []
         with ThreadPoolExecutor(max_workers=8) as pool:
             futs = {pool.submit(scan_ticker, t): t
                     for t in scan_universe if t not in used_tickers}
             for fut in as_completed(futs):
                 r = fut.result()
                 if not r.get("error") and (r.get("price") or 0) > 0:
-                    scans.append(r)
+                    fallback_scans.append(r)
 
-        scans.sort(key=lambda s: (
+        fallback_scans.sort(key=lambda s: (
             -int(s.get("sqz_fired",    False)),
             -int(s.get("entry_signal", False)),
             -s.get("mtf_score", 0),
         ))
 
         # First pass: top-signal tickers
-        for scan in scans:
+        for scan in fallback_scans:
             if len(new_trades) >= n:
                 break
             if scan["ticker"] in used_tickers:
@@ -1142,7 +1154,7 @@ def generate_daily_trades(n: int = 10) -> list:
 
         # Second pass: iron condors on leftovers
         if len(new_trades) < n:
-            remaining = [s for s in scans if s["ticker"] not in used_tickers]
+            remaining = [s for s in fallback_scans if s["ticker"] not in used_tickers]
             fallback_types = ["iron_condor", "call_spread", "put_spread",
                               "long_call", "long_put", "stock_long"]
             fi = 0
@@ -1155,6 +1167,9 @@ def generate_daily_trades(n: int = 10) -> list:
                 if trade:
                     new_trades.append(trade)
                     used_tickers.add(scan["ticker"])
+
+        # Merge fallback scans into master list for reasoning generation
+        scans.extend(fallback_scans)
 
     # ── Generate entry reasoning for every new trade ──────────────────────────
     if new_trades:
