@@ -213,6 +213,12 @@ _TYPE_WEIGHTS = {
     "covered_call":     2,   # sell OTM call for income on bullish stocks
 }
 
+OPT_TYPES = (
+    "long_call", "long_put", "call_spread", "put_spread",
+    "iron_condor", "bull_put_spread", "bear_call_spread",
+    "covered_call",
+)
+
 def _assign_trade_type(scan: dict) -> str:
     """
     Signal-driven trade-type selection.
@@ -408,11 +414,56 @@ def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
         return None, f"chain_error:{e}"
 
 
+def _live_leg_quote_near(ticker: str, expiry: str, opt_type: str,
+                         target_strike: float, *,
+                         min_strike: float | None = None,
+                         max_strike: float | None = None) -> tuple[dict | None, str | None]:
+    """
+    Pick a real listed contract near the target strike for new trade entry.
+    Existing positions still use _live_leg_quote() because they must match
+    exactly; new positions can choose the nearest real contract and store it.
+    """
+    if not expiry:
+        return None, "missing_expiry"
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+        if expiry not in tk.options:
+            return None, "expiry_not_listed"
+        chain = tk.option_chain(expiry)
+        df = chain.calls if opt_type == "call" else chain.puts
+        if df is None or df.empty:
+            return None, "empty_chain"
+        pool = df.copy()
+        pool["strike"] = pool["strike"].astype(float)
+        if min_strike is not None:
+            pool = pool[pool["strike"] >= float(min_strike)]
+        if max_strike is not None:
+            pool = pool[pool["strike"] <= float(max_strike)]
+        if pool.empty:
+            return None, "no_listed_strike_in_range"
+        idx = (pool["strike"] - float(target_strike)).abs().idxmin()
+        strike = float(pool.loc[idx]["strike"])
+        quote, err = _live_leg_quote(ticker, expiry, opt_type, strike)
+        if not quote:
+            return None, err or "no_usable_quote"
+        quote["strike"] = strike
+        return quote, None
+    except Exception as e:
+        return None, f"chain_error:{e}"
+
+
+def _avg_live_iv(quotes: list[dict]) -> float:
+    ivs = [q["iv"] for q in quotes if q.get("iv", 0) > 0]
+    return round(sum(ivs) / len(ivs), 4) if ivs else 0.0
+
+
 def _mark_invalid(t: dict, reason: str) -> dict:
     """Flag a trade whose exact listed contract cannot be found."""
     t.setdefault("chain_source", "legacy")
     t["mark_source"] = "invalid"
     t["mark_error"] = reason
+    t["pnl_trusted"] = False
     return t
 
 
@@ -420,6 +471,7 @@ def _mark_synthetic(t: dict, reason: str) -> dict:
     """Record that the current mark had to fall back to model pricing."""
     t["mark_source"] = "synthetic"
     t["mark_error"] = reason
+    t["pnl_trusted"] = False
     if not t.get("chain_source"):
         t["chain_source"] = "legacy"
     return t
@@ -438,6 +490,8 @@ def _build_stock(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "status":       "open",
         "side":         "long" if trade_type == "stock_long" else "short",
         "entry_price":  round(price, 4),
+        "entry_source": "live_stock_price",
+        "pnl_trusted":  True,
         "shares":       shares,
         "cost_basis":   round(price * shares, 2),
         "current_price": round(price, 4),
@@ -464,21 +518,14 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
 
     # Try live options chain first — real expiry, real strike, real mid price
     live = _live_chain(scan["ticker"], opt_type, target_k, entry_d)
-    if live:
-        strike      = live["strike"]
-        val         = live["mid"]
-        expiry_date = live["expiry"]
-        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
-        t_days      = live["dte_actual"]
-        chain_src   = "live"
-    else:
-        # Fallback: Black-Scholes with standard monthly expiry
-        sigma       = _hv(scan["ticker"])
-        val         = _bs(price, target_k, DTE_TARGET / 365.0, sigma, opt_type)
-        strike      = target_k
-        expiry_date = _options_expiry(entry_d)
-        t_days      = DTE_TARGET
-        chain_src   = "synthetic"
+    if not live:
+        return None
+
+    strike      = live["strike"]
+    val         = live["mid"]
+    expiry_date = live["expiry"]
+    sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+    t_days      = live["dte_actual"]
 
     if val <= 0.05:
         return None
@@ -495,7 +542,9 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "t_days":              t_days,
         "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
-        "chain_source":        chain_src,
+        "chain_source":        "live",
+        "entry_source":        "live_chain_mid",
+        "pnl_trusted":         True,
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(val, 4),
         "cost_basis":          cost,
@@ -527,23 +576,30 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         short_k  = long_k - width
         opt_type = "put"
 
-    # Try live chain on the near-ATM long leg — gives us real expiry + real IV
+    # New spreads must be built from actual listed contracts and live mids.
     entry_d = date.fromisoformat(ts[:10])
     live = _live_chain(scan["ticker"], opt_type, long_k, entry_d)
-    if live:
-        expiry_date = live["expiry"]
-        t_days      = live["dte_actual"]
-        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
-        chain_src   = "live"
-    else:
-        expiry_date = _options_expiry(entry_d)
-        t_days      = DTE_TARGET
-        sigma       = _hv(scan["ticker"])
-        chain_src   = "synthetic"
+    if not live:
+        return None
 
-    T         = t_days / 365.0
-    long_val  = _bs(price, long_k,  T, sigma, opt_type)
-    short_val = _bs(price, short_k, T, sigma, opt_type)
+    expiry_date = live["expiry"]
+    t_days      = live["dte_actual"]
+    long_k      = live["strike"]
+    long_val    = live["mid"]
+    if trade_type == "call_spread":
+        short_target = long_k + width
+        short_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, opt_type,
+                                          short_target, min_strike=long_k + 0.01)
+    else:
+        short_target = long_k - width
+        short_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, opt_type,
+                                          short_target, max_strike=long_k - 0.01)
+    if not short_q:
+        return None
+    short_k   = short_q["strike"]
+    short_val = short_q["mid"]
+    width     = round(abs(short_k - long_k), 2)
+    sigma     = _avg_live_iv([live, short_q]) or _hv(scan["ticker"])
     debit     = round(long_val - short_val, 4)
 
     if debit <= 0.05:
@@ -565,7 +621,9 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "t_days":            t_days,
         "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
-        "chain_source":      chain_src,
+        "chain_source":      "live",
+        "entry_source":      "live_chain_mid",
+        "pnl_trusted":       True,
         "entry_stock_price": round(price, 4),
         "entry_net_debit":   debit,
         "max_gain":          max_gain,
@@ -595,25 +653,33 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
     sp_k = _round_strike(price * 0.92, step)
     lp_k = sp_k - width
 
-    # Use live chain on the short call leg — gets us real expiry + IV for all four legs
+    # Use only live listed legs; skip the trade if any leg cannot be quoted.
     entry_d = date.fromisoformat(ts[:10])
     live = _live_chain(scan["ticker"], "call", sc_k, entry_d)
-    if live:
-        expiry_date = live["expiry"]
-        t_days      = live["dte_actual"]
-        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
-        chain_src   = "live"
-    else:
-        expiry_date = _options_expiry(entry_d)
-        t_days      = DTE_TARGET
-        sigma       = _hv(scan["ticker"])
-        chain_src   = "synthetic"
+    if not live:
+        return None
 
-    T  = t_days / 365.0
-    sc = _bs(price, sc_k, T, sigma, "call")
-    lc = _bs(price, lc_k, T, sigma, "call")
-    sp = _bs(price, sp_k, T, sigma, "put")
-    lp = _bs(price, lp_k, T, sigma, "put")
+    expiry_date = live["expiry"]
+    t_days      = live["dte_actual"]
+    sc_k        = live["strike"]
+    sc          = live["mid"]
+    lc_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, "call",
+                                   sc_k + width, min_strike=sc_k + 0.01)
+    sp_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, "put", sp_k)
+    if not lc_q or not sp_q:
+        return None
+    lc_k = lc_q["strike"]
+    lc   = lc_q["mid"]
+    sp_k = sp_q["strike"]
+    sp   = sp_q["mid"]
+    lp_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, "put",
+                                   sp_k - width, max_strike=sp_k - 0.01)
+    if not lp_q:
+        return None
+    lp_k = lp_q["strike"]
+    lp   = lp_q["mid"]
+    width = round(max(abs(lc_k - sc_k), abs(sp_k - lp_k)), 2)
+    sigma = _avg_live_iv([live, lc_q, sp_q, lp_q]) or _hv(scan["ticker"])
 
     credit = round((sc - lc) + (sp - lp), 4)
     if credit <= 0.05:
@@ -635,7 +701,9 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         "t_days":            t_days,
         "expiry_date":       expiry_date,
         "sigma":             round(sigma, 4),
-        "chain_source":      chain_src,
+        "chain_source":      "live",
+        "entry_source":      "live_chain_mid",
+        "pnl_trusted":       True,
         "entry_stock_price": round(price, 4),
         "entry_net_credit":  credit,
         "max_gain":          credit,
@@ -674,24 +742,30 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         long_k   = _round_strike(price * 1.06, step)   # buy 6% OTM call (cap upside loss)
         opt_type = "call"
 
-    # Use live chain on the short leg — we're selling that one, so its pricing matters most
+    # New credit spreads must quote both legs from the same live chain.
     entry_d = date.fromisoformat(ts[:10])
     live = _live_chain(scan["ticker"], opt_type, short_k, entry_d)
-    if live:
-        expiry_date = live["expiry"]
-        t_days      = live["dte_actual"]
-        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
-        chain_src   = "live"
-    else:
-        expiry_date = _options_expiry(entry_d)
-        t_days      = DTE_TARGET
-        sigma       = _hv(scan["ticker"])
-        chain_src   = "synthetic"
+    if not live:
+        return None
 
-    T         = t_days / 365.0
-    short_val = _bs(price, short_k, T, sigma, opt_type)
-    long_val  = _bs(price, long_k,  T, sigma, opt_type)
-    credit    = round(short_val - long_val, 4)
+    expiry_date = live["expiry"]
+    t_days      = live["dte_actual"]
+    short_k     = live["strike"]
+    short_val   = live["mid"]
+    if trade_type == "bull_put_spread":
+        long_target = short_k - (step * 2)
+        long_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, opt_type,
+                                         long_target, max_strike=short_k - 0.01)
+    else:
+        long_target = short_k + (step * 2)
+        long_q, _ = _live_leg_quote_near(scan["ticker"], expiry_date, opt_type,
+                                         long_target, min_strike=short_k + 0.01)
+    if not long_q:
+        return None
+    long_k   = long_q["strike"]
+    long_val = long_q["mid"]
+    sigma    = _avg_live_iv([live, long_q]) or _hv(scan["ticker"])
+    credit   = round(short_val - long_val, 4)
 
     if credit <= 0.05:
         return None
@@ -712,7 +786,9 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         "t_days":             t_days,
         "expiry_date":        expiry_date,
         "sigma":              round(sigma, 4),
-        "chain_source":       chain_src,
+        "chain_source":       "live",
+        "entry_source":       "live_chain_mid",
+        "pnl_trusted":        True,
         "entry_stock_price":  round(price, 4),
         "entry_net_credit":   credit,
         "max_gain":           credit,
@@ -743,20 +819,14 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
     entry_d      = date.fromisoformat(ts[:10])
 
     live = _live_chain(scan["ticker"], "call", target_k, entry_d)
-    if live:
-        strike      = live["strike"]
-        premium     = live["mid"]
-        expiry_date = live["expiry"]
-        sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
-        t_days      = live["dte_actual"]
-        chain_src   = "live"
-    else:
-        sigma       = _hv(scan["ticker"])
-        premium     = _bs(price, target_k, DTE_TARGET / 365.0, sigma, "call")
-        strike      = target_k
-        expiry_date = _options_expiry(entry_d)
-        t_days      = DTE_TARGET
-        chain_src   = "synthetic"
+    if not live:
+        return None
+
+    strike      = live["strike"]
+    premium     = live["mid"]
+    expiry_date = live["expiry"]
+    sigma       = live["iv"] if live["iv"] > 0 else _hv(scan["ticker"])
+    t_days      = live["dte_actual"]
 
     if premium <= 0.05:
         return None
@@ -772,7 +842,9 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
         "t_days":              t_days,
         "expiry_date":         expiry_date,
         "sigma":               round(sigma, 4),
-        "chain_source":        chain_src,
+        "chain_source":        "live",
+        "entry_source":        "live_chain_mid",
+        "pnl_trusted":         True,
         "entry_stock_price":   round(price, 4),
         "entry_option_price":  round(premium, 4),
         "premium_collected":   round(premium * 100 * OPTION_CONTRACTS, 2),
@@ -834,6 +906,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
         if tt in ("stock_long", "stock_short"):
             sign = 1 if tt == "stock_long" else -1
             t["current_price"] = round(price, 4)
+            t["pnl_trusted"] = True
             raw  = (price - t["entry_price"]) * t["shares"] * sign
             t["pnl"]     = round(raw, 2)
             t["pnl_pct"] = round(raw / t["cost_basis"], 4) if t["cost_basis"] else 0.0
@@ -847,6 +920,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
+                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
                 t["expiry_date"] = expiry
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
@@ -886,6 +960,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
+                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
                 t["expiry_date"] = expiry
                 t["long_bid"] = lq["bid"]
                 t["long_ask"] = lq["ask"]
@@ -925,6 +1000,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
+                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
                 t["expiry_date"] = expiry
                 t["short_call_bid"], t["short_call_ask"] = scq["bid"], scq["ask"]
                 t["long_call_bid"],  t["long_call_ask"]  = lcq["bid"], lcq["ask"]
@@ -970,6 +1046,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
+                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
                 t["expiry_date"] = expiry
                 t["short_bid"], t["short_ask"] = sq["bid"], sq["ask"]
                 t["long_bid"],  t["long_ask"]  = lq["bid"], lq["ask"]
@@ -1009,6 +1086,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
+                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
                 t["expiry_date"] = expiry
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
@@ -1616,6 +1694,25 @@ def _normalize_trade(t: dict) -> dict:
     t.setdefault("pnl", 0.0)
     t.setdefault("pnl_pct", 0.0)
 
+    tt = t.get("trade_type", "")
+    if tt in ("stock_long", "stock_short"):
+        t.setdefault("entry_source", "live_stock_price")
+        t.setdefault("pnl_trusted", True)
+    elif tt in OPT_TYPES:
+        if not t.get("entry_source"):
+            t["entry_source"] = "legacy_model"
+            t["pnl_trusted"] = False
+        else:
+            t.setdefault("pnl_trusted", t.get("entry_source") == "live_chain_mid")
+
+    try:
+        closed_d = date.fromisoformat((t.get("date_closed") or "")[:10])
+        if closed_d.weekday() >= 5:
+            t["close_quality"] = "legacy_weekend_close"
+            t["pnl_trusted"] = False
+    except Exception:
+        pass
+
     try:
         entry_d = date.fromisoformat(t["date_entered"][:10])
         t["days_held"] = (date.today() - entry_d).days
@@ -1623,6 +1720,65 @@ def _normalize_trade(t: dict) -> dict:
         t.setdefault("days_held", 0)
 
     return t
+
+
+def repair_legacy_trades() -> dict:
+    """
+    Persist a data-quality repair pass over existing paper trades.
+    This does not delete trades or invent historical fills. It refreshes open
+    marks from live chains when possible and labels legacy/invalid P&L clearly.
+    """
+    trades = [_normalize_trade(t) for t in load_trades()]
+    repaired = 0
+    invalid = 0
+    untrusted = 0
+    weekend_closed = 0
+
+    for i, t in enumerate(trades):
+        if not t.get("expiry_date") and t.get("t_days") and t.get("date_entered"):
+            try:
+                entry = date.fromisoformat(t["date_entered"][:10])
+                t["expiry_date"] = _options_expiry(entry, t["t_days"])
+            except Exception:
+                pass
+
+        try:
+            closed_d = date.fromisoformat((t.get("date_closed") or "")[:10])
+            if closed_d.weekday() >= 5:
+                t["close_quality"] = "legacy_weekend_close"
+                t["pnl_trusted"] = False
+                weekend_closed += 1
+        except Exception:
+            pass
+
+        if t.get("status") == "open":
+            before = dict(t)
+            t = mark_trade(t)
+            if t != before:
+                repaired += 1
+
+        if t.get("mark_source") == "invalid":
+            t["pricing_confidence"] = "invalid_contract"
+            t["pnl_trusted"] = False
+            invalid += 1
+        elif t.get("trade_type") in OPT_TYPES and t.get("entry_source") != "live_chain_mid":
+            t["pricing_confidence"] = "live_mark_legacy_entry"
+            t["pnl_trusted"] = False
+            untrusted += 1
+        elif t.get("trade_type") in OPT_TYPES:
+            t["pricing_confidence"] = "live_entry_live_mark"
+            t.setdefault("pnl_trusted", True)
+
+        trades[i] = t
+
+    save_trades(trades)
+    return {
+        "total": len(trades),
+        "repaired_open_marks": repaired,
+        "invalid_contracts": invalid,
+        "legacy_untrusted_pnl": untrusted,
+        "legacy_weekend_closes": weekend_closed,
+    }
 
 
 def get_paper_stats() -> dict:
@@ -1656,11 +1812,15 @@ def get_paper_stats() -> dict:
         "closed_trades": sorted(closed, key=lambda t: t.get("date_closed") or "", reverse=True),
     }
 
-    open_pnl = round(sum(t.get("pnl", 0) for t in open_), 2)
+    open_pnl = round(sum(t.get("pnl", 0) for t in open_
+                         if t.get("pnl_trusted") is not False), 2)
+    untrusted_open_pnl = round(sum(t.get("pnl", 0) for t in open_
+                                   if t.get("pnl_trusted") is False), 2)
 
     if not closed:
         return {**base,
                 "open_pnl": open_pnl,
+                "untrusted_open_pnl": untrusted_open_pnl,
                 "win_rate": 0, "total_pnl": 0, "avg_pnl": 0,
                 "avg_hold": 0, "best_trade": None, "worst_trade": None,
                 "by_type": {}, "by_ticker": {},
@@ -1746,6 +1906,7 @@ def get_paper_stats() -> dict:
     return {
         **base,
         "open_pnl":      open_pnl,
+        "untrusted_open_pnl": untrusted_open_pnl,
         "win_rate":      round(len(wins) / len(closed), 3),
         "total_pnl":     total_pnl,
         "avg_pnl":       avg_pnl,
@@ -1780,6 +1941,10 @@ if __name__ == "__main__":
         result = run_daily_close()
         print(f"\nClose result: {result}")
 
+    elif cmd == "repair":
+        result = repair_legacy_trades()
+        print(f"\nRepair result: {result}")
+
     elif cmd == "stats":
         s = get_paper_stats()
         print(f"\n{'='*50}")
@@ -1797,4 +1962,4 @@ if __name__ == "__main__":
                 print(f"    {tt:15s}  {d['count']:3d} trades  {d['win_rate']*100:5.1f}% win  avg ${d['avg_pnl']:+.2f}")
 
     else:
-        print(f"Unknown command: {cmd}. Use: generate | close | stats")
+        print(f"Unknown command: {cmd}. Use: generate | close | repair | stats")
