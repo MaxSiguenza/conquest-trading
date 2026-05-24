@@ -456,6 +456,19 @@ canvas { width: 100% !important; }
               {%- endif -%}
               {%- if t.get('mark_error') %}<br>{{ t.mark_error }}{%- endif -%}
               {%- if t.get('pnl_trusted') is sameas false %}<br><span class="pricing-warn">P&amp;L untrusted: {{ t.get('pricing_confidence') or t.get('entry_source') or 'legacy entry' }}</span>{%- endif -%}
+              {%- if t.get('contract_symbol') -%}
+                <br>contract {{ t.contract_symbol }}
+              {%- elif t.get('long_contract_symbol') or t.get('short_contract_symbol') -%}
+                <br>legs {{ t.get('long_contract_symbol') or 'long?' }} / {{ t.get('short_contract_symbol') or 'short?' }}
+              {%- elif t.get('short_call_contract_symbol') -%}
+                <br>legs {{ t.short_call_contract_symbol }} / {{ t.long_call_contract_symbol }} / {{ t.short_put_contract_symbol }} / {{ t.long_put_contract_symbol }}
+              {%- endif -%}
+              {%- if t.get('entry_bid') is not none and t.get('entry_ask') is not none -%}
+                <br>entry b/a ${{ "%.2f"|format(t.entry_bid) }}/{{ "%.2f"|format(t.entry_ask) }}
+              {%- elif t.get('long_entry_bid') is not none and t.get('short_entry_bid') is not none -%}
+                <br>entry legs b/a L ${{ "%.2f"|format(t.long_entry_bid) }}/{{ "%.2f"|format(t.long_entry_ask) }} S ${{ "%.2f"|format(t.short_entry_bid) }}/{{ "%.2f"|format(t.short_entry_ask) }}
+              {%- endif -%}
+              {%- if t.get('max_loss') is not none -%}<br>max risk ${{ "%.2f"|format(t.max_loss) }}{%- endif -%}
             </div>
           {%- endif -%}
         </td>
@@ -562,6 +575,19 @@ canvas { width: 100% !important; }
               {%- endif -%}
               {%- if t.get('mark_error') %}<br>{{ t.mark_error }}{%- endif -%}
               {%- if t.get('pnl_trusted') is sameas false %}<br><span class="pricing-warn">P&amp;L untrusted: {{ t.get('pricing_confidence') or t.get('entry_source') or 'legacy entry' }}</span>{%- endif -%}
+              {%- if t.get('contract_symbol') -%}
+                <br>contract {{ t.contract_symbol }}
+              {%- elif t.get('long_contract_symbol') or t.get('short_contract_symbol') -%}
+                <br>legs {{ t.get('long_contract_symbol') or 'long?' }} / {{ t.get('short_contract_symbol') or 'short?' }}
+              {%- elif t.get('short_call_contract_symbol') -%}
+                <br>legs {{ t.short_call_contract_symbol }} / {{ t.long_call_contract_symbol }} / {{ t.short_put_contract_symbol }} / {{ t.long_put_contract_symbol }}
+              {%- endif -%}
+              {%- if t.get('entry_bid') is not none and t.get('entry_ask') is not none -%}
+                <br>entry b/a ${{ "%.2f"|format(t.entry_bid) }}/{{ "%.2f"|format(t.entry_ask) }}
+              {%- elif t.get('long_entry_bid') is not none and t.get('short_entry_bid') is not none -%}
+                <br>entry legs b/a L ${{ "%.2f"|format(t.long_entry_bid) }}/{{ "%.2f"|format(t.long_entry_ask) }} S ${{ "%.2f"|format(t.short_entry_bid) }}/{{ "%.2f"|format(t.short_entry_ask) }}
+              {%- endif -%}
+              {%- if t.get('max_loss') is not none -%}<br>max risk ${{ "%.2f"|format(t.max_loss) }}{%- endif -%}
             </div>
           {%- endif -%}
         </td>

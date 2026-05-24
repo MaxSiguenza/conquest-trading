@@ -332,8 +332,10 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
         idx = (pool["strike"] - target_strike).abs().idxmin()
         row = pool.loc[idx]
 
+        contract_symbol = str(row.get("contractSymbol") or "")
         bid = float(row.get("bid") or 0)
         ask = float(row.get("ask") or 0)
+        last = float(row.get("lastPrice") or 0)
         mid = round((bid + ask) / 2, 4) if ask > 0 else 0.0
         iv  = float(row.get("impliedVolatility") or 0)
 
@@ -346,7 +348,9 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
             "mid":        mid,
             "bid":        round(bid, 4),
             "ask":        round(ask, 4),
+            "last":       round(last, 4),
             "iv":         round(iv, 4),
+            "contract_symbol": contract_symbol,
             "dte_actual": actual_dte,
             "source":     "live",
         }
@@ -459,6 +463,46 @@ def _live_leg_quote_near(ticker: str, expiry: str, opt_type: str,
 def _avg_live_iv(quotes: list[dict]) -> float:
     ivs = [q["iv"] for q in quotes if q.get("iv", 0) > 0]
     return round(sum(ivs) / len(ivs), 4) if ivs else 0.0
+
+
+def _quote_fields(q: dict, prefix: str = "") -> dict:
+    """Compact audit fields for an option quote."""
+    p = f"{prefix}_" if prefix else ""
+    return {
+        f"{p}contract_symbol": q.get("contract_symbol"),
+        f"{p}entry_bid": q.get("bid"),
+        f"{p}entry_ask": q.get("ask"),
+        f"{p}entry_mid": q.get("mid"),
+        f"{p}entry_last": q.get("last"),
+        f"{p}entry_iv": q.get("iv"),
+    }
+
+
+def _set_option_risk(t: dict) -> dict:
+    """Add normalized risk fields used by the autonomous readiness layer."""
+    tt = t.get("trade_type", "")
+    contracts = int(t.get("contracts", OPTION_CONTRACTS) or OPTION_CONTRACTS)
+    if tt in ("long_call", "long_put"):
+        t["max_loss"] = round(float(t.get("entry_option_price", 0)) * 100 * contracts, 2)
+        t["max_gain"] = None
+        t["risk_defined"] = True
+    elif tt in ("call_spread", "put_spread"):
+        debit = float(t.get("entry_net_debit", 0))
+        width = float(t.get("spread_width", 0))
+        t["max_loss"] = round(debit * 100 * contracts, 2)
+        t["max_gain"] = round(max(width - debit, 0) * 100 * contracts, 2)
+        t["risk_defined"] = True
+    elif tt in ("iron_condor", "bull_put_spread", "bear_call_spread"):
+        width = float(t.get("spread_width", 0))
+        credit = float(t.get("entry_net_credit", 0))
+        t["max_loss"] = round(max(width - credit, 0) * 100 * contracts, 2)
+        t["max_gain"] = round(credit * 100 * contracts, 2)
+        t["risk_defined"] = True
+    elif tt == "covered_call":
+        t["max_loss"] = round(float(t.get("entry_stock_price", 0)) * 100 * contracts, 2)
+        t["max_gain"] = None
+        t["risk_defined"] = False
+    return t
 
 
 def _historical_contract_price(contract_symbol: str, entry_date: date) -> tuple[float | None, str | None]:
@@ -681,7 +725,7 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         return None
 
     cost = round(val * 100 * OPTION_CONTRACTS, 2)
-    return {
+    trade = {
         "id":                  f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":        ts,
         "ticker":              scan["ticker"],
@@ -708,6 +752,8 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "mtf_score":           scan.get("mtf_score", 0),
         "rsi_entry":           round(scan.get("rsi", 50), 1),
     }
+    trade.update(_quote_fields(live))
+    return _set_option_risk(trade)
 
 
 def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
@@ -758,7 +804,7 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     max_gain = round(width - debit, 4)
     cost     = round(debit * 100 * OPTION_CONTRACTS, 2)
 
-    return {
+    trade = {
         "id":                f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":      ts,
         "ticker":            scan["ticker"],
@@ -788,6 +834,9 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "mtf_score":         scan.get("mtf_score", 0),
         "rsi_entry":         round(scan.get("rsi", 50), 1),
     }
+    trade.update(_quote_fields(live, "long"))
+    trade.update(_quote_fields(short_q, "short"))
+    return _set_option_risk(trade)
 
 
 def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
@@ -837,7 +886,7 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
 
     max_loss = round(width - credit, 4)
 
-    return {
+    trade = {
         "id":                f"{ts}_{scan['ticker']}_iron_condor",
         "date_entered":      ts,
         "ticker":            scan["ticker"],
@@ -869,6 +918,11 @@ def _build_iron_condor(scan: dict, ts: str) -> Optional[dict]:
         "mtf_score":         scan.get("mtf_score", 0),
         "rsi_entry":         round(scan.get("rsi", 50), 1),
     }
+    trade.update(_quote_fields(live, "short_call"))
+    trade.update(_quote_fields(lc_q, "long_call"))
+    trade.update(_quote_fields(sp_q, "short_put"))
+    trade.update(_quote_fields(lp_q, "long_put"))
+    return _set_option_risk(trade)
 
 
 def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
@@ -923,7 +977,7 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
     spread_width = round(abs(short_k - long_k), 2)
     max_loss     = round(spread_width - credit, 4)
 
-    return {
+    trade = {
         "id":                 f"{ts}_{scan['ticker']}_{trade_type}",
         "date_entered":       ts,
         "ticker":             scan["ticker"],
@@ -954,6 +1008,9 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
         "mtf_score":          scan.get("mtf_score", 0),
         "rsi_entry":          round(scan.get("rsi", 50), 1),
     }
+    trade.update(_quote_fields(live, "short"))
+    trade.update(_quote_fields(long_q, "long"))
+    return _set_option_risk(trade)
 
 
 def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
@@ -981,7 +1038,7 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
     if premium <= 0.05:
         return None
 
-    return {
+    trade = {
         "id":                  f"{ts}_{scan['ticker']}_covered_call",
         "date_entered":        ts,
         "ticker":              scan["ticker"],
@@ -1009,6 +1066,8 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
         "mtf_score":           scan.get("mtf_score", 0),
         "rsi_entry":           round(scan.get("rsi", 50), 1),
     }
+    trade.update(_quote_fields(live))
+    return _set_option_risk(trade)
 
 
 def _build_trade(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
@@ -1854,6 +1913,7 @@ def _normalize_trade(t: dict) -> dict:
             t["pnl_trusted"] = False
         else:
             t.setdefault("pnl_trusted", t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES)
+        _set_option_risk(t)
 
     try:
         closed_d = date.fromisoformat((t.get("date_closed") or "")[:10])
