@@ -218,6 +218,7 @@ OPT_TYPES = (
     "iron_condor", "bull_put_spread", "bear_call_spread",
     "covered_call",
 )
+TRUSTED_OPTION_ENTRY_SOURCES = ("live_chain_mid", "historical_contract_close")
 
 def _assign_trade_type(scan: dict) -> str:
     """
@@ -391,6 +392,7 @@ def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
         if row.empty:
             return None, "strike_not_listed"
         row = row.iloc[0]
+        contract_symbol = str(row.get("contractSymbol") or "")
         bid = float(row.get("bid") or 0)
         ask = float(row.get("ask") or 0)
         last = float(row.get("lastPrice") or 0)
@@ -409,6 +411,7 @@ def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
             "mid": mid,
             "last": round(last, 4),
             "iv": round(iv, 4),
+            "contract_symbol": contract_symbol,
         }, None
     except Exception as e:
         return None, f"chain_error:{e}"
@@ -456,6 +459,153 @@ def _live_leg_quote_near(ticker: str, expiry: str, opt_type: str,
 def _avg_live_iv(quotes: list[dict]) -> float:
     ivs = [q["iv"] for q in quotes if q.get("iv", 0) > 0]
     return round(sum(ivs) / len(ivs), 4) if ivs else 0.0
+
+
+def _historical_contract_price(contract_symbol: str, entry_date: date) -> tuple[float | None, str | None]:
+    """
+    Return the option contract's historical price on/after entry_date.
+    Yahoo sometimes exposes option-contract OHLC by contract symbol. When it
+    does, this is a much better legacy repair than re-modeling with BS.
+    """
+    if not contract_symbol:
+        return None, "missing_contract_symbol"
+    try:
+        import yfinance as yf
+        end = entry_date + timedelta(days=5)
+        hist = yf.Ticker(contract_symbol).history(
+            start=entry_date.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=False,
+        )
+        if hist is None or hist.empty:
+            return None, "no_contract_history"
+        row = hist.iloc[0]
+        for col in ("Close", "Open", "High", "Low"):
+            val = row.get(col)
+            try:
+                px = float(val)
+                if px > 0:
+                    return round(px, 4), f"{contract_symbol}:{hist.index[0].date()}:{col.lower()}"
+            except Exception:
+                continue
+        return None, "no_usable_contract_history_price"
+    except Exception as e:
+        return None, f"history_error:{e}"
+
+
+def _entry_date(t: dict) -> date | None:
+    try:
+        return date.fromisoformat((t.get("date_entered") or t.get("entry_date") or "")[:10])
+    except Exception:
+        return None
+
+
+def _repair_option_entry_from_history(t: dict) -> tuple[dict, bool]:
+    """Replace legacy modeled entry prices with historical option-contract closes."""
+    if t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES:
+        return t, False
+    entry_d = _entry_date(t)
+    expiry = _trade_expiry(t)
+    contracts = int(t.get("contracts", OPTION_CONTRACTS) or OPTION_CONTRACTS)
+    if not entry_d or not expiry:
+        return t, False
+
+    def leg(opt_type: str, strike: float) -> tuple[dict | None, float | None, str | None]:
+        quote, err = _live_leg_quote(t["ticker"], expiry, opt_type, strike)
+        if not quote:
+            return None, None, err
+        hist_px, hist_src = _historical_contract_price(quote.get("contract_symbol", ""), entry_d)
+        if hist_px is None:
+            return quote, None, hist_src
+        return quote, hist_px, hist_src
+
+    tt = t.get("trade_type")
+    sources = []
+
+    if tt in ("long_call", "long_put", "covered_call"):
+        opt_type = t.get("opt_type", "call" if tt == "covered_call" else "")
+        quote, hist_px, src = leg(opt_type, float(t["strike"]))
+        if hist_px is None:
+            t["historical_entry_error"] = src
+            return t, False
+        t["entry_option_price"] = hist_px
+        if tt == "covered_call":
+            t["premium_collected"] = round(hist_px * 100 * contracts, 2)
+        t["cost_basis"] = round(hist_px * 100 * contracts, 2)
+        if quote:
+            t["contract_symbol"] = quote.get("contract_symbol")
+        sources.append(src)
+
+    elif tt in ("call_spread", "put_spread"):
+        lq, long_px, lsrc = leg(t["opt_type"], float(t["long_strike"]))
+        sq, short_px, ssrc = leg(t["opt_type"], float(t["short_strike"]))
+        if long_px is None or short_px is None:
+            t["historical_entry_error"] = f"long:{lsrc};short:{ssrc}"
+            return t, False
+        debit = round(long_px - short_px, 4)
+        if debit <= 0:
+            t["historical_entry_error"] = "non_positive_historical_debit"
+            return t, False
+        t["entry_net_debit"] = debit
+        t["cost_basis"] = round(debit * 100 * contracts, 2)
+        t["long_contract_symbol"] = lq.get("contract_symbol") if lq else None
+        t["short_contract_symbol"] = sq.get("contract_symbol") if sq else None
+        sources.extend([lsrc, ssrc])
+
+    elif tt in ("bull_put_spread", "bear_call_spread"):
+        sq, short_px, ssrc = leg(t["opt_type"], float(t["short_strike"]))
+        lq, long_px, lsrc = leg(t["opt_type"], float(t["long_strike"]))
+        if short_px is None or long_px is None:
+            t["historical_entry_error"] = f"short:{ssrc};long:{lsrc}"
+            return t, False
+        credit = round(short_px - long_px, 4)
+        if credit <= 0:
+            t["historical_entry_error"] = "non_positive_historical_credit"
+            return t, False
+        t["entry_net_credit"] = credit
+        spread_width = round(abs(float(t["short_strike"]) - float(t["long_strike"])), 2)
+        t["max_gain"] = credit
+        t["max_loss"] = round(spread_width - credit, 4)
+        t["cost_basis"] = round(t["max_loss"] * 100 * contracts, 2)
+        t["short_contract_symbol"] = sq.get("contract_symbol") if sq else None
+        t["long_contract_symbol"] = lq.get("contract_symbol") if lq else None
+        sources.extend([ssrc, lsrc])
+
+    elif tt == "iron_condor":
+        scq, sc, scsrc = leg("call", float(t["short_call_k"]))
+        lcq, lc, lcsrc = leg("call", float(t["long_call_k"]))
+        spq, sp, spsrc = leg("put", float(t["short_put_k"]))
+        lpq, lp, lpsrc = leg("put", float(t["long_put_k"]))
+        if None in (sc, lc, sp, lp):
+            t["historical_entry_error"] = f"sc:{scsrc};lc:{lcsrc};sp:{spsrc};lp:{lpsrc}"
+            return t, False
+        credit = round((sc - lc) + (sp - lp), 4)
+        if credit <= 0:
+            t["historical_entry_error"] = "non_positive_historical_credit"
+            return t, False
+        width = round(max(
+            abs(float(t["long_call_k"]) - float(t["short_call_k"])),
+            abs(float(t["short_put_k"]) - float(t["long_put_k"])),
+        ), 2)
+        t["entry_net_credit"] = credit
+        t["max_gain"] = credit
+        t["max_loss"] = round(width - credit, 4)
+        t["cost_basis"] = round(t["max_loss"] * 100 * contracts, 2)
+        t["short_call_contract_symbol"] = scq.get("contract_symbol") if scq else None
+        t["long_call_contract_symbol"] = lcq.get("contract_symbol") if lcq else None
+        t["short_put_contract_symbol"] = spq.get("contract_symbol") if spq else None
+        t["long_put_contract_symbol"] = lpq.get("contract_symbol") if lpq else None
+        sources.extend([scsrc, lcsrc, spsrc, lpsrc])
+
+    else:
+        return t, False
+
+    t["entry_source"] = "historical_contract_close"
+    t["historical_entry_sources"] = [s for s in sources if s]
+    t["pricing_confidence"] = "historical_entry_live_mark"
+    t["pnl_trusted"] = True
+    t.pop("historical_entry_error", None)
+    return t, True
 
 
 def _mark_invalid(t: dict, reason: str) -> dict:
@@ -920,7 +1070,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
-                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
+                t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
                 t["expiry_date"] = expiry
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
@@ -960,7 +1110,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
-                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
+                t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
                 t["expiry_date"] = expiry
                 t["long_bid"] = lq["bid"]
                 t["long_ask"] = lq["ask"]
@@ -1000,7 +1150,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
-                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
+                t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
                 t["expiry_date"] = expiry
                 t["short_call_bid"], t["short_call_ask"] = scq["bid"], scq["ask"]
                 t["long_call_bid"],  t["long_call_ask"]  = lcq["bid"], lcq["ask"]
@@ -1046,7 +1196,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
-                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
+                t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
                 t["expiry_date"] = expiry
                 t["short_bid"], t["short_ask"] = sq["bid"], sq["ask"]
                 t["long_bid"],  t["long_ask"]  = lq["bid"], lq["ask"]
@@ -1086,7 +1236,7 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t.setdefault("chain_source", "legacy")
                 t["mark_source"] = "live"
                 t["mark_error"] = None
-                t["pnl_trusted"] = t.get("entry_source") == "live_chain_mid"
+                t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
                 t["expiry_date"] = expiry
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
@@ -1703,7 +1853,7 @@ def _normalize_trade(t: dict) -> dict:
             t["entry_source"] = "legacy_model"
             t["pnl_trusted"] = False
         else:
-            t.setdefault("pnl_trusted", t.get("entry_source") == "live_chain_mid")
+            t.setdefault("pnl_trusted", t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES)
 
     try:
         closed_d = date.fromisoformat((t.get("date_closed") or "")[:10])
@@ -1730,6 +1880,7 @@ def repair_legacy_trades() -> dict:
     """
     trades = [_normalize_trade(t) for t in load_trades()]
     repaired = 0
+    historical_repriced = 0
     invalid = 0
     untrusted = 0
     weekend_closed = 0
@@ -1754,6 +1905,10 @@ def repair_legacy_trades() -> dict:
         if t.get("status") == "open":
             before = dict(t)
             t = mark_trade(t)
+            t, hist_repaired = _repair_option_entry_from_history(t)
+            if hist_repaired:
+                historical_repriced += 1
+                t = mark_trade(t)
             if t != before:
                 repaired += 1
 
@@ -1761,12 +1916,16 @@ def repair_legacy_trades() -> dict:
             t["pricing_confidence"] = "invalid_contract"
             t["pnl_trusted"] = False
             invalid += 1
-        elif t.get("trade_type") in OPT_TYPES and t.get("entry_source") != "live_chain_mid":
+        elif t.get("trade_type") in OPT_TYPES and t.get("entry_source") not in TRUSTED_OPTION_ENTRY_SOURCES:
             t["pricing_confidence"] = "live_mark_legacy_entry"
             t["pnl_trusted"] = False
             untrusted += 1
         elif t.get("trade_type") in OPT_TYPES:
-            t["pricing_confidence"] = "live_entry_live_mark"
+            t["pricing_confidence"] = (
+                "historical_entry_live_mark"
+                if t.get("entry_source") == "historical_contract_close"
+                else "live_entry_live_mark"
+            )
             t.setdefault("pnl_trusted", True)
 
         trades[i] = t
@@ -1775,6 +1934,7 @@ def repair_legacy_trades() -> dict:
     return {
         "total": len(trades),
         "repaired_open_marks": repaired,
+        "historical_entry_repriced": historical_repriced,
         "invalid_contracts": invalid,
         "legacy_untrusted_pnl": untrusted,
         "legacy_weekend_closes": weekend_closed,
