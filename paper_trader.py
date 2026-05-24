@@ -19,9 +19,8 @@ from typing import Optional
 
 import pytz
 
-APP_DIR   = os.path.dirname(os.path.abspath(__file__))
-TRADE_LOG = os.path.join(APP_DIR, "paper_trades.json")
-ET        = pytz.timezone("America/New_York")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ET      = pytz.timezone("America/New_York")
 
 # ── Extended universe (20 liquid names for variety) ───────────────────────────
 PAPER_UNIVERSE = [
@@ -1173,22 +1172,46 @@ def generate_daily_trades(n: int = 10) -> list:
 
     # ── Generate entry reasoning for every new trade ──────────────────────────
     if new_trades:
-        try:
-            from conquest_brain import generate_trade_reasonings
-            # Match each trade back to its scan result
-            scan_map = {s["ticker"]: s for s in scans}
-            trades_and_scans = [
-                (t, scan_map.get(t["ticker"], {}))
-                for t in new_trades
-            ]
-            reasonings = generate_trade_reasonings(trades_and_scans)
-            for t in new_trades:
-                t["reasoning"] = reasonings.get(t["id"], "Reasoning unavailable.")
-            print(f"[PaperTrader] Entry reasoning generated for {len(reasonings)} trades.")
-        except Exception as e:
-            print(f"[PaperTrader] Reasoning generation failed: {e}")
-            for t in new_trades:
-                t.setdefault("reasoning", "Reasoning unavailable.")
+        # Agent trades: build reasoning directly from debate results — they're richer
+        # than any generic scan-based LLM call and require no extra API cost.
+        for t in new_trades:
+            if t.get("debate_pm"):
+                conf   = t.get("agent_confidence", 0)
+                count  = t.get("agent_count", 0)
+                bull   = t.get("debate_bull", "")
+                pm     = t.get("debate_pm", "")
+                t["reasoning"] = (
+                    f"{count}/6 agents agreed at {conf:.0%} confidence. "
+                    f"Bull case: {bull} "
+                    f"PM verdict: {pm}"
+                )[:2000]
+            elif t.get("agent_consensus"):
+                # Agent trade but debate didn't run (e.g. consensus was borderline)
+                votes  = t.get("agent_votes", {})
+                votes_str = "  ".join(f"{a}:{v}" for a, v in list(votes.items())[:4])
+                t["reasoning"] = (
+                    f"{t.get('agent_count',0)}/6 agents: {t.get('agent_consensus')} "
+                    f"at {t.get('agent_confidence',0):.0%} confidence. {votes_str}"
+                )[:2000]
+
+        # Fallback trades (no agent data): generate reasoning via Claude Haiku
+        needs_reasoning = [t for t in new_trades if not t.get("reasoning")]
+        if needs_reasoning:
+            try:
+                from conquest_brain import generate_trade_reasonings
+                scan_map = {s["ticker"]: s for s in scans}
+                trades_and_scans = [
+                    (t, scan_map.get(t["ticker"], {}))
+                    for t in needs_reasoning
+                ]
+                reasonings = generate_trade_reasonings(trades_and_scans)
+                for t in needs_reasoning:
+                    t["reasoning"] = reasonings.get(t["id"], "Reasoning unavailable.")
+                print(f"[PaperTrader] Entry reasoning generated for {len(reasonings)} fallback trades.")
+            except Exception as e:
+                print(f"[PaperTrader] Reasoning generation failed: {e}")
+                for t in needs_reasoning:
+                    t.setdefault("reasoning", "Reasoning unavailable.")
 
     all_trades.extend(new_trades)
     save_trades(all_trades)
@@ -1237,11 +1260,44 @@ def generate_daily_trades(n: int = 10) -> list:
 
 # ── Daily close ────────────────────────────────────────────────────────────────
 
+# NYSE market holidays — markets are fully closed on these dates.
+# Includes observed dates when the holiday falls on a weekend.
+# Update annually (add the next year around December of the current year).
+_NYSE_HOLIDAYS: set = {
+    # 2025
+    date(2025, 1,  1),   # New Year's Day
+    date(2025, 1, 20),   # MLK Day
+    date(2025, 2, 17),   # Presidents' Day
+    date(2025, 4, 18),   # Good Friday
+    date(2025, 5, 26),   # Memorial Day
+    date(2025, 6, 19),   # Juneteenth
+    date(2025, 7,  4),   # Independence Day
+    date(2025, 9,  1),   # Labor Day
+    date(2025, 11, 27),  # Thanksgiving
+    date(2025, 12, 25),  # Christmas
+    # 2026
+    date(2026, 1,  1),   # New Year's Day
+    date(2026, 1, 19),   # MLK Day
+    date(2026, 2, 16),   # Presidents' Day
+    date(2026, 4,  3),   # Good Friday
+    date(2026, 5, 25),   # Memorial Day
+    date(2026, 6, 19),   # Juneteenth
+    date(2026, 7,  3),   # Independence Day (observed — July 4 falls on Saturday)
+    date(2026, 9,  7),   # Labor Day
+    date(2026, 11, 26),  # Thanksgiving
+    date(2026, 12, 25),  # Christmas
+}
+
+
 def _is_trading_day(dt=None) -> bool:
-    """Return True only if dt (default: now ET) is a weekday (Mon–Fri)."""
+    """
+    Return True only if dt (default: now ET) is a market trading day —
+    a weekday that is not a NYSE holiday.
+    """
     if dt is None:
         dt = datetime.now(ET)
-    return dt.weekday() < 5  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+    today = dt.date() if hasattr(dt, "date") else dt
+    return dt.weekday() < 5 and today not in _NYSE_HOLIDAYS
 
 
 def run_daily_close() -> dict:

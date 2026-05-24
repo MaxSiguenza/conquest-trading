@@ -20,6 +20,7 @@ NOTION_TRADE_DB_ID = os.getenv(
 )
 
 _client = None
+_schema_ensured = False   # only run schema check once per process
 
 
 def _get_client():
@@ -42,6 +43,40 @@ def _get_client():
     return _client
 
 
+def _ensure_schema(client):
+    """
+    Auto-add any missing columns to the Trade Journal database schema.
+    Runs once per process. Safe to call repeatedly — no-ops if columns exist.
+    New columns added here: Strike, Expiry Date, Chain Source, Agent Confidence, Debate PM.
+    """
+    global _schema_ensured
+    if _schema_ensured:
+        return
+    _schema_ensured = True
+
+    # Map: property name → Notion property type object
+    wanted = {
+        "Strike":           {"number": {"format": "number"}},
+        "Expiry Date":      {"date": {}},
+        "Chain Source":     {"select": {}},
+        "Agent Confidence": {"number": {"format": "percent"}},
+        "Debate PM":        {"rich_text": {}},
+    }
+
+    try:
+        db = client.databases.retrieve(database_id=NOTION_TRADE_DB_ID)
+        existing = set(db.get("properties", {}).keys())
+        missing  = {k: v for k, v in wanted.items() if k not in existing}
+        if missing:
+            client.databases.update(
+                database_id=NOTION_TRADE_DB_ID,
+                properties=missing,
+            )
+            print(f"[Notion] Schema updated — added columns: {list(missing.keys())}")
+    except Exception as e:
+        print(f"[Notion] Schema check skipped: {e}")
+
+
 # ── Open a new trade ──────────────────────────────────────────────────────────
 
 def log_trade_open(trade: dict) -> bool:
@@ -53,24 +88,50 @@ def log_trade_open(trade: dict) -> bool:
     if not client:
         return False
 
+    _ensure_schema(client)
+
     try:
-        date_opened = (trade.get("date_entered") or "")[:10]
+        date_opened  = (trade.get("date_entered") or "")[:10]
+        expiry_raw   = (trade.get("expiry_date") or "")[:10]
+        chain_src    = trade.get("chain_source", "")
+        agent_conf   = trade.get("agent_confidence")   # None if no agent data
+        debate_pm    = (trade.get("debate_pm") or "")[:2000]
+
+        # Strike: single-leg options use "strike"; spreads use "short_strike" (the sold leg)
+        strike_val = (
+            trade.get("strike")
+            or trade.get("short_strike")
+            or trade.get("short_call_k")   # iron condor short call
+        )
 
         properties = {
-            "Trade ID":  {"title": [{"text": {"content": trade["id"]}}]},
-            "Ticker":    {"rich_text": [{"text": {"content": trade["ticker"]}}]},
+            "Trade ID":   {"title": [{"text": {"content": trade["id"]}}]},
+            "Ticker":     {"rich_text": [{"text": {"content": trade["ticker"]}}]},
             "Trade Type": {"select": {"name": trade["trade_type"]}},
-            "Status":    {"select": {"name": "open"}},
+            "Status":     {"select": {"name": "open"}},
             "Cost Basis": {"number": float(trade.get("cost_basis") or 0)},
-            "MTF Score": {"number": float(trade.get("mtf_score") or 0)},
-            "RSI Entry": {"number": float(trade.get("rsi_entry") or 0)},
-            "ADX Entry": {"number": float(trade.get("adx_entry") or 0)},
+            "MTF Score":  {"number": float(trade.get("mtf_score") or 0)},
+            "RSI Entry":  {"number": float(trade.get("rsi_entry") or 0)},
+            "ADX Entry":  {"number": float(trade.get("adx_entry") or 0)},
             "Entry Reasoning": {
                 "rich_text": [{"text": {"content": (trade.get("reasoning") or "")[:2000]}}]
             },
         }
+
         if date_opened:
             properties["Date Opened"] = {"date": {"start": date_opened}}
+        if expiry_raw:
+            properties["Expiry Date"] = {"date": {"start": expiry_raw}}
+        if strike_val is not None:
+            properties["Strike"] = {"number": float(strike_val)}
+        if chain_src:
+            properties["Chain Source"] = {"select": {"name": chain_src}}
+        if agent_conf is not None:
+            properties["Agent Confidence"] = {"number": round(float(agent_conf), 4)}
+        if debate_pm:
+            properties["Debate PM"] = {
+                "rich_text": [{"text": {"content": debate_pm}}]
+            }
 
         client.pages.create(
             parent={"database_id": NOTION_TRADE_DB_ID},
