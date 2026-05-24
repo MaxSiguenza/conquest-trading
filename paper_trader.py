@@ -54,17 +54,36 @@ IC_PROFIT    =  0.50   # close iron condor when 50 % of max credit earned
 IC_STOP      =  2.00   # close iron condor when position costs 2× credit (loss)
 
 
+def _third_friday(year: int, month: int) -> date:
+    """Third Friday of a given month — standard US options expiration date."""
+    d = date(year, month, 1)
+    days_to_first_fri = (4 - d.weekday()) % 7
+    return d + timedelta(days=days_to_first_fri + 14)   # first Friday + 2 weeks
+
+
 def _options_expiry(entry: date, dte: int = DTE_TARGET) -> str:
     """
-    Return the nearest valid Friday to entry + dte days.
-    Options expire on Fridays; a raw DTE calculation often lands on Sat/Sun/Mon.
+    Standard monthly options expiration closest to entry + dte days.
+    Uses the third Friday of the month — the date every broker (Robinhood,
+    Tastytrade, etc.) lists for standard options on every ticker.
+    Requires at least 21 days from entry so we don't pick an expiry that's
+    already too close to worthless at the time we enter.
     """
-    target    = entry + timedelta(days=dte)
-    days_back  = (target.weekday() - 4) % 7   # 0 if already Friday
-    days_ahead = (4 - target.weekday()) % 7
-    if days_back <= days_ahead:
-        return (target - timedelta(days=days_back)).isoformat()
-    return (target + timedelta(days=days_ahead)).isoformat()
+    target = entry + timedelta(days=dte)
+
+    # Build candidate third-Fridays spanning ±2 months around target
+    candidates: list[date] = []
+    for delta_m in range(-1, 4):
+        m = target.month + delta_m
+        y = target.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        candidates.append(_third_friday(y, m))
+
+    # Must be at least 21 DTE from entry (no point buying near-expiry options)
+    valid = [c for c in candidates if (c - entry).days >= 21]
+
+    # Return the one closest in calendar days to our target date
+    return min(valid, key=lambda c: abs((c - target).days)).isoformat()
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -1187,11 +1206,16 @@ def get_paper_stats() -> dict:
     """Return a comprehensive stats dict for the web dashboard and Discord."""
     trades  = load_trades()
 
-    # Backfill expiry_date for older trades that predate the field
+    # Backfill expiry_date for older trades that predate the field, and fix any
+    # raw DTE dates that landed on a weekend (use standard monthly expiry instead)
     for t in trades:
-        if "expiry_date" not in t and t.get("t_days") and t.get("date_entered"):
-            entry = date.fromisoformat(t["date_entered"][:10])
-            t["expiry_date"] = (entry + timedelta(days=t["t_days"])).isoformat()
+        entry_d = t.get("date_entered", "")[:10]
+        t_days  = t.get("t_days")
+        if entry_d and t_days:
+            entry = date.fromisoformat(entry_d)
+            proper = _options_expiry(entry, t_days)
+            if "expiry_date" not in t or date.fromisoformat(t["expiry_date"]).weekday() >= 5:
+                t["expiry_date"] = proper
 
     closed  = [t for t in trades if t.get("status") == "closed"]
     open_   = [t for t in trades if t.get("status") == "open"]
