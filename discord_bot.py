@@ -1930,11 +1930,15 @@ async def paper_trading_loop():
                     if t.get("agent_consensus"):
                         votes_str = "  ".join(
                             f"{k}: {v}" for k, v in
-                            list(t.get("agent_votes", {}).items())[:3]
+                            list(t.get("agent_votes", {}).items())[:4]
                         )
+                        # Conviction tier badge
+                        tier = t.get("conviction_tier", "STD")
+                        tier_badge = {"HIGH": "🔥 HIGH", "MED": "⚡ MED", "STD": "STD"}.get(tier, tier)
+                        size_note  = f"  ×{t.get('size_mult',1.0):.2g} size" if t.get("size_mult") else ""
                         signals_text = (
                             f"🤖 {t['agent_consensus']}  {t.get('agent_confidence',0):.0%}  "
-                            f"({t.get('agent_count',0)}/6 agree)\n"
+                            f"({t.get('agent_count',0)}/8 agree)  {tier_badge}{size_note}\n"
                             f"{votes_str}"
                         )
                     else:

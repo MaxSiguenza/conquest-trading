@@ -51,13 +51,15 @@ AGENT_NAMES = [
     "catalysts",
     "risk",
     "options_flow",
+    "sentiment",   # Phase 3: StockTwits + social mood
+    "news",        # Phase 3: actual headline analysis
 ]
 
 # Default equal weights — Postgres overrides these once learning starts
 DEFAULT_WEIGHTS = {name: 1.0 for name in AGENT_NAMES}
 
-# Consensus thresholds (Ruflo-inspired)
-MIN_AGENTS_AGREEING   = 4    # at least 4/6 must agree on direction
+# Consensus thresholds (updated for 8 agents)
+MIN_AGENTS_AGREEING   = 5    # at least 5/8 must agree on direction (62.5%)
 MIN_WEIGHTED_CONF     = 0.62  # weighted avg confidence must exceed this
 RISK_VETO_THRESHOLD   = 0.30  # risk agent confidence below this blocks trade
 WEIGHT_LEARN_RATE     = 0.08  # how fast weights shift on win/loss
@@ -94,6 +96,11 @@ class TickerData:
     insider_sentiment:  str   = "N/A" # BULLISH / BEARISH / NEUTRAL
     analyst_upgrades:   int   = 0     # upgrade count last 3 months
     analyst_downgrades: int   = 0     # downgrade count last 3 months
+    # Phase 3: social sentiment + news headlines (no API key required)
+    social_bull_pct:    float = 0.0   # StockTwits bullish % of tagged msgs (0–1)
+    social_bear_pct:    float = 0.0   # StockTwits bearish %
+    social_volume:      int   = 0     # total StockTwits messages (proxy for buzz)
+    news_headlines:     str   = ""    # top 4 recent headlines as pipe-separated text
     error:         Optional[str] = None
 
 
@@ -380,6 +387,68 @@ def fetch_ticker_data(ticker: str, scan: dict = None) -> TickerData:
             except Exception:
                 pass   # Finnhub enrichment is always best-effort
 
+        # ── Social sentiment (StockTwits — no API key needed) ─────────────────
+        social_bull_pct = social_bear_pct = 0.0
+        social_volume   = 0
+        try:
+            import requests as _sreq
+            r = _sreq.get(
+                f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json",
+                headers={"User-Agent": "ConquestTrading/1.0"},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                msgs = r.json().get("messages", [])
+                social_volume = len(msgs)
+                bull = sum(
+                    1 for m in msgs
+                    if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bullish"
+                )
+                bear = sum(
+                    1 for m in msgs
+                    if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bearish"
+                )
+                tagged = bull + bear
+                if tagged > 0:
+                    social_bull_pct = round(bull / tagged, 3)
+                    social_bear_pct = round(bear / tagged, 3)
+        except Exception:
+            pass
+
+        # ── News headlines (yfinance fallback; Finnhub preferred if key set) ───
+        news_headlines = ""
+        try:
+            headlines = []
+            if FINNHUB_KEY:
+                try:
+                    import requests as _nreq
+                    from_dt = (datetime.now() - timedelta(days=4)).strftime("%Y-%m-%d")
+                    today_s = datetime.now().strftime("%Y-%m-%d")
+                    r = _nreq.get(
+                        f"https://finnhub.io/api/v1/company-news"
+                        f"?symbol={ticker}&from={from_dt}&to={today_s}&token={FINNHUB_KEY}",
+                        timeout=5,
+                    )
+                    if r.status_code == 200:
+                        articles = r.json()[:5]
+                        headlines = [
+                            a.get("headline", "")[:100]
+                            for a in articles if a.get("headline")
+                        ]
+                except Exception:
+                    pass
+            # Fallback: yfinance .news (always available, no key needed)
+            if not headlines:
+                yf_news = getattr(tk, "news", None) or []
+                headlines = [
+                    n.get("title", "")[:100]
+                    for n in (yf_news[:5] if isinstance(yf_news, list) else [])
+                    if n.get("title")
+                ]
+            news_headlines = " | ".join(headlines[:4])
+        except Exception:
+            pass
+
         return TickerData(
             ticker=ticker, price=price, scan=scan, info=info,
             hv30=hv30, hv60=hv60, beta=beta, max_dd=max_dd,
@@ -390,6 +459,8 @@ def fetch_ticker_data(ticker: str, scan: dict = None) -> TickerData:
             news_sentiment=news_sentiment, news_count_24h=news_count_24h,
             insider_sentiment=insider_sentiment,
             analyst_upgrades=analyst_upgrades, analyst_downgrades=analyst_downgrades,
+            social_bull_pct=social_bull_pct, social_bear_pct=social_bear_pct,
+            social_volume=social_volume, news_headlines=news_headlines,
         )
 
     except Exception as e:
@@ -583,6 +654,39 @@ BUY = call-heavy flow, unusual upside bets, bullish smart-money positioning vs m
 SELL = extreme put loading beyond macro hedging norms — genuine directional bearish bet.
 HOLD = balanced flow consistent with macro regime, no clear directional signal.
 Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence","suggested_type":"call_spread|long_call|iron_condor|put_spread|stock_long|stock_short|bull_put_spread|bear_call_spread"}}""",
+
+        "sentiment": f"""You are a social sentiment intelligence agent.
+Ticker: {td.ticker} @ ${td.price:.2f}
+StockTwits Social: {td.social_bull_pct:.0%} bullish / {td.social_bear_pct:.0%} bearish ({td.social_volume} total messages)
+Finnhub Sentiment Score: {td.news_sentiment:+.3f}  (scale: -0.5 bearish → +0.5 bullish, {td.news_count_24h} articles)
+Insider Activity (90d): {td.insider_sentiment}
+Analyst Upgrades/Downgrades (1mo): {td.analyst_upgrades}↑ / {td.analyst_downgrades}↓
+{macro_brief}
+{watchlist_ctx}
+
+Social mood is a leading indicator — retail often moves before institutional. But crowded bullish sentiment (>75% bull on StockTwits) can be a contrarian warning sign.
+BUY = social sentiment clearly bullish ({td.social_bull_pct:.0%} > 60%) AND Finnhub score positive AND insiders buying. Crowd is aligned, not crowded.
+SELL = social clearly bearish OR extreme bullish crowding (contrarian) AND negative Finnhub score.
+HOLD = mixed/neutral signals, no strong crowd directional edge.
+Zero StockTwits volume = thin coverage — lower your confidence accordingly.
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence citing specific sentiment numbers","suggested_type":"call_spread|long_call|put_spread|long_put|stock_long|stock_short|iron_condor|bull_put_spread"}}""",
+
+        "news": f"""You are a news catalyst agent. Your job is to analyze actual recent headlines.
+Ticker: {td.ticker} @ ${td.price:.2f}  Sector: {td.info.get('sector','?')}
+Recent Headlines: {td.news_headlines if td.news_headlines else 'No headlines available'}
+Next Earnings: {td.earnings_date}
+Analyst Recommendation: {td.analyst_reco} — Price target upside: {td.target_upside:+.1f}%
+Revenue Growth: {td.info.get('revenueGrowth')}   Earnings Growth: {td.info.get('earningsGrowth')}
+{macro_full}
+{stale_warn}
+
+Read the headlines carefully. Assess whether the news tone is a tailwind or headwind for the stock over the next 30 days.
+EARNINGS RULE: If earnings are within 7 days, the headline risk is BINARY — avoid directional trades, suggest iron_condor instead.
+BUY = headlines signal product launches, earnings beats, analyst upgrades, partnerships, or macro tailwinds for this sector.
+SELL = headlines signal earnings misses, guidance cuts, regulatory risk, leadership issues, or competitive threats.
+HOLD = no material news, neutral/routine coverage, or news that's already priced in.
+If no headlines are available, output HOLD at low confidence (0.40) — absence of data is not a signal.
+Return JSON only: {{"signal":"BUY|SELL|HOLD|WATCH","confidence":0.0-1.0,"reasoning":"one sentence referencing a specific headline or event","suggested_type":"call_spread|long_call|iron_condor|put_spread|stock_long|stock_short|bull_put_spread|bear_call_spread"}}""",
     }
 
     try:
@@ -945,7 +1049,7 @@ class ConquestAgentSystem:
 
         # Run all agents in parallel — pass gctx to every agent
         signals = []
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             from conquest_brain import _get_client
             client = _get_client()
             futs = {
@@ -1147,6 +1251,29 @@ class ConquestAgentSystem:
                 trade["debate_bear"]      = consensus.get("bear_case", "")
                 trade["debate_bear_weak"] = round(consensus.get("bear_weakness", 0), 2)
                 trade["debate_pm"]        = consensus.get("pm_reasoning", "")
+
+            # ── Conviction-based sizing (stock trades only) ───────────────────
+            # Options stay at 1 contract — doubling contracts doubles max loss,
+            # too aggressive while the system is still being calibrated.
+            # Stocks can scale notional safely: high conviction = 1.5× size.
+            conf = consensus.get("confidence", 0.62)
+            if trade["trade_type"] in ("stock_long", "stock_short"):
+                if conf >= 0.82:
+                    mult = 1.50   # very high conviction → $1,500 notional
+                elif conf >= 0.72:
+                    mult = 1.25   # solid conviction → $1,250 notional
+                else:
+                    mult = 1.00   # standard → $1,000 notional
+                if mult > 1.0:
+                    trade["shares"]     = round(trade.get("shares", 1) * mult)
+                    trade["cost_basis"] = round(trade.get("cost_basis", 0) * mult, 2)
+                    trade["size_mult"]  = mult
+            # Tag every trade with conviction tier — visible in Discord + Notion
+            trade["conviction_tier"] = (
+                "HIGH"   if conf >= 0.82 else
+                "MED"    if conf >= 0.72 else
+                "STD"
+            )
 
             new_trades.append(trade)
             type_counts[trade_type] = type_counts.get(trade_type, 0) + 1

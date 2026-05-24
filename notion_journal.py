@@ -60,6 +60,7 @@ def _ensure_schema(client):
         "Expiry Date":      {"date": {}},
         "Chain Source":     {"select": {}},
         "Agent Confidence": {"number": {"format": "percent"}},
+        "Conviction Tier":  {"select": {}},
         "Debate PM":        {"rich_text": {}},
     }
 
@@ -128,6 +129,9 @@ def log_trade_open(trade: dict) -> bool:
             properties["Chain Source"] = {"select": {"name": chain_src}}
         if agent_conf is not None:
             properties["Agent Confidence"] = {"number": round(float(agent_conf), 4)}
+        conviction = trade.get("conviction_tier", "")
+        if conviction:
+            properties["Conviction Tier"] = {"select": {"name": conviction}}
         if debate_pm:
             properties["Debate PM"] = {
                 "rich_text": [{"text": {"content": debate_pm}}]
