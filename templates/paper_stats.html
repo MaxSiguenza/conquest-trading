@@ -359,6 +359,7 @@ canvas { width: 100% !important; }
           {%- if tt in ('long_call','long_put','covered_call') -%}
             {{ ctrs }}x
             {%- if t.get('strike') %} K${{ "%.0f"|format(t.strike) }}{%- endif -%}
+            {%- if t.get('entry_option_price') %} @${{ "%.2f"|format(t.entry_option_price) }}{%- endif -%}
             {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
             {%- if t.get('delta') is not none %} · Δ{{ "%.2f"|format(t.delta) }}{%- endif -%}
             {%- if t.get('theta_dollar_day') is not none %} Θ{{ "%.1f"|format(t.theta_dollar_day) }}/d{%- endif -%}
@@ -367,11 +368,21 @@ canvas { width: 100% !important; }
             {%- if t.get('long_strike') and t.get('short_strike') -%}
               ${{ "%.0f"|format(t.long_strike) }}/${{ "%.0f"|format(t.short_strike) }}
             {%- endif -%}
+            {%- if t.get('entry_net_debit') is not none -%}
+              <span style="color:#60a5fa;font-size:10px"> DEBIT</span>
+            {%- elif t.get('entry_net_credit') is not none -%}
+              <span style="color:#34d399;font-size:10px"> CREDIT</span>
+            {%- endif -%}
             {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt in ('bull_put_spread','bear_call_spread') -%}
             {{ ctrs }}x
             {%- if t.get('short_strike') and t.get('long_strike') -%}
               ${{ "%.0f"|format(t.short_strike) }}/${{ "%.0f"|format(t.long_strike) }}
+            {%- endif -%}
+            {%- if t.get('entry_net_debit') is not none -%}
+              <span style="color:#60a5fa;font-size:10px"> DEBIT</span>
+            {%- elif t.get('entry_net_credit') is not none -%}
+              <span style="color:#34d399;font-size:10px"> CREDIT</span>
             {%- endif -%}
             {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt == 'iron_condor' -%}
@@ -379,6 +390,7 @@ canvas { width: 100% !important; }
             {%- if t.get('short_put_k') and t.get('short_call_k') -%}
               ${{ "%.0f"|format(t.short_put_k) }}–${{ "%.0f"|format(t.short_call_k) }}
             {%- endif -%}
+            <span style="color:#34d399;font-size:10px"> CREDIT</span>
             {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt in ('stock_long','stock_short') -%}
             {%- if t.get('shares') -%}

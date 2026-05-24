@@ -1445,12 +1445,11 @@ def _normalize_trade(t: dict) -> dict:
     t.setdefault("pnl", 0.0)
     t.setdefault("pnl_pct", 0.0)
 
-    if "days_held" not in t:
-        try:
-            entry_d = date.fromisoformat(t["date_entered"][:10])
-            t["days_held"] = (date.today() - entry_d).days
-        except Exception:
-            t["days_held"] = 0
+    try:
+        entry_d = date.fromisoformat(t["date_entered"][:10])
+        t["days_held"] = (date.today() - entry_d).days
+    except Exception:
+        t.setdefault("days_held", 0)
 
     return t
 
