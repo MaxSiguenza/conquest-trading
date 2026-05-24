@@ -354,35 +354,35 @@ canvas { width: 100% !important; }
         <td><span class="badge badge-{{ t.trade_type }}">{{ t.trade_type | replace("_"," ") }}</span></td>
         <td style="font-size:12px;color:#94a3b8">
           {%- set tt = t.trade_type -%}
+          {%- set exp = (t.get('expiry_date') or t.get('expiry') or '')[:10] -%}
           {%- if tt in ('long_call','long_put','covered_call') -%}
-            {%- if t.get('strike') %}K${{ "%.0f"|format(t.strike) }}{% endif %}
-            {%- if t.get('expiry_date') %}
-              {%- set exp = t.expiry_date[:10] -%}
-              · <span style="color:#64748b">{{ exp }}</span>
-              {%- set today_ts = t.date_entered[:10] -%}
-            {%- endif -%}
+            {%- if t.get('strike') %}K${{ "%.0f"|format(t.strike) }}{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
             {%- if t.get('delta') is not none %} · Δ{{ "%.2f"|format(t.delta) }}{%- endif -%}
             {%- if t.get('theta_dollar_day') is not none %} Θ{{ "%.1f"|format(t.theta_dollar_day) }}/d{%- endif -%}
           {%- elif tt in ('call_spread','put_spread') -%}
             {%- if t.get('long_strike') and t.get('short_strike') -%}
               ${{ "%.0f"|format(t.long_strike) }}/${{ "%.0f"|format(t.short_strike) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt in ('bull_put_spread','bear_call_spread') -%}
             {%- if t.get('short_strike') and t.get('long_strike') -%}
               ${{ "%.0f"|format(t.short_strike) }}/${{ "%.0f"|format(t.long_strike) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt == 'iron_condor' -%}
             {%- if t.get('short_put_k') and t.get('short_call_k') -%}
               ${{ "%.0f"|format(t.short_put_k) }}–${{ "%.0f"|format(t.short_call_k) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
-          {%- else -%}
-            —
-          {%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
+          {%- elif tt in ('stock_long','stock_short') -%}
+            {%- if t.get('shares') -%}
+              {{ "%.4g"|format(t.shares) }} sh
+              {%- if t.get('entry_price') %} @ ${{ "%.2f"|format(t.entry_price) }}{%- endif -%}
+            {%- else -%}—{%- endif -%}
+          {%- else -%}—{%- endif -%}
         </td>
-        <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
+        <td style="color:#64748b;font-size:12px">{{ (t.get('date_entered') or t.get('entry_date') or '')[:10] }}</td>
         <td>{{ t.days_held }}</td>
         <td style="color:#94a3b8">${{ "%.2f" | format(t.get('cost_basis', 0)) }}</td>
         <td class="{% if t.pnl >= 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
@@ -424,27 +424,33 @@ canvas { width: 100% !important; }
         <td><span class="badge badge-{{ t.trade_type }}">{{ t.trade_type | replace("_"," ") }}</span></td>
         <td style="font-size:12px;color:#94a3b8">
           {%- set tt = t.trade_type -%}
+          {%- set exp = (t.get('expiry_date') or t.get('expiry') or '')[:10] -%}
           {%- if tt in ('long_call','long_put','covered_call') -%}
-            {%- if t.get('strike') %}K${{ "%.0f"|format(t.strike) }}{% endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if t.get('strike') %}K${{ "%.0f"|format(t.strike) }}{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt in ('call_spread','put_spread') -%}
             {%- if t.get('long_strike') and t.get('short_strike') -%}
               ${{ "%.0f"|format(t.long_strike) }}/${{ "%.0f"|format(t.short_strike) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt in ('bull_put_spread','bear_call_spread') -%}
             {%- if t.get('short_strike') and t.get('long_strike') -%}
               ${{ "%.0f"|format(t.short_strike) }}/${{ "%.0f"|format(t.long_strike) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
           {%- elif tt == 'iron_condor' -%}
             {%- if t.get('short_put_k') and t.get('short_call_k') -%}
               ${{ "%.0f"|format(t.short_put_k) }}–${{ "%.0f"|format(t.short_call_k) }}
             {%- endif -%}
-            {%- if t.get('expiry_date') %} · <span style="color:#64748b">{{ t.expiry_date[:10] }}</span>{%- endif -%}
+            {%- if exp %} · <span style="color:#64748b">exp {{ exp }}</span>{%- endif -%}
+          {%- elif tt in ('stock_long','stock_short') -%}
+            {%- if t.get('shares') -%}
+              {{ "%.4g"|format(t.shares) }} sh
+              {%- if t.get('entry_price') %} @ ${{ "%.2f"|format(t.entry_price) }}{%- endif -%}
+            {%- else -%}—{%- endif -%}
           {%- else -%}—{%- endif -%}
         </td>
-        <td style="color:#64748b;font-size:12px">{{ t.date_entered[:10] }}</td>
+        <td style="color:#64748b;font-size:12px">{{ (t.get('date_entered') or t.get('entry_date') or '')[:10] }}</td>
         <td style="color:#64748b;font-size:12px">{{ (t.date_closed or "")[:10] }}</td>
         <td>{{ t.days_held }}</td>
         <td style="color:#94a3b8">${{ "%.2f" | format(t.get('cost_basis', 0)) }}</td>

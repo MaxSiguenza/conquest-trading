@@ -1401,12 +1401,54 @@ def run_daily_close() -> dict:
 
 # ── Statistics ─────────────────────────────────────────────────────────────────
 
+def _normalize_trade(t: dict) -> dict:
+    """Normalize manually-added positions to match paper trader field names.
+
+    Manually added trades (via positions.py) use different field names than
+    auto-generated paper trades. This makes them display correctly in the dashboard.
+    """
+    # kind → trade_type  (manual: {"kind":"spread","option_type":"call"} → "call_spread")
+    if "trade_type" not in t:
+        kind     = t.get("kind", "")
+        opt_type = t.get("option_type", "call")
+        t["trade_type"] = f"{opt_type}_spread" if kind == "spread" else (kind or "stock_long")
+
+    # entry_date → date_entered
+    if "date_entered" not in t:
+        t["date_entered"] = t.get("entry_date", "")
+
+    # expiry → expiry_date
+    if "expiry_date" not in t and "expiry" in t:
+        t["expiry_date"] = t["expiry"]
+
+    # net_cost / entry_price → cost_basis
+    if "cost_basis" not in t:
+        if "net_cost" in t:
+            t["cost_basis"] = round(float(t["net_cost"]) * 100 * t.get("contracts", 1), 2)
+        elif "entry_price" in t:
+            t["cost_basis"] = round(float(t["entry_price"]) * float(t.get("shares", 1)), 2)
+
+    # manual positions have no status — treat as open
+    t.setdefault("status", "open")
+    t.setdefault("pnl", 0.0)
+    t.setdefault("pnl_pct", 0.0)
+
+    if "days_held" not in t:
+        try:
+            entry_d = date.fromisoformat(t["date_entered"][:10])
+            t["days_held"] = (date.today() - entry_d).days
+        except Exception:
+            t["days_held"] = 0
+
+    return t
+
+
 def get_paper_stats() -> dict:
     """Return a comprehensive stats dict for the web dashboard and Discord."""
-    trades  = load_trades()
+    trades  = [_normalize_trade(t) for t in load_trades()]
 
-    # Backfill expiry_date for older trades that predate the field, and fix any
-    # raw DTE dates that landed on a weekend (use standard monthly expiry instead)
+    # Backfill expiry_date for older auto-generated trades that predate the field,
+    # and fix any raw DTE dates that landed on a weekend
     for t in trades:
         entry_d = t.get("date_entered", "")[:10]
         t_days  = t.get("t_days")
