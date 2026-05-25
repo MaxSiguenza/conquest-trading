@@ -233,9 +233,15 @@ def _run_morning_briefing_job():
     """
     Scheduled job: scan watchlist + write Claude briefing + send to Discord.
     Runs at 9:00 AM ET Monday–Friday if auto_briefing is enabled in settings.
+    Skips on NYSE holidays (Memorial Day, Christmas, etc.)
     """
     with app.app_context():
         try:
+            from market_calendar import is_trading_day, today_context
+            if not is_trading_day():
+                ctx = today_context()
+                print(f"[Scheduler] Morning briefing skipped — {ctx['summary']}")
+                return
             s = _load_settings()
             if not s.get("auto_briefing"):
                 return  # Auto-briefing is disabled
@@ -259,6 +265,27 @@ def _run_morning_briefing_job():
             except Exception:
                 pass
 
+            # Enrich with economic calendar context
+            econ_notes = ""
+            try:
+                from market_calendar import today_context
+                cal = today_context()
+                if cal["today_events"]:
+                    names = ", ".join(f"{e['name']} ({e['importance']})" for e in cal["today_events"])
+                    econ_notes = f"\n\n**TODAY'S ECONOMIC EVENTS:** {names} — expect elevated volatility."
+                if cal["upcoming_events"]:
+                    upcoming_str = " | ".join(
+                        f"{e['name']} in {e['days_away']}d"
+                        for e in cal["upcoming_events"][:3]
+                        if e["importance"] == "HIGH"
+                    )
+                    if upcoming_str:
+                        econ_notes += f"\n**UPCOMING (7 days):** {upcoming_str}"
+                if econ_notes:
+                    macro_notes = (macro_notes or "") + econ_notes
+            except Exception:
+                pass
+
             briefing_text = morning_briefing(scan_results, macro_notes=macro_notes)
             embed = {
                 "title":       "⚔️  Conquest Morning Briefing  —  Auto 9 AM ET",
@@ -277,11 +304,16 @@ def _run_morning_briefing_job():
 
 
 def _run_brief_generation_job():
-    """APScheduler job: collect all data and pre-generate the morning brief at 8:45 AM ET."""
+    """APScheduler job: collect all data and pre-generate the morning brief at 8:45 AM ET.
+    Skips on NYSE holidays."""
     with app.app_context():
         try:
+            from market_calendar import is_trading_day, today_context
+            if not is_trading_day():
+                ctx = today_context()
+                print(f"[Scheduler] Brief generation skipped — {ctx['summary']}")
+                return
             from morning_brief import generate_brief
-            import pytz
             s         = _load_settings()
             watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
             brief     = generate_brief(watchlist=watchlist, force=True)
