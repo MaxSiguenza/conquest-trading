@@ -105,6 +105,8 @@ async def on_ready():
     print(f"   Auto tasks starting...\n")
     if not morning_briefing_task.is_running():
         morning_briefing_task.start()
+    if not evening_calendar_task.is_running():
+        evening_calendar_task.start()
     if not paper_trading_loop.is_running():
         paper_trading_loop.start()
 
@@ -1315,7 +1317,7 @@ async def screener_cmd(ctx, *tickers):
 
 # ── !earnings ─────────────────────────────────────────────────────────────────
 
-@bot.command(name="earnings", aliases=["er", "earningsradar", "calendar"])
+@bot.command(name="earnings", aliases=["er", "earningsradar"])
 async def earnings_cmd(ctx, days: int = 14):
     """Show upcoming earnings for all watchlist names within N days."""
     thinking = await ctx.send(
@@ -1385,6 +1387,20 @@ async def earnings_cmd(ctx, days: int = 14):
         )
 
 
+# ── !econ / !calendar ─────────────────────────────────────────────────────────
+
+@bot.command(name="econ", aliases=["economiccalendar", "ecocal", "events"])
+async def econ_cmd(ctx, days: int = 14):
+    """Show upcoming macro economic events (FOMC, CPI, NFP, PCE, GDP) for the next N days."""
+    thinking = await ctx.send(f"📆 Loading economic calendar for the next {days} days...")
+    econ_ch  = await _get_channel("economic-calendar", "macro-worldview", "general")
+    dest     = econ_ch if econ_ch else ctx.channel
+    await thinking.delete()
+    await _post_economic_calendar_embed(dest, days=days)
+    if dest != ctx.channel:
+        await ctx.send(f"📆 Economic calendar posted to {dest.mention}", delete_after=8)
+
+
 # ── !testchannels ─────────────────────────────────────────────────────────────
 
 @bot.command(name="testchannels", aliases=["tc", "techchannels"])
@@ -1392,21 +1408,22 @@ async def testchannels_cmd(ctx):
     """Fire a test message to every dedicated channel to verify routing."""
 
     CHANNEL_MAP = [
-        ("morning-briefing", "🗞",  "Morning Intelligence Brief",  "Auto-posts the daily macro brief at 9:00 AM ET."),
-        ("trade-alerts",     "🧪",  "Trade Alerts",                "New paper trades post here at 9:35 AM ET."),
-        ("trade-log",        "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
-        ("evening-debrief",  "📊",  "Evening Debrief",             "Claude-narrated EOD wrap with paper trading summary at 4:05 PM ET."),
-        ("daily-pnl",        "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
-        ("stocks",           "📈",  "Stock Watchlist",             "Auto-scan results post here at market open (9:30 AM). !watch and !deepdive cards also post here."),
-        ("earnings-radar",   "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
-        ("macro-worldview",  "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
-        ("live-positions",   "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
-        ("screener",         "📊",  "Screener",                    "Pre-screener results (top candidates from 129-ticker scan) post here each morning at 9:35 AM ET. Weekly value/growth screen also posts here every Monday."),
-        ("status-dashboard", "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
-        ("agent-brain",      "🤖",  "Agent Brain",                 "Agent weight updates and learning events post here automatically after trades close."),
-        ("agent-debate",     "🗣",  "Agent Debate",                "Full bull/bear debate transcript posts here for every paper trade. See what the bull advocate argued, what the bear punched holes in, and the Portfolio Manager's final verdict."),
-        ("missed-trades",    "🚫",  "Missed Trades",               "Trades the PM debate vetoed — shows what the system almost took and exactly why it said no. Learn from skipped setups."),
-        ("sector-rotation",  "🔄",  "Sector Rotation",             "Daily sector ETF performance and rotation signal posts here each morning at 9:00 AM ET alongside the briefing."),
+        ("morning-briefing",    "🗞",  "Morning Intelligence Brief",  "Auto-posts the daily macro brief at 9:00 AM ET."),
+        ("trade-alerts",        "🧪",  "Trade Alerts",                "New paper trades post here at 9:35 AM ET."),
+        ("trade-log",           "📋",  "Trade Log",                   "Each individual stop/target/expiry close posts here."),
+        ("evening-debrief",     "📊",  "Evening Debrief",             "Claude-narrated EOD wrap with paper trading summary at 4:05 PM ET."),
+        ("daily-pnl",           "💰",  "Daily P&L",                   "Short P&L one-liner posts here at 4:05 PM ET."),
+        ("stocks",              "📈",  "Stock Watchlist",             "Auto-scan results post here at market open (9:30 AM). !watch and !deepdive cards also post here."),
+        ("earnings-radar",      "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
+        ("macro-worldview",     "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
+        ("economic-calendar",   "📆",  "Economic Calendar",           "FOMC, CPI, NFP, PCE and GDP events. Morning-of alerts at 9 AM and eve-of alerts at 4:30 PM ET."),
+        ("live-positions",      "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
+        ("screener",            "📊",  "Screener",                    "Pre-screener results (top candidates from 129-ticker scan) post here each morning at 9:35 AM ET. Weekly value/growth screen also posts here every Monday."),
+        ("status-dashboard",    "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
+        ("agent-brain",         "🤖",  "Agent Brain",                 "Agent weight updates and learning events post here automatically after trades close."),
+        ("agent-debate",        "🗣",  "Agent Debate",                "Full bull/bear debate transcript posts here for every paper trade. See what the bull advocate argued, what the bear punched holes in, and the Portfolio Manager's final verdict."),
+        ("missed-trades",       "🚫",  "Missed Trades",               "Trades the PM debate vetoed — shows what the system almost took and exactly why it said no. Learn from skipped setups."),
+        ("sector-rotation",     "🔄",  "Sector Rotation",             "Daily sector ETF performance and rotation signal posts here each morning at 9:00 AM ET alongside the briefing."),
     ]
 
     status_lines = []
@@ -2546,19 +2563,88 @@ async def _post_full_brief(channel, sections: dict, discord_summary: str,
     )
 
 
+# ── Economic calendar helper ──────────────────────────────────────────────────
+
+async def _post_economic_calendar_embed(channel, days: int = 7, title_suffix: str = ""):
+    """
+    Build and post the economic calendar embed to `channel`.
+    Shows events for the next `days` calendar days.
+    """
+    from market_calendar import upcoming_events, today_context
+    import datetime as _dt
+
+    cal   = today_context()
+    evs   = upcoming_events(days=days)
+    today = _dt.date.today()
+
+    if not evs and not cal["today_events"]:
+        embed = discord.Embed(
+            title=f"📆  Economic Calendar{' — ' + title_suffix if title_suffix else ''}",
+            description=f"No major economic events in the next {days} days.",
+            color=COLOR_DARK,
+            timestamp=_ts(),
+        )
+        embed.set_footer(text="Conquest Economic Calendar  •  FOMC · CPI · NFP · PCE · GDP")
+        await channel.send(embed=embed)
+        return
+
+    lines = []
+
+    # Today's events (if any)
+    if cal["today_events"]:
+        for e in cal["today_events"]:
+            imp_icon = "🔴" if e["importance"] == "HIGH" else ("🟡" if e["importance"] == "MEDIUM" else "🟢")
+            lines.append(f"{imp_icon} **TODAY — {e['name']}**\n  _{e['note']}_")
+
+    # Upcoming events
+    for e in evs:
+        ev_date  = _dt.date.fromisoformat(e["date"])
+        days_away = e["days_away"]
+        imp_icon  = "🔴" if e["importance"] == "HIGH" else ("🟡" if e["importance"] == "MEDIUM" else "🟢")
+        label     = "TOMORROW" if days_away == 1 else f"in {days_away}d  ({ev_date.strftime('%b %d')})"
+        lines.append(f"{imp_icon} **{e['name']}** — {label}\n  _{e['note']}_")
+
+    description = "\n\n".join(lines[:10])  # Discord embed limit guard
+
+    # Color: red if today has HIGH events, gold if tomorrow, purple otherwise
+    if cal["today_events"] and any(e["importance"] == "HIGH" for e in cal["today_events"]):
+        color = COLOR_RED
+    elif evs and evs[0]["days_away"] == 1 and evs[0]["importance"] == "HIGH":
+        color = COLOR_GOLD
+    else:
+        color = COLOR_PURPLE
+
+    embed = discord.Embed(
+        title=f"📆  Economic Calendar — Next {days} Days{' — ' + title_suffix if title_suffix else ''}",
+        description=description,
+        color=color,
+        timestamp=_ts(),
+    )
+    embed.add_field(
+        name="Key",
+        value="🔴 HIGH impact  🟡 MEDIUM  🟢 LOW\nHIGH events: FOMC, CPI, NFP, PCE, GDP",
+        inline=False,
+    )
+    embed.set_footer(text="Conquest Economic Calendar  •  Sources: Fed, BLS, BEA  •  Dates approximate")
+    await channel.send(embed=embed)
+
+
 # ── Auto morning briefing ─────────────────────────────────────────────────────
+
+_econ_eve_sent_date = None   # tracks last date the eve-of alert was sent
 
 @tasks.loop(minutes=1)
 async def morning_briefing_task():
-    """Fires every minute, posts briefing once at 9 AM ET on weekdays."""
+    """Fires every minute, posts briefing once at 9 AM ET on trading days."""
     global _briefing_sent_date, _screener_dates
     try:
         import pytz
+        from market_calendar import is_trading_day
         now_et = datetime.now(pytz.timezone("America/New_York"))
         today  = now_et.date()
 
-        # Only run Mon–Fri at 9:00 AM, and only once per calendar day
-        if not (now_et.weekday() < 5 and now_et.hour == 9 and now_et.minute == 0):
+        # Only run on NYSE trading days at 9:00 AM, and only once per calendar day
+        if not (is_trading_day(today) and now_et.hour == 9 and now_et.minute == 0):
             return
         if _briefing_sent_date == today:
             return
@@ -2636,6 +2722,15 @@ async def morning_briefing_task():
         except Exception as e_mac:
             print(f"[Bot] Auto-macro error: {e_mac}")
 
+        # ── Economic calendar — post to #economic-calendar ───────────────────
+        try:
+            econ_ch = await _get_channel("economic-calendar", "macro-worldview", "general")
+            if econ_ch:
+                await _post_economic_calendar_embed(econ_ch, days=7, title_suffix="9 AM ET")
+                print(f"[Bot] Economic calendar posted to #{econ_ch.name}")
+        except Exception as e_econ:
+            print(f"[Bot] Economic calendar error: {e_econ}")
+
         # ── Sector rotation — ETF heat map to #sector-rotation ───────────────
         try:
             sector_ch = await _get_channel("sector-rotation", "macro-worldview", "general")
@@ -2699,6 +2794,77 @@ async def morning_briefing_task():
 
 @morning_briefing_task.before_loop
 async def before_morning_briefing():
+    await bot.wait_until_ready()
+
+
+# ── Eve-of-event alert — 4:30 PM ET, alerts about next trading day's HIGH events ─
+
+@tasks.loop(minutes=1)
+async def evening_calendar_task():
+    """
+    Fires every minute, posts a heads-up once at 4:30 PM ET when the NEXT
+    trading day has HIGH-impact economic events (FOMC, CPI, NFP, PCE, GDP).
+    This gives you ~17 hours notice before the market opens on event day.
+    """
+    global _econ_eve_sent_date
+    try:
+        import pytz
+        from market_calendar import upcoming_events, next_trading_day, is_trading_day
+        import datetime as _dt
+
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+        today  = now_et.date()
+
+        # Only fire at 4:30 PM ET on weekdays, once per day
+        if not (now_et.weekday() < 5 and now_et.hour == 16 and now_et.minute == 30):
+            return
+        if _econ_eve_sent_date == today:
+            return
+        _econ_eve_sent_date = today
+
+        # Find HIGH events on the next trading day
+        next_td   = next_trading_day(today)
+        days_away = (next_td - today).days
+        all_evs   = upcoming_events(days=days_away + 1)
+        next_evs  = [e for e in all_evs
+                     if e["date"] == next_td.isoformat() and e["importance"] == "HIGH"]
+
+        if not next_evs:
+            return  # Nothing important tomorrow — stay quiet
+
+        econ_ch = await _get_channel("economic-calendar", "macro-worldview", "general")
+        if not econ_ch:
+            return
+
+        lines = []
+        for e in next_evs:
+            lines.append(f"🔴 **{e['name']}**\n  _{e['note']}_")
+
+        embed = discord.Embed(
+            title=f"⚠️  HIGH-IMPACT EVENT TOMORROW — {next_td.strftime('%A, %b %d')}",
+            description="\n\n".join(lines),
+            color=COLOR_ORANGE,
+            timestamp=_ts(),
+        )
+        embed.add_field(
+            name="What this means",
+            value=(
+                "Expect elevated volatility at and around the release time.\n"
+                "Consider: tightening stops on open positions, reducing size on new entries, "
+                "or avoiding directional trades until after the number drops."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Conquest Economic Calendar  •  Eve-of-event alert  •  4:30 PM ET")
+        await econ_ch.send(embed=embed)
+        print(f"[Bot] Eve-of-event alert sent — {len(next_evs)} HIGH event(s) on {next_td}")
+
+    except Exception as e:
+        print(f"[Bot] Evening calendar task error: {e}")
+
+
+@evening_calendar_task.before_loop
+async def before_evening_calendar():
     await bot.wait_until_ready()
 
 
@@ -2788,6 +2954,15 @@ async def runmorning_cmd(ctx):
     except Exception as e:
         print(f"[Bot] !runmorning macro error: {e}")
 
+    # ── 3b. Economic calendar ─────────────────────────────────────────────────
+    try:
+        econ_ch = await _get_channel("economic-calendar", "macro-worldview", "general")
+        if econ_ch:
+            await _post_economic_calendar_embed(econ_ch, days=7, title_suffix="Manual Run")
+            print(f"[Bot] !runmorning — economic calendar posted to #{econ_ch.name}")
+    except Exception as e:
+        print(f"[Bot] !runmorning economic calendar error: {e}")
+
     # ── 4. Weekly screener (run regardless of day when triggered manually) ────
     try:
         screener_ch = await _get_channel("screener", "general")
@@ -2817,7 +2992,7 @@ async def runmorning_cmd(ctx):
         await screener_ch.send(f"⚠️ Screener error: {e}")
         print(f"[Bot] !runmorning screener error: {e}")
 
-    await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#screener`.", delete_after=30)
+    await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#economic-calendar`, `#screener`.", delete_after=30)
 
 
 # ── AI Chatbot ────────────────────────────────────────────────────────────────
