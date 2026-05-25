@@ -67,6 +67,7 @@ NOTIONAL      = 1_000    # per-trade notional = 1% of $100k starting capital
 RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
 STARTING_CAPITAL = 100_000   # paper account starting value
 COVERED_CALL_MAX_CAPITAL = STARTING_CAPITAL * 0.10
+ENABLE_CREDIT_SPREAD_BACKTEST = False
 
 # ── Signal quality filter ──────────────────────────────────────────────────────
 # The live 6-agent swarm requires ≥4/6 agents to agree before trading.
@@ -1375,7 +1376,10 @@ def run_backtest(
         stk_trades        = _simulate_trades(tkr, df)
         call_trades       = _simulate_option_trades(tkr, df, "call")
         put_trades        = _simulate_option_trades(tkr, df, "put")
-        bull_put_trades   = _simulate_credit_spread_trades(tkr, df, "bull_put")
+        bull_put_trades   = (
+            _simulate_credit_spread_trades(tkr, df, "bull_put")
+            if ENABLE_CREDIT_SPREAD_BACKTEST else []
+        )
         # bear_call removed: only 18 trades/2y, inverted R:R, statistical noise
         cov_call_trades   = _simulate_covered_call_trades(tkr, df)
         # tag stock trade type for reporting

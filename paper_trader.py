@@ -217,12 +217,50 @@ _TYPE_WEIGHTS = {
     "covered_call":     2,   # sell OTM call for income on bullish stocks
 }
 
+DISABLED_NEW_TRADE_TYPES = {
+    t.strip()
+    for t in os.getenv(
+        "DISABLED_NEW_TRADE_TYPES",
+        "bull_put_spread,bear_call_spread",
+    ).split(",")
+    if t.strip()
+}
+
 OPT_TYPES = (
     "long_call", "long_put", "call_spread", "put_spread",
     "iron_condor", "bull_put_spread", "bear_call_spread",
     "covered_call",
 )
 TRUSTED_OPTION_ENTRY_SOURCES = ("live_chain_mid", "historical_contract_close")
+
+
+def _is_trade_type_enabled(trade_type: str) -> bool:
+    return trade_type not in DISABLED_NEW_TRADE_TYPES
+
+
+def _choose_enabled(candidates: list[str], fallback: str = "stock_long") -> str:
+    allowed = [tt for tt in candidates if _is_trade_type_enabled(tt)]
+    return random.choice(allowed) if allowed else fallback
+
+
+def _replacement_trade_type(scan: dict, blocked_type: str) -> str:
+    daily = scan.get("daily", "BULL")
+    weekly = scan.get("weekly", "BULL")
+    hv_rank = scan.get("hv_rank", 50.0)
+    sqz_fired = scan.get("sqz_fired", False)
+    bullish = daily == "BULL" and weekly == "BULL"
+    bearish = daily == "BEAR" and weekly == "BEAR"
+    iv_cheap = hv_rank < 35
+
+    if blocked_type == "bull_put_spread":
+        if bullish and iv_cheap and sqz_fired:
+            return _choose_enabled(["long_call", "call_spread", "stock_long"])
+        return _choose_enabled(["covered_call", "stock_long", "call_spread"])
+    if blocked_type == "bear_call_spread":
+        if bearish and iv_cheap:
+            return _choose_enabled(["long_put", "put_spread", "stock_short"], "put_spread")
+        return _choose_enabled(["put_spread", "stock_short"], "put_spread")
+    return _choose_enabled(["stock_long", "call_spread", "long_call"])
 
 def _assign_trade_type(scan: dict) -> str:
     """
@@ -1147,6 +1185,8 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
 
 
 def _build_trade(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
+    if not _is_trade_type_enabled(trade_type):
+        return None
     if trade_type in ("stock_long", "stock_short"):
         return _build_stock(scan, trade_type, ts)
     if trade_type in ("long_call", "long_put"):
@@ -1695,10 +1735,12 @@ def generate_daily_trades(n: int = 10) -> list:
                 continue
 
             trade_type = _assign_trade_type(scan)
+            if not _is_trade_type_enabled(trade_type):
+                trade_type = _replacement_trade_type(scan, trade_type)
 
             if type_counts.get(trade_type, 0) >= 3:
                 pool_candidates = [tt for tt in _TYPE_WEIGHTS
-                                   if type_counts.get(tt, 0) < 3]
+                                   if type_counts.get(tt, 0) < 3 and _is_trade_type_enabled(tt)]
                 if not pool_candidates:
                     break
                 trade_type = min(pool_candidates,
@@ -1714,8 +1756,13 @@ def generate_daily_trades(n: int = 10) -> list:
         # Second pass: iron condors on leftovers
         if len(new_trades) < n:
             remaining = [s for s in fallback_scans if s["ticker"] not in used_tickers]
-            fallback_types = ["iron_condor", "call_spread", "put_spread",
-                              "long_call", "long_put", "stock_long"]
+            fallback_types = [
+                tt for tt in ("iron_condor", "call_spread", "put_spread",
+                              "long_call", "long_put", "stock_long")
+                if _is_trade_type_enabled(tt)
+            ]
+            if not fallback_types:
+                fallback_types = ["stock_long"]
             fi = 0
             for scan in remaining:
                 if len(new_trades) >= n:

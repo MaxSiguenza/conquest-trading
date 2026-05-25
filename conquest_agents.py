@@ -1165,7 +1165,7 @@ class ConquestAgentSystem:
         Returns list of trade dicts in the same format as paper_trader.py
         so the rest of the system works unchanged.
         """
-        from paper_trader import _build_trade
+        from paper_trader import _build_trade, _is_trade_type_enabled, _replacement_trade_type
         existing_tickers = existing_tickers or set()
         ts = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
 
@@ -1208,6 +1208,8 @@ class ConquestAgentSystem:
             td         = r.get("td")
             signals    = r.get("signals", [])
             trade_type = consensus.get("suggested_type", "call_spread")
+            if not _is_trade_type_enabled(trade_type):
+                trade_type = _replacement_trade_type(td.scan if td else {}, trade_type)
 
             # ── Guard 1: cap each trade type at 3 ────────────────────────────
             if type_counts.get(trade_type, 0) >= 3:
@@ -1215,7 +1217,7 @@ class ConquestAgentSystem:
                     "call_spread","put_spread","long_call","long_put",
                     "iron_condor","stock_long","stock_short",
                     "bull_put_spread","covered_call",
-                ] if type_counts.get(tt, 0) < 3]
+                ] if type_counts.get(tt, 0) < 3 and _is_trade_type_enabled(tt)]
                 if not alts:
                     break
                 trade_type = min(alts, key=lambda tt: type_counts.get(tt, 0))
