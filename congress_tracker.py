@@ -4,15 +4,15 @@ congress_tracker.py — Conquest Trading
 ========================================
 Congressional stock trade tracker using public STOCK Act disclosure data.
 
-Data sources (free, no API key required):
-  - House: https://housestockwatcher.com/api
-  - Senate: https://senatestockwatcher.com/api
+Data sources tried in order (all free, no API key):
+  Primary:  housestockwatcher.com/api  +  senatestockwatcher.com/api
+  Fallback: GitHub-mirrored CSV snapshots (House Clerk / Senate)
 
 Under the STOCK Act (2012), members of Congress must disclose stock trades
-within 30-45 days of execution. This data is public record.
+within 30-45 days of execution. This is fully public record.
 
 Usage:
-    from congress_tracker import recent_trades, trades_for_ticker, watchlist_trades
+    from congress_tracker import recent_trades, trades_for_ticker, watchlist_trades, debug_raw
 """
 
 from __future__ import annotations
@@ -24,13 +24,20 @@ from typing import Optional
 
 import requests
 
-# ── API endpoints ──────────────────────────────────────────────────────────────
-_HOUSE_API  = "https://housestockwatcher.com/api"
-_SENATE_API = "https://senatestockwatcher.com/api"
-_TIMEOUT    = 15
+# ── API endpoints (tried in order with fallbacks) ─────────────────────────────
+_HOUSE_ENDPOINTS = [
+    "https://housestockwatcher.com/api",
+    "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+]
+_SENATE_ENDPOINTS = [
+    "https://senatestockwatcher.com/api",
+    "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+]
+_TIMEOUT = 15
+_HEADERS = {"User-Agent": "ConquestTrading/1.0 (contact: github.com/conquest-trading)"}
 
 
-# ── Amount range mid-points (for sorting/display) ─────────────────────────────
+# ── Amount display ─────────────────────────────────────────────────────────────
 _AMOUNT_ORDER = {
     "$1,001 - $15,000":         1,
     "$15,001 - $50,000":        2,
@@ -42,7 +49,6 @@ _AMOUNT_ORDER = {
     "$5,000,001 - $25,000,000": 8,
     "Over $25,000,000":         9,
 }
-
 _AMOUNT_LABEL = {
     "$1,001 - $15,000":         "<$15k",
     "$15,001 - $50,000":        "$15k–50k",
@@ -56,146 +62,221 @@ _AMOUNT_LABEL = {
 }
 
 
+# ── Date parsing ───────────────────────────────────────────────────────────────
 def _parse_date(s: str) -> Optional[date]:
     if not s:
         return None
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
         try:
-            return datetime.strptime(s[:10], fmt).date()
+            return datetime.strptime(str(s)[:10], fmt).date()
         except ValueError:
             pass
     return None
 
 
-def _clean_ticker(raw: str) -> str:
-    """Normalise ticker — strip whitespace, $, and trailing garbage."""
-    if not raw:
-        return ""
-    t = raw.strip().upper().replace("$", "").split()[0]
-    # Keep only valid ticker characters
-    t = re.sub(r"[^A-Z0-9\.]", "", t)
-    return t
+# ── Ticker extraction ──────────────────────────────────────────────────────────
+def _extract_ticker(ticker_raw: str, description: str = "") -> str:
+    """
+    Extract a clean ticker from the raw ticker field or asset description.
+    Handles: 'NVDA', 'nvda', 'NVDA ', '--', 'N/A', '$NVDA',
+             'NVIDIA Corporation (NVDA)', 'Call Option NVDA', etc.
+    """
+    # Try the direct ticker field first
+    if ticker_raw and ticker_raw.strip() not in ("--", "N/A", "n/a", "", "nan"):
+        t = ticker_raw.strip().upper().replace("$", "")
+        # Strip option suffix like "NVDA230120C..." — keep root symbol
+        t = re.split(r'\d{6}[CP]', t)[0]
+        t = re.sub(r"[^A-Z0-9\.\-]", "", t).strip("-.")
+        if 1 <= len(t) <= 6:
+            return t
+
+    # Try to extract from asset description e.g. "NVIDIA Corp (NVDA)"
+    if description:
+        m = re.search(r'\(([A-Z]{1,6})\)', description.upper())
+        if m:
+            return m.group(1)
+        # "Stock: NVDA" or "Call Option NVDA"
+        m = re.search(r'\b([A-Z]{2,6})\b', description.upper())
+        if m and m.group(1) not in ("CALL", "PUT", "CORP", "INC", "ETF",
+                                     "LLC", "THE", "AND", "FOR", "NEW"):
+            return m.group(1)
+    return ""
 
 
+# ── Action normalisation ───────────────────────────────────────────────────────
+def _parse_action(raw: str) -> str:
+    r = (raw or "").lower()
+    if "purchase" in r or "buy" in r:
+        return "buy"
+    if "sale_full" in r or "sale_partial" in r or "sale" in r or "sell" in r or "sold" in r:
+        return "sell"
+    if "exchange" in r:
+        return "exchange"
+    return raw.strip().lower() or "unknown"
+
+
+# ── Row normalizers ────────────────────────────────────────────────────────────
 def _normalize_house(raw: dict) -> dict:
-    """Map a House API row to the standard trade dict."""
-    ticker = _clean_ticker(raw.get("ticker") or "")
-    tx_type = (raw.get("type") or "").lower()
-    if "purchase" in tx_type:
-        action = "buy"
-    elif "sale" in tx_type or "sold" in tx_type:
-        action = "sell"
-    elif "exchange" in tx_type:
-        action = "exchange"
-    else:
-        action = tx_type or "unknown"
-
-    amount_raw = raw.get("amount") or ""
+    description = raw.get("asset_description") or ""
+    ticker      = _extract_ticker(raw.get("ticker") or "", description)
+    amount_raw  = raw.get("amount") or ""
     return {
         "chamber":          "House",
-        "member":           raw.get("representative") or "",
+        "member":           (raw.get("representative") or raw.get("name") or "").strip(),
         "state":            raw.get("state") or "",
-        "party":            (raw.get("party") or "")[:1].upper(),   # R / D / I
+        "party":            (raw.get("party") or "")[:1].upper(),
         "ticker":           ticker,
-        "asset":            raw.get("asset_description") or "",
+        "asset":            description,
         "asset_type":       raw.get("asset_type") or "",
-        "action":           action,
+        "action":           _parse_action(raw.get("type") or raw.get("transaction_type") or ""),
         "amount_raw":       amount_raw,
-        "amount_label":     _AMOUNT_LABEL.get(amount_raw, amount_raw),
+        "amount_label":     _AMOUNT_LABEL.get(amount_raw, amount_raw or "?"),
         "amount_order":     _AMOUNT_ORDER.get(amount_raw, 0),
-        "transaction_date": _parse_date(raw.get("transaction_date") or ""),
-        "disclosure_date":  _parse_date(raw.get("disclosure_date") or ""),
+        "transaction_date": _parse_date(raw.get("transaction_date") or raw.get("date") or ""),
+        "disclosure_date":  _parse_date(raw.get("disclosure_date") or raw.get("filed_date") or ""),
         "comment":          raw.get("comment") or "",
     }
 
 
 def _normalize_senate(raw: dict) -> dict:
-    """Map a Senate API row to the standard trade dict."""
-    ticker = _clean_ticker(raw.get("ticker") or "")
-    tx_type = (raw.get("type") or "").lower()
-    if "purchase" in tx_type:
-        action = "buy"
-    elif "sale" in tx_type or "sold" in tx_type:
-        action = "sell"
-    elif "exchange" in tx_type:
-        action = "exchange"
-    else:
-        action = tx_type or "unknown"
-
-    amount_raw = raw.get("amount") or ""
+    description = raw.get("asset_description") or ""
+    ticker      = _extract_ticker(
+        raw.get("ticker") or raw.get("asset_ticker") or "",
+        description,
+    )
+    amount_raw  = raw.get("amount") or ""
     return {
         "chamber":          "Senate",
-        "member":           raw.get("senator") or "",
+        "member":           (raw.get("senator") or raw.get("first_name", "") + " " + raw.get("last_name", "") or "").strip(),
         "state":            raw.get("state") or "",
         "party":            (raw.get("party") or "")[:1].upper(),
         "ticker":           ticker,
-        "asset":            raw.get("asset_description") or "",
+        "asset":            description,
         "asset_type":       raw.get("asset_type") or "",
-        "action":           action,
+        "action":           _parse_action(raw.get("type") or raw.get("transaction_type") or ""),
         "amount_raw":       amount_raw,
-        "amount_label":     _AMOUNT_LABEL.get(amount_raw, amount_raw),
+        "amount_label":     _AMOUNT_LABEL.get(amount_raw, amount_raw or "?"),
         "amount_order":     _AMOUNT_ORDER.get(amount_raw, 0),
-        "transaction_date": _parse_date(raw.get("transaction_date") or ""),
-        "disclosure_date":  _parse_date(raw.get("disclosure_date") or ""),
+        "transaction_date": _parse_date(raw.get("transaction_date") or raw.get("date") or ""),
+        "disclosure_date":  _parse_date(raw.get("disclosure_date") or raw.get("filed_date") or ""),
         "comment":          raw.get("comment") or "",
     }
 
 
 # ── Raw fetchers ───────────────────────────────────────────────────────────────
+def _fetch_from_endpoints(endpoints: list[str], normalizer, limit: int = 2000) -> tuple[list[dict], str]:
+    """
+    Try each endpoint in order. Returns (normalized_trades, source_url_used).
+    """
+    last_err = ""
+    for url in endpoints:
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
 
-def _fetch_house(limit: int = 500) -> list[dict]:
-    """Fetch latest House disclosures. Returns normalized trade dicts."""
-    try:
-        resp = requests.get(_HOUSE_API, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        # API may return {"data": [...]} or just [...]
-        rows = data.get("data", data) if isinstance(data, dict) else data
-        normalized = [_normalize_house(r) for r in rows[:limit] if isinstance(r, dict)]
-        return [t for t in normalized if t["ticker"]]
-    except Exception as e:
-        print(f"[Congress] House API error: {e}")
-        return []
+            # Handle both {"data": [...]} and direct [...]
+            if isinstance(data, dict):
+                rows = data.get("data") or data.get("transactions") or data.get("results") or []
+            elif isinstance(data, list):
+                rows = data
+            else:
+                rows = []
+
+            normalized = []
+            for r in rows[:limit]:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    n = normalizer(r)
+                    if n["ticker"]:          # skip rows with no identifiable ticker
+                        normalized.append(n)
+                except Exception:
+                    pass
+
+            print(f"[Congress] {url} → {len(normalized)} trades with tickers (from {len(rows)} raw rows)")
+            return normalized, url
+
+        except Exception as e:
+            last_err = str(e)
+            print(f"[Congress] {url} failed: {e}")
+            continue
+
+    print(f"[Congress] All endpoints failed. Last error: {last_err}")
+    return [], ""
 
 
-def _fetch_senate(limit: int = 500) -> list[dict]:
-    """Fetch latest Senate disclosures. Returns normalized trade dicts."""
-    try:
-        resp = requests.get(_SENATE_API, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("data", data) if isinstance(data, dict) else data
-        normalized = [_normalize_senate(r) for r in rows[:limit] if isinstance(r, dict)]
-        return [t for t in normalized if t["ticker"]]
-    except Exception as e:
-        print(f"[Congress] Senate API error: {e}")
-        return []
+def _fetch_house(limit: int = 2000) -> list[dict]:
+    trades, _ = _fetch_from_endpoints(_HOUSE_ENDPOINTS, _normalize_house, limit)
+    return trades
+
+
+def _fetch_senate(limit: int = 2000) -> list[dict]:
+    trades, _ = _fetch_from_endpoints(_SENATE_ENDPOINTS, _normalize_senate, limit)
+    return trades
+
+
+# ── Debug helper ───────────────────────────────────────────────────────────────
+def debug_raw(n: int = 5) -> dict:
+    """
+    Return raw API samples for debugging.
+    Shows first N raw records from House and Senate before any normalisation.
+    Call from !congressdebug command.
+    """
+    result = {"house": {}, "senate": {}}
+
+    for url in _HOUSE_ENDPOINTS:
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("data", data) if isinstance(data, dict) else data
+            result["house"] = {
+                "url":         url,
+                "total_rows":  len(rows),
+                "sample_keys": list(rows[0].keys()) if rows else [],
+                "samples":     rows[:n],
+                "sample_tickers": list({str(r.get("ticker","")).strip() for r in rows[:100]}),
+            }
+            break
+        except Exception as e:
+            result["house"][url] = str(e)
+
+    for url in _SENATE_ENDPOINTS:
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("data", data) if isinstance(data, dict) else data
+            result["senate"] = {
+                "url":         url,
+                "total_rows":  len(rows),
+                "sample_keys": list(rows[0].keys()) if rows else [],
+                "samples":     rows[:n],
+                "sample_tickers": list({str(r.get("ticker","")).strip() for r in rows[:100]}),
+            }
+            break
+        except Exception as e:
+            result["senate"][url] = str(e)
+
+    return result
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
-
 def recent_trades(days: int = 30, actions: Optional[list[str]] = None) -> list[dict]:
-    """
-    Return all congressional trades from the last `days` calendar days,
-    combined from House + Senate, sorted newest first.
-
-    actions: filter to ["buy"], ["sell"], or None for all.
-    """
+    """All trades from the last `days` days, House + Senate, newest first."""
     cutoff = date.today() - timedelta(days=days)
     trades = _fetch_house() + _fetch_senate()
-
-    result = []
-    for t in trades:
-        tx_date = t["transaction_date"]
-        if tx_date and tx_date >= cutoff:
-            if actions is None or t["action"] in actions:
-                result.append(t)
-
+    result = [
+        t for t in trades
+        if t["transaction_date"] and t["transaction_date"] >= cutoff
+        and (actions is None or t["action"] in actions)
+    ]
     result.sort(key=lambda x: x["transaction_date"] or date.min, reverse=True)
     return result
 
 
-def trades_for_ticker(ticker: str, days: int = 90) -> list[dict]:
+def trades_for_ticker(ticker: str, days: int = 365) -> list[dict]:
     """All congressional trades for a specific ticker in the last `days` days."""
     ticker = ticker.upper().strip()
     cutoff = date.today() - timedelta(days=days)
@@ -211,10 +292,7 @@ def trades_for_ticker(ticker: str, days: int = 90) -> list[dict]:
 
 
 def watchlist_trades(tickers: list[str], days: int = 14) -> list[dict]:
-    """
-    All congressional trades for tickers in `tickers` list, last `days` days.
-    Returns sorted by transaction_date desc, then by amount_order desc.
-    """
+    """Congressional trades for tickers in the given list, last `days` days."""
     universe = {t.upper() for t in tickers}
     cutoff   = date.today() - timedelta(days=days)
     trades   = _fetch_house() + _fetch_senate()
@@ -224,18 +302,15 @@ def watchlist_trades(tickers: list[str], days: int = 14) -> list[dict]:
         and t["transaction_date"]
         and t["transaction_date"] >= cutoff
     ]
-    result.sort(key=lambda x: (
-        x["transaction_date"] or date.min,
-        x["amount_order"]
-    ), reverse=True)
+    result.sort(
+        key=lambda x: (x["transaction_date"] or date.min, x["amount_order"]),
+        reverse=True,
+    )
     return result
 
 
 def top_purchased_tickers(days: int = 14, n: int = 10) -> list[dict]:
-    """
-    Return the top `n` most-purchased tickers by Congress in the last `days` days.
-    Each entry: {ticker, buy_count, sell_count, net_buys, total_trades, members}
-    """
+    """Top `n` most net-purchased tickers by Congress in the last `days` days."""
     trades = recent_trades(days=days)
     agg: dict[str, dict] = {}
     for t in trades:
@@ -249,37 +324,31 @@ def top_purchased_tickers(days: int = 14, n: int = 10) -> list[dict]:
         if t["member"]:
             agg[tk]["members"].add(t["member"])
 
-    result = []
-    for tk, v in agg.items():
-        result.append({
-            "ticker":       tk,
-            "buy_count":    v["buy_count"],
-            "sell_count":   v["sell_count"],
-            "net_buys":     v["buy_count"] - v["sell_count"],
-            "total_trades": v["buy_count"] + v["sell_count"],
-            "member_count": len(v["members"]),
-            "members":      sorted(v["members"]),
-        })
+    result = [{
+        "ticker":       tk,
+        "buy_count":    v["buy_count"],
+        "sell_count":   v["sell_count"],
+        "net_buys":     v["buy_count"] - v["sell_count"],
+        "total_trades": v["buy_count"] + v["sell_count"],
+        "member_count": len(v["members"]),
+        "members":      sorted(v["members"]),
+    } for tk, v in agg.items()]
 
-    # Sort by net buys desc, then total trades desc
     result.sort(key=lambda x: (x["net_buys"], x["total_trades"]), reverse=True)
     return result[:n]
 
 
 def summary_stats(days: int = 14) -> dict:
-    """High-level summary: total trades, top buyers, most active members."""
-    trades  = recent_trades(days=days)
-    buys    = [t for t in trades if t["action"] == "buy"]
-    sells   = [t for t in trades if t["action"] == "sell"]
-
+    """High-level stats for the last `days` days."""
+    trades = recent_trades(days=days)
+    buys   = [t for t in trades if t["action"] == "buy"]
+    sells  = [t for t in trades if t["action"] == "sell"]
     member_counts: dict[str, int] = {}
     for t in trades:
         m = t["member"]
         if m:
             member_counts[m] = member_counts.get(m, 0) + 1
-
     most_active = sorted(member_counts.items(), key=lambda x: -x[1])[:5]
-
     return {
         "days":          days,
         "total_trades":  len(trades),

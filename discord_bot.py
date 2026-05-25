@@ -1419,6 +1419,46 @@ async def econ_cmd(ctx, days: int = 14):
         await ctx.send(f"📆 Economic calendar posted to {dest.mention}", delete_after=8)
 
 
+# ── !congressdebug ────────────────────────────────────────────────────────────
+
+@bot.command(name="congressdebug", aliases=["congdebug", "congressraw"])
+async def congress_debug_cmd(ctx):
+    """Debug: show raw API response from congressional data sources."""
+    thinking = await ctx.send("🔍 Fetching raw congressional API data...")
+
+    def _run():
+        from congress_tracker import debug_raw
+        return debug_raw(n=2)
+
+    data = await _run_sync(_run)
+    await thinking.delete()
+
+    house  = data.get("house", {})
+    senate = data.get("senate", {})
+
+    h_lines = [
+        f"**HOUSE** — `{house.get('url','?')}`",
+        f"Total rows: **{house.get('total_rows','?')}** | Keys: `{house.get('sample_keys','?')}`",
+        f"Sample tickers: `{', '.join(list(house.get('sample_tickers',[]))[:25])}`",
+    ]
+    if house.get("samples"):
+        h_lines.append(f"First record:\n```json\n{json.dumps(house['samples'][0], indent=2, default=str)[:600]}```")
+
+    s_lines = [
+        f"**SENATE** — `{senate.get('url','?')}`",
+        f"Total rows: **{senate.get('total_rows','?')}** | Keys: `{senate.get('sample_keys','?')}`",
+        f"Sample tickers: `{', '.join(list(senate.get('sample_tickers',[]))[:25])}`",
+    ]
+    if senate.get("samples"):
+        s_lines.append(f"First record:\n```json\n{json.dumps(senate['samples'][0], indent=2, default=str)[:600]}```")
+
+    for block in ["\n".join(h_lines), "\n".join(s_lines)]:
+        if len(block) > 1900:
+            await ctx.send(block[:1900])
+        else:
+            await ctx.send(block)
+
+
 # ── !congress ─────────────────────────────────────────────────────────────────
 
 @bot.command(name="congress", aliases=["cong", "stockact", "dc", "insider"])
