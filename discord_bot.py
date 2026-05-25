@@ -3316,11 +3316,23 @@ How to read results:
 
 To run a new backtest: type !backtest in Discord or go to /backtest on the dashboard.
 
-=== LIVE DATA ===
-- You receive a live snapshot of current paper trades and stats injected into every message
-- Use that data to answer specific questions about open positions, P&L, trade types
-- Reference actual tickers, actual dollar amounts, actual days held from the context
-- If the user asks about their trades, the data IS there — use it, don't say you can't access it
+=== LIVE DATA — injected into every message ===
+You receive ALL of the following live context blocks prepended to each user message.
+Use them to give specific, data-anchored answers. Never say "I don't have access to that" if the block is present.
+
+[LIVE PAPER TRADES] — current open positions, P&L, win rate, Sharpe
+[LAST BACKTEST RUN] — most recent historical simulation results
+[MARKET CALENDAR] — is market open today, today's events, upcoming HIGH-impact events (FOMC/CPI/NFP/PCE/GDP)
+[CONGRESSIONAL TRADING] — STOCK Act disclosures for watchlist tickers last 14 days, plus top bought tickers across all of Congress
+[MACRO SNAPSHOT] — FRED macro data: Fed funds rate, CPI, GDP, yield curve, unemployment
+
+When answering:
+- Paper trades → use [LIVE PAPER TRADES] block
+- Backtest questions → use [LAST BACKTEST RUN] block
+- "Is there anything big this week?" → use [MARKET CALENDAR] upcoming events
+- "What is Congress buying/selling?" → use [CONGRESSIONAL TRADING] block
+- "What's the macro environment?" → use [MACRO SNAPSHOT] block
+- Congressional data shows conviction: multiple members buying the same ticker is a real signal worth flagging
 
 Your role: be the senior analyst on the desk. Direct, specific, data-anchored.
 Keep Discord replies under 400 words. Plain prose, not heavy bullet lists.
@@ -3429,7 +3441,81 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
             except Exception:
                 pass
 
-            return f"{live_block}\n\n{backtest_block}"
+            # ── Market calendar + upcoming economic events ────────────────
+            calendar_block = ""
+            try:
+                from market_calendar import today_context
+                cal = today_context()
+                today_evs = cal.get("today_events", [])
+                upcoming  = cal.get("upcoming_events", [])[:5]
+                status    = "OPEN" if cal["is_trading_day"] else f"CLOSED ({cal.get('holiday_name','weekend')})"
+                ev_today  = ", ".join(f"{e['name']} ({e['importance']})" for e in today_evs) or "none"
+                ev_coming = " | ".join(
+                    f"{e['name']} in {e['days_away']}d ({e['importance']})"
+                    for e in upcoming if e["importance"] == "HIGH"
+                ) or "none in 7 days"
+                calendar_block = (
+                    f"[MARKET CALENDAR]\n"
+                    f"Market today: {status} | Next trading day: {cal.get('next_trading_day','?')}\n"
+                    f"Events today: {ev_today}\n"
+                    f"Upcoming HIGH-impact: {ev_coming}"
+                )
+            except Exception:
+                pass
+
+            # ── Congressional trading — watchlist tickers, last 14 days ───
+            congress_block = ""
+            try:
+                from congress_tracker import watchlist_trades, top_purchased_tickers
+                from db import kv_get as _kv
+                settings  = _kv("settings") or {}
+                watchlist = (settings.get("watchlist") or "").split()
+                if watchlist:
+                    cong_trades = watchlist_trades(watchlist, days=14)
+                    if cong_trades:
+                        lines = []
+                        for t in cong_trades[:8]:
+                            tx = t["transaction_date"].strftime("%b %d") if t["transaction_date"] else "?"
+                            lines.append(
+                                f"  {t['action'].upper()} {t['ticker']} {t['amount_label']} — "
+                                f"{t['member']} ({t['chamber']}, {t['party']}) on {tx}"
+                            )
+                        congress_block = (
+                            f"[CONGRESSIONAL TRADING — watchlist, last 14 days]\n"
+                            + "\n".join(lines)
+                        )
+                    else:
+                        top = top_purchased_tickers(days=14, n=5)
+                        if top:
+                            top_str = " | ".join(
+                                f"{t['ticker']} ({t['buy_count']}B/{t['sell_count']}S)"
+                                for t in top
+                            )
+                            congress_block = (
+                                f"[CONGRESSIONAL TRADING — no watchlist activity last 14 days]\n"
+                                f"Most purchased across all of Congress: {top_str}"
+                            )
+            except Exception:
+                pass
+
+            # ── FRED macro snapshot (brief) ───────────────────────────────
+            macro_block = ""
+            try:
+                from macro.fred_data import fetch_fred_macro, fred_macro_context
+                macro_raw = fetch_fred_macro()
+                macro_block = f"[MACRO SNAPSHOT]\n{fred_macro_context(macro_raw)[:600]}"
+            except Exception:
+                pass
+
+            sections = [live_block, backtest_block]
+            if calendar_block:
+                sections.append(calendar_block)
+            if congress_block:
+                sections.append(congress_block)
+            if macro_block:
+                sections.append(macro_block)
+            return "\n\n".join(sections)
+
         context_note = await _run_sync(_get_ctx)
     except Exception:
         pass
