@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -28,13 +29,32 @@ import requests
 _HOUSE_ENDPOINTS = [
     "https://housestockwatcher.com/api",
     "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+    "https://raw.githubusercontent.com/timothycarambat/house-stock-watcher-data/master/data/all_transactions.json",
 ]
 _SENATE_ENDPOINTS = [
     "https://senatestockwatcher.com/api",
     "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+    "https://raw.githubusercontent.com/timothycarambat/senate-stock-watcher-data/master/aggregate/all_transactions.json",
+]
+_QUIVER_ENDPOINTS = [
+    "https://api.quiverquant.com/beta/bulk/congress/trading",
+    "https://api.quiverquant.com/beta/bulk/congress/trades",
+    "https://api.quiverquant.com/beta/live/congresstrading",
+    "https://api.quiverquant.com/beta/bulk/congresstrading",
 ]
 _TIMEOUT = 15
 _HEADERS = {"User-Agent": "ConquestTrading/1.0 (contact: github.com/conquest-trading)"}
+
+
+def _env(name: str) -> str:
+    val = os.getenv(name, "")
+    if val:
+        return val
+    try:
+        from dotenv import dotenv_values
+        return dotenv_values(os.path.join(os.path.dirname(__file__), ".env")).get(name, "") or ""
+    except Exception:
+        return ""
 
 
 # ── Amount display ─────────────────────────────────────────────────────────────
@@ -163,6 +183,73 @@ def _normalize_senate(raw: dict) -> dict:
     }
 
 
+def _normalize_quiver(raw: dict) -> dict:
+    ticker = _extract_ticker(
+        raw.get("Ticker") or raw.get("ticker") or raw.get("Symbol") or raw.get("symbol") or "",
+        raw.get("Asset") or raw.get("asset") or raw.get("AssetDescription") or raw.get("asset_description") or "",
+    )
+    member = (
+        raw.get("Representative") or raw.get("representative") or
+        raw.get("Politician") or raw.get("politician") or
+        raw.get("Name") or raw.get("name") or raw.get("Member") or raw.get("member") or ""
+    )
+    chamber_raw = str(raw.get("Chamber") or raw.get("chamber") or "")
+    chamber = "Senate" if "senate" in chamber_raw.lower() else "House" if "house" in chamber_raw.lower() else "Congress"
+    tx_date = (
+        raw.get("TransactionDate") or raw.get("transactionDate") or raw.get("transaction_date") or
+        raw.get("Date") or raw.get("date") or ""
+    )
+    filing_date = (
+        raw.get("ReportDate") or raw.get("reportDate") or raw.get("DisclosureDate") or
+        raw.get("disclosure_date") or raw.get("FilingDate") or raw.get("filingDate") or ""
+    )
+    amount_raw = (
+        raw.get("Amount") or raw.get("amount") or raw.get("Range") or
+        raw.get("amount_range") or raw.get("AmountRange") or ""
+    )
+    return {
+        "chamber":          chamber,
+        "member":           str(member).strip(),
+        "state":            raw.get("State") or raw.get("state") or "",
+        "party":            str(raw.get("Party") or raw.get("party") or "")[:1].upper(),
+        "ticker":           ticker,
+        "asset":            raw.get("Asset") or raw.get("asset") or raw.get("AssetDescription") or raw.get("asset_description") or "",
+        "asset_type":       raw.get("AssetType") or raw.get("asset_type") or "",
+        "action":           _parse_action(raw.get("Transaction") or raw.get("transaction") or raw.get("TransactionType") or raw.get("trade_type") or ""),
+        "amount_raw":       str(amount_raw),
+        "amount_label":     _AMOUNT_LABEL.get(str(amount_raw), str(amount_raw) or "?"),
+        "amount_order":     _AMOUNT_ORDER.get(str(amount_raw), 0),
+        "transaction_date": _parse_date(str(tx_date)),
+        "disclosure_date":  _parse_date(str(filing_date)),
+        "comment":          raw.get("Comment") or raw.get("comment") or "",
+    }
+
+
+def _normalize_finnhub(raw: dict) -> dict:
+    amount_from = raw.get("amountFrom")
+    amount_to = raw.get("amountTo")
+    if amount_from is not None and amount_to is not None:
+        amount_raw = f"${float(amount_from):,.0f} - ${float(amount_to):,.0f}"
+    else:
+        amount_raw = str(raw.get("amount") or raw.get("amountRange") or "")
+    return {
+        "chamber":          "Congress",
+        "member":           str(raw.get("name") or raw.get("representative") or "").strip(),
+        "state":            "",
+        "party":            "",
+        "ticker":           _extract_ticker(raw.get("symbol") or raw.get("ticker") or ""),
+        "asset":            raw.get("assetName") or raw.get("asset") or "",
+        "asset_type":       "",
+        "action":           _parse_action(raw.get("transactionType") or raw.get("transaction") or ""),
+        "amount_raw":       amount_raw,
+        "amount_label":     amount_raw or "?",
+        "amount_order":     0,
+        "transaction_date": _parse_date(raw.get("transactionDate") or ""),
+        "disclosure_date":  _parse_date(raw.get("filingDate") or raw.get("disclosureDate") or ""),
+        "comment":          raw.get("ownerType") or raw.get("position") or "",
+    }
+
+
 # ── Raw fetchers ───────────────────────────────────────────────────────────────
 def _fetch_from_endpoints(endpoints: list[str], normalizer, limit: int = 2000) -> tuple[list[dict], str]:
     """
@@ -194,7 +281,7 @@ def _fetch_from_endpoints(endpoints: list[str], normalizer, limit: int = 2000) -
                 except Exception:
                     pass
 
-            print(f"[Congress] {url} → {len(normalized)} trades with tickers (from {len(rows)} raw rows)")
+            print(f"[Congress] {url} -> {len(normalized)} trades with tickers (from {len(rows)} raw rows)")
             return normalized, url
 
         except Exception as e:
@@ -204,6 +291,37 @@ def _fetch_from_endpoints(endpoints: list[str], normalizer, limit: int = 2000) -
 
     print(f"[Congress] All endpoints failed. Last error: {last_err}")
     return [], ""
+
+
+def _fetch_quiver(limit: int = 2000) -> list[dict]:
+    key = _env("QUIVER_API_KEY") or _env("QUIVER_QUANT_API_KEY")
+    if not key:
+        return []
+    headers = {**_HEADERS, "Authorization": f"Bearer {key}"}
+    for url in _QUIVER_ENDPOINTS:
+        try:
+            resp = requests.get(url, headers=headers, params={"page_size": limit}, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("data") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                rows = []
+            normalized = []
+            for r in rows[:limit]:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    n = _normalize_quiver(r)
+                    if n["ticker"]:
+                        normalized.append(n)
+                except Exception:
+                    pass
+            print(f"[Congress] Quiver {url} -> {len(normalized)} trades with tickers")
+            if normalized:
+                return normalized
+        except Exception as e:
+            print(f"[Congress] Quiver {url} failed: {e}")
+    return []
 
 
 def _fetch_house(limit: int = 2000) -> list[dict]:
@@ -216,6 +334,48 @@ def _fetch_senate(limit: int = 2000) -> list[dict]:
     return trades
 
 
+def _fetch_all(limit: int = 2000) -> list[dict]:
+    quiver = _fetch_quiver(limit)
+    if quiver:
+        return quiver
+    return _fetch_house(limit) + _fetch_senate(limit)
+
+
+def _fetch_finnhub_ticker(ticker: str, days: int = 365) -> list[dict]:
+    key = _env("FINNHUB_API_KEY")
+    if not key:
+        return []
+    end = date.today()
+    start = end - timedelta(days=days)
+    try:
+        resp = requests.get(
+            "https://finnhub.io/api/v1/stock/congressional-trading",
+            params={
+                "symbol": ticker.upper().strip(),
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "token": key,
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("data") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            rows = []
+        result = []
+        for r in rows:
+            if isinstance(r, dict):
+                n = _normalize_finnhub(r)
+                if n["ticker"]:
+                    result.append(n)
+        print(f"[Congress] Finnhub {ticker} -> {len(result)} trades")
+        return result
+    except Exception as e:
+        print(f"[Congress] Finnhub {ticker} failed: {type(e).__name__}")
+        return []
+
+
 # ── Debug helper ───────────────────────────────────────────────────────────────
 def debug_raw(n: int = 5) -> dict:
     """
@@ -223,11 +383,65 @@ def debug_raw(n: int = 5) -> dict:
     Shows first N raw records from House and Senate before any normalisation.
     Call from !congressdebug command.
     """
-    result = {"house": {}, "senate": {}}
+    result = {
+        "house": {"errors": []},
+        "senate": {"errors": []},
+        "quiver": {"configured": bool(_env("QUIVER_API_KEY") or _env("QUIVER_QUANT_API_KEY")), "errors": []},
+        "finnhub": {"configured": bool(_env("FINNHUB_API_KEY")), "errors": []},
+    }
+
+    key = _env("QUIVER_API_KEY") or _env("QUIVER_QUANT_API_KEY")
+    if key:
+        headers = {**_HEADERS, "Authorization": f"Bearer {key}"}
+        for url in _QUIVER_ENDPOINTS:
+            try:
+                resp = requests.get(url, headers=headers, params={"page_size": n}, timeout=_TIMEOUT)
+                result["quiver"]["status"] = resp.status_code
+                result["quiver"]["url"] = url
+                resp.raise_for_status()
+                data = resp.json()
+                rows = data.get("data") if isinstance(data, dict) else data
+                rows = rows if isinstance(rows, list) else []
+                result["quiver"].update({
+                    "total_rows": len(rows),
+                    "sample_keys": list(rows[0].keys()) if rows else [],
+                    "samples": rows[:n],
+                    "sample_tickers": list({str(r.get("Ticker") or r.get("ticker") or r.get("Symbol") or "").strip() for r in rows[:100]}),
+                })
+                if rows:
+                    break
+            except Exception as e:
+                result["quiver"]["errors"].append(f"{url}: {e}")
+
+    fh_key = _env("FINNHUB_API_KEY")
+    if fh_key:
+        try:
+            end = date.today()
+            start = end - timedelta(days=365)
+            resp = requests.get(
+                "https://finnhub.io/api/v1/stock/congressional-trading",
+                params={"symbol": "NVDA", "from": start.isoformat(), "to": end.isoformat(), "token": fh_key},
+                timeout=_TIMEOUT,
+            )
+            result["finnhub"]["status"] = resp.status_code
+            result["finnhub"]["url"] = "https://finnhub.io/api/v1/stock/congressional-trading?symbol=NVDA"
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("data") if isinstance(data, dict) else data
+            rows = rows if isinstance(rows, list) else []
+            result["finnhub"].update({
+                "total_rows": len(rows),
+                "sample_keys": list(rows[0].keys()) if rows else [],
+                "samples": rows[:n],
+                "sample_tickers": list({str(r.get("symbol") or r.get("ticker") or "").strip() for r in rows[:100]}),
+            })
+        except Exception as e:
+            result["finnhub"]["errors"].append(f"{type(e).__name__}: check FINNHUB_API_KEY / plan access")
 
     for url in _HOUSE_ENDPOINTS:
         try:
             resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            result["house"]["status"] = resp.status_code
             resp.raise_for_status()
             data = resp.json()
             rows = data.get("data", data) if isinstance(data, dict) else data
@@ -240,11 +454,12 @@ def debug_raw(n: int = 5) -> dict:
             }
             break
         except Exception as e:
-            result["house"][url] = str(e)
+            result["house"]["errors"].append(f"{url}: {e}")
 
     for url in _SENATE_ENDPOINTS:
         try:
             resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            result["senate"]["status"] = resp.status_code
             resp.raise_for_status()
             data = resp.json()
             rows = data.get("data", data) if isinstance(data, dict) else data
@@ -257,7 +472,7 @@ def debug_raw(n: int = 5) -> dict:
             }
             break
         except Exception as e:
-            result["senate"][url] = str(e)
+            result["senate"]["errors"].append(f"{url}: {e}")
 
     return result
 
@@ -266,7 +481,7 @@ def debug_raw(n: int = 5) -> dict:
 def recent_trades(days: int = 30, actions: Optional[list[str]] = None) -> list[dict]:
     """All trades from the last `days` days, House + Senate, newest first."""
     cutoff = date.today() - timedelta(days=days)
-    trades = _fetch_house() + _fetch_senate()
+    trades = _fetch_all()
     result = [
         t for t in trades
         if t["transaction_date"] and t["transaction_date"] >= cutoff
@@ -280,7 +495,7 @@ def trades_for_ticker(ticker: str, days: int = 365) -> list[dict]:
     """All congressional trades for a specific ticker in the last `days` days."""
     ticker = ticker.upper().strip()
     cutoff = date.today() - timedelta(days=days)
-    trades = _fetch_house() + _fetch_senate()
+    trades = _fetch_finnhub_ticker(ticker, days=days) + _fetch_all()
     result = [
         t for t in trades
         if t["ticker"] == ticker
@@ -295,7 +510,7 @@ def watchlist_trades(tickers: list[str], days: int = 14) -> list[dict]:
     """Congressional trades for tickers in the given list, last `days` days."""
     universe = {t.upper() for t in tickers}
     cutoff   = date.today() - timedelta(days=days)
-    trades   = _fetch_house() + _fetch_senate()
+    trades   = _fetch_all()
     result   = [
         t for t in trades
         if t["ticker"] in universe

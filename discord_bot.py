@@ -1435,24 +1435,45 @@ async def congress_debug_cmd(ctx):
 
     house  = data.get("house", {})
     senate = data.get("senate", {})
+    quiver = data.get("quiver", {})
+    finnhub = data.get("finnhub", {})
+
+    def _err_lines(source: dict) -> list[str]:
+        return [f"Errors: `{e[:260]}`" for e in (source.get("errors") or [])[:3]]
 
     h_lines = [
         f"**HOUSE** — `{house.get('url','?')}`",
-        f"Total rows: **{house.get('total_rows','?')}** | Keys: `{house.get('sample_keys','?')}`",
+        f"Status: **{house.get('status','?')}** | Total rows: **{house.get('total_rows','?')}** | Keys: `{house.get('sample_keys','?')}`",
         f"Sample tickers: `{', '.join(list(house.get('sample_tickers',[]))[:25])}`",
-    ]
+    ] + _err_lines(house)
     if house.get("samples"):
         h_lines.append(f"First record:\n```json\n{json.dumps(house['samples'][0], indent=2, default=str)[:600]}```")
 
     s_lines = [
         f"**SENATE** — `{senate.get('url','?')}`",
-        f"Total rows: **{senate.get('total_rows','?')}** | Keys: `{senate.get('sample_keys','?')}`",
+        f"Status: **{senate.get('status','?')}** | Total rows: **{senate.get('total_rows','?')}** | Keys: `{senate.get('sample_keys','?')}`",
         f"Sample tickers: `{', '.join(list(senate.get('sample_tickers',[]))[:25])}`",
-    ]
+    ] + _err_lines(senate)
     if senate.get("samples"):
         s_lines.append(f"First record:\n```json\n{json.dumps(senate['samples'][0], indent=2, default=str)[:600]}```")
 
-    for block in ["\n".join(h_lines), "\n".join(s_lines)]:
+    q_lines = [
+        f"**QUIVER** — configured: **{quiver.get('configured', False)}** | `{quiver.get('url','?')}`",
+        f"Status: **{quiver.get('status','?')}** | Total rows: **{quiver.get('total_rows','?')}** | Keys: `{quiver.get('sample_keys','?')}`",
+        f"Sample tickers: `{', '.join(list(quiver.get('sample_tickers',[]))[:25])}`",
+    ] + _err_lines(quiver)
+    if quiver.get("samples"):
+        q_lines.append(f"First record:\n```json\n{json.dumps(quiver['samples'][0], indent=2, default=str)[:600]}```")
+
+    f_lines = [
+        f"**FINNHUB** — configured: **{finnhub.get('configured', False)}** | `{finnhub.get('url','?')}`",
+        f"Status: **{finnhub.get('status','?')}** | Total rows: **{finnhub.get('total_rows','?')}** | Keys: `{finnhub.get('sample_keys','?')}`",
+        f"Sample tickers: `{', '.join(list(finnhub.get('sample_tickers',[]))[:25])}`",
+    ] + _err_lines(finnhub)
+    if finnhub.get("samples"):
+        f_lines.append(f"First record:\n```json\n{json.dumps(finnhub['samples'][0], indent=2, default=str)[:600]}```")
+
+    for block in ["\n".join(q_lines), "\n".join(f_lines), "\n".join(h_lines), "\n".join(s_lines)]:
         if len(block) > 1900:
             await ctx.send(block[:1900])
         else:
