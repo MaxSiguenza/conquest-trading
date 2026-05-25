@@ -1401,6 +1401,91 @@ async def econ_cmd(ctx, days: int = 14):
         await ctx.send(f"📆 Economic calendar posted to {dest.mention}", delete_after=8)
 
 
+# ── !congress ─────────────────────────────────────────────────────────────────
+
+@bot.command(name="congress", aliases=["cong", "stockact", "dc", "insider"])
+async def congress_cmd(ctx, ticker: str = "", days: int = 14):
+    """
+    Show congressional stock trades.
+    !congress          → top purchased tickers by Congress (last 14 days)
+    !congress NVDA     → all congressional trades in NVDA (last 90 days)
+    !congress NVDA 30  → trades in NVDA last 30 days
+    """
+    congress_ch = await _get_channel("congressional-tracker", "macro-worldview", "general")
+    dest = congress_ch if congress_ch else ctx.channel
+
+    ticker = ticker.upper().strip()
+
+    if ticker:
+        # Single ticker lookup
+        thinking = await ctx.send(f"🏛 Pulling congressional trades for **{ticker}** (last {days} days)...")
+
+        def _run():
+            from congress_tracker import trades_for_ticker
+            return trades_for_ticker(ticker, days=days)
+
+        trades = await _run_sync(_run)
+        await thinking.delete()
+
+        import datetime as _dt
+        today_str = _dt.date.today().strftime("%b %d, %Y")
+
+        if not trades:
+            embed = discord.Embed(
+                title=f"🏛  Congressional Trades — {ticker}",
+                description=f"No congressional disclosures found for **{ticker}** in the last {days} days.",
+                color=COLOR_DARK,
+                timestamp=_ts(),
+            )
+            embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures")
+            await dest.send(embed=embed)
+        else:
+            lines = []
+            for t in trades[:15]:
+                action_icon  = "🟢" if t["action"] == "buy" else ("🔴" if t["action"] == "sell" else "⚪")
+                chamber_icon = "🏛" if t["chamber"] == "Senate" else "🏠"
+                party        = f"({t['party']})" if t["party"] else ""
+                tx_date      = t["transaction_date"].strftime("%b %d") if t["transaction_date"] else "?"
+                disc_date    = t["disclosure_date"].strftime("%b %d") if t["disclosure_date"] else "?"
+                lag = (t["disclosure_date"] - t["transaction_date"]).days if t["transaction_date"] and t["disclosure_date"] else None
+                lag_str = f" · {lag}d lag" if lag is not None else ""
+                lines.append(
+                    f"{action_icon} {chamber_icon} **{t['action'].upper()}**  {t['amount_label']}\n"
+                    f"  {t['member']} {party} · {tx_date} (disclosed {disc_date}{lag_str})"
+                )
+
+            buy_count  = sum(1 for t in trades if t["action"] == "buy")
+            sell_count = sum(1 for t in trades if t["action"] == "sell")
+            color = COLOR_GREEN if buy_count > sell_count else (COLOR_RED if sell_count > buy_count else COLOR_GOLD)
+
+            embed = discord.Embed(
+                title=f"🏛  Congressional Trades — {ticker}  (last {days} days)",
+                description="\n\n".join(lines),
+                color=color,
+                timestamp=_ts(),
+            )
+            embed.add_field(
+                name="Summary",
+                value=f"🟢 {buy_count} buy{'s' if buy_count!=1 else ''}  🔴 {sell_count} sell{'s' if sell_count!=1 else ''}  across {len({t['member'] for t in trades})} members",
+                inline=False,
+            )
+            embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act  •  housestockwatcher.com / senatestockwatcher.com")
+            await dest.send(embed=embed)
+
+        if dest != ctx.channel:
+            await ctx.send(f"🏛 Congressional trades for **{ticker}** posted to {dest.mention}", delete_after=8)
+
+    else:
+        # Top purchased tickers (watchlist-aware)
+        thinking = await ctx.send(f"🏛 Scanning congressional activity across all stocks (last {days} days)...")
+        s = _load_settings()
+        watchlist = s.get("watchlist", "").split()
+        await thinking.delete()
+        await _post_congress_embed(dest, tickers=watchlist if watchlist else None, days=days)
+        if dest != ctx.channel:
+            await ctx.send(f"🏛 Congressional activity posted to {dest.mention}", delete_after=8)
+
+
 # ── !testchannels ─────────────────────────────────────────────────────────────
 
 @bot.command(name="testchannels", aliases=["tc", "techchannels"])
@@ -1417,6 +1502,7 @@ async def testchannels_cmd(ctx):
         ("earnings-radar",      "📅",  "Earnings Radar",              "Upcoming earnings for watchlist names auto-post each morning at 9:00 AM."),
         ("macro-worldview",     "🌍",  "Macro Worldview",             "FRED macro snapshot auto-posts here each morning at 9:00 AM alongside the brief."),
         ("economic-calendar",   "📆",  "Economic Calendar",           "FOMC, CPI, NFP, PCE and GDP events. Morning-of alerts at 9 AM and eve-of alerts at 4:30 PM ET."),
+        ("congressional-tracker","🏛",  "Congressional Tracker",       "STOCK Act disclosures — auto-posts congressional buys/sells for your watchlist every morning at 9 AM ET."),
         ("live-positions",      "📈",  "Live Positions",              "Auto-updates at noon and 3:30 PM ET with all open paper positions."),
         ("screener",            "📊",  "Screener",                    "Pre-screener results (top candidates from 129-ticker scan) post here each morning at 9:35 AM ET. Weekly value/growth screen also posts here every Monday."),
         ("status-dashboard",    "🏆",  "Status Dashboard",            "Running paper trading stats auto-post here every evening at 4:05 PM ET."),
@@ -2629,6 +2715,118 @@ async def _post_economic_calendar_embed(channel, days: int = 7, title_suffix: st
     await channel.send(embed=embed)
 
 
+# ── Congressional tracker helper ──────────────────────────────────────────────
+
+async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
+    """
+    Post congressional trade activity to `channel`.
+    If `tickers` provided: filter for those tickers (watchlist mode).
+    Otherwise: show top purchased tickers across all of Congress.
+    """
+    import datetime as _dt
+
+    def _run():
+        from congress_tracker import watchlist_trades, top_purchased_tickers, summary_stats
+        if tickers:
+            return {
+                "mode":   "watchlist",
+                "trades": watchlist_trades(tickers, days=days),
+                "stats":  summary_stats(days=days),
+            }
+        else:
+            return {
+                "mode":   "top",
+                "top":    top_purchased_tickers(days=days, n=10),
+                "stats":  summary_stats(days=days),
+            }
+
+    data = await _run_sync(_run)
+    stats = data.get("stats", {})
+    today_str = _dt.date.today().strftime("%b %d, %Y")
+
+    # ── Watchlist mode ────────────────────────────────────────────────────────
+    if data["mode"] == "watchlist":
+        trades = data["trades"]
+        if not trades:
+            embed = discord.Embed(
+                title=f"🏛  Congressional Tracker — {today_str}",
+                description=f"No congressional trades found for your watchlist in the last {days} days.\n"
+                            f"Congress traded **{stats.get('total_trades', 0)}** total stocks this period.",
+                color=COLOR_DARK,
+                timestamp=_ts(),
+            )
+            embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  housestockwatcher.com / senatestockwatcher.com")
+            await channel.send(embed=embed)
+            return
+
+        lines = []
+        for t in trades[:12]:     # cap at 12 to stay under embed limit
+            action_icon = "🟢" if t["action"] == "buy" else ("🔴" if t["action"] == "sell" else "⚪")
+            chamber_icon = "🏛" if t["chamber"] == "Senate" else "🏠"
+            party_color  = "(R)" if t["party"] == "R" else ("(D)" if t["party"] == "D" else "(I)")
+            tx_date = t["transaction_date"].strftime("%b %d") if t["transaction_date"] else "?"
+            disc_date = t["disclosure_date"].strftime("%b %d") if t["disclosure_date"] else "?"
+            lag = (t["disclosure_date"] - t["transaction_date"]).days if t["transaction_date"] and t["disclosure_date"] else None
+            lag_str = f" · {lag}d lag" if lag is not None else ""
+            lines.append(
+                f"{action_icon} {chamber_icon} **{t['ticker']}** — {t['action'].upper()}  {t['amount_label']}\n"
+                f"  {t['member']} {party_color} · {tx_date} (disclosed {disc_date}{lag_str})"
+            )
+
+        color = COLOR_GREEN if any(t["action"] == "buy" for t in trades) else COLOR_RED
+        embed = discord.Embed(
+            title=f"🏛  Congressional Activity — Your Watchlist  ({today_str})",
+            description="\n\n".join(lines),
+            color=color,
+            timestamp=_ts(),
+        )
+        buy_count  = sum(1 for t in trades if t["action"] == "buy")
+        sell_count = sum(1 for t in trades if t["action"] == "sell")
+        embed.add_field(name="Summary", value=f"🟢 {buy_count} buys  🔴 {sell_count} sells  over {days} days", inline=True)
+        embed.add_field(name="Congress-wide", value=f"{stats.get('total_trades',0)} total trades this period", inline=True)
+        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act  •  housestockwatcher.com / senatestockwatcher.com")
+        await channel.send(embed=embed)
+
+    # ── Top tickers mode ──────────────────────────────────────────────────────
+    else:
+        top = data["top"]
+        if not top:
+            embed = discord.Embed(
+                title=f"🏛  Congressional Tracker — {today_str}",
+                description="No congressional trade data available right now.",
+                color=COLOR_DARK,
+                timestamp=_ts(),
+            )
+            await channel.send(embed=embed)
+            return
+
+        lines = []
+        for i, t in enumerate(top[:10], 1):
+            bar = "█" * min(t["buy_count"], 8) + ("░" * min(t["sell_count"], 4))
+            lines.append(
+                f"**{i}. {t['ticker']}** — 🟢 {t['buy_count']} buy{'s' if t['buy_count']!=1 else ''}  "
+                f"🔴 {t['sell_count']} sell{'s' if t['sell_count']!=1 else ''}  "
+                f"({t['member_count']} member{'s' if t['member_count']!=1 else ''})"
+            )
+
+        embed = discord.Embed(
+            title=f"🏛  Congress Most Purchased — Last {days} Days  ({today_str})",
+            description="\n".join(lines),
+            color=COLOR_PURPLE,
+            timestamp=_ts(),
+        )
+        embed.add_field(
+            name="This Period",
+            value=f"🏠 House: {stats.get('house_trades',0)} trades  🏛 Senate: {stats.get('senate_trades',0)} trades  |  Total: {stats.get('total_trades',0)}",
+            inline=False,
+        )
+        if stats.get("most_active"):
+            active_str = "  ".join(f"{m['member'].split()[-1]} ({m['trades']})" for m in stats["most_active"][:3])
+            embed.add_field(name="Most Active Members", value=active_str, inline=False)
+        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  housestockwatcher.com / senatestockwatcher.com")
+        await channel.send(embed=embed)
+
+
 # ── Auto morning briefing ─────────────────────────────────────────────────────
 
 _econ_eve_sent_date = None   # tracks last date the eve-of alert was sent
@@ -2730,6 +2928,16 @@ async def morning_briefing_task():
                 print(f"[Bot] Economic calendar posted to #{econ_ch.name}")
         except Exception as e_econ:
             print(f"[Bot] Economic calendar error: {e_econ}")
+
+        # ── Congressional tracker — post to #congressional-tracker ────────────
+        try:
+            congress_ch = await _get_channel("congressional-tracker", "macro-worldview", "general")
+            if congress_ch:
+                watchlist = s.get("watchlist", "").split()
+                await _post_congress_embed(congress_ch, tickers=watchlist, days=7)
+                print(f"[Bot] Congressional tracker posted to #{congress_ch.name}")
+        except Exception as e_cong:
+            print(f"[Bot] Congressional tracker error: {e_cong}")
 
         # ── Sector rotation — ETF heat map to #sector-rotation ───────────────
         try:
@@ -2963,6 +3171,16 @@ async def runmorning_cmd(ctx):
     except Exception as e:
         print(f"[Bot] !runmorning economic calendar error: {e}")
 
+    # ── 3c. Congressional tracker ─────────────────────────────────────────────
+    try:
+        congress_ch = await _get_channel("congressional-tracker", "macro-worldview", "general")
+        if congress_ch:
+            watchlist = s.get("watchlist", "").split()
+            await _post_congress_embed(congress_ch, tickers=watchlist, days=7)
+            print(f"[Bot] !runmorning — congressional tracker posted to #{congress_ch.name}")
+    except Exception as e:
+        print(f"[Bot] !runmorning congressional tracker error: {e}")
+
     # ── 4. Weekly screener (run regardless of day when triggered manually) ────
     try:
         screener_ch = await _get_channel("screener", "general")
@@ -2992,7 +3210,7 @@ async def runmorning_cmd(ctx):
         await screener_ch.send(f"⚠️ Screener error: {e}")
         print(f"[Bot] !runmorning screener error: {e}")
 
-    await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#economic-calendar`, `#screener`.", delete_after=30)
+    await ctx.send("✅ All 9 AM posts fired. Check `#morning-briefing`, `#earnings-radar`, `#macro-worldview`, `#economic-calendar`, `#congressional-tracker`, `#screener`.", delete_after=30)
 
 
 # ── AI Chatbot ────────────────────────────────────────────────────────────────
