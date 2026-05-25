@@ -63,6 +63,32 @@ td {
 }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: #1e2235; }
+.review-row td {
+  background: #141824;
+  border-top: none;
+  padding-top: 0;
+}
+.review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 14px;
+  padding: 10px 0 6px;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.review-label {
+  display: block;
+  color: #64748b;
+  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.45px;
+  margin-bottom: 2px;
+}
+.review-good { color: #4ade80; }
+.review-warn { color: #fbbf24; }
+.review-bad { color: #f87171; }
 
 .pnl-pos { color: #4ade80; font-weight: 600; }
 .pnl-neg { color: #f87171; font-weight: 600; }
@@ -481,6 +507,51 @@ canvas { width: 100% !important; }
         </td>
         <td class="{% if t.pnl_pct >= 0 %}pnl-pos{% elif t.pnl_pct < 0 %}pnl-neg{% else %}pnl-zero{% endif %}">
           {{ "%.1f" | format(t.pnl_pct * 100) }}%
+        </td>
+      </tr>
+      <tr class="review-row">
+        <td colspan="9">
+          <div class="review-grid">
+            <div>
+              <span class="review-label">Entry Source</span>
+              {{ (t.get('entry_source') or 'unknown') | replace("_"," ") }}
+              {%- if t.get('pricing_confidence') %}<br>{{ t.pricing_confidence | replace("_"," ") }}{%- endif -%}
+            </div>
+            <div>
+              <span class="review-label">Risk Gate</span>
+              {%- if t.get('risk_approved') is sameas true -%}
+                <span class="review-good">approved</span>
+              {%- elif t.get('risk_approved') is sameas false -%}
+                <span class="review-bad">blocked</span>
+              {%- else -%}
+                <span class="review-warn">legacy/not checked</span>
+              {%- endif -%}
+              {%- if t.get('risk_reasons') %}<br>{{ t.risk_reasons | join(", ") }}{%- endif -%}
+            </div>
+            <div>
+              <span class="review-label">Risk / Reward</span>
+              {%- if t.get('max_loss') is not none -%}max loss ${{ "%.2f"|format(t.max_loss) }}{%- else -%}max loss n/a{%- endif -%}
+              {%- if t.get('max_gain') is not none -%}<br>max gain ${{ "%.2f"|format(t.max_gain) }}{%- endif -%}
+              {%- if t.get('risk_defined') is sameas true -%}<br><span class="review-good">defined risk</span>{%- elif t.get('risk_defined') is sameas false -%}<br><span class="review-warn">undefined/full exposure</span>{%- endif -%}
+            </div>
+            <div>
+              <span class="review-label">P&amp;L Trust</span>
+              {%- if t.get('pnl_trusted') is sameas false -%}
+                <span class="review-warn">untrusted</span>
+              {%- else -%}
+                <span class="review-good">trusted</span>
+              {%- endif -%}
+            </div>
+            <div>
+              <span class="review-label">Broker</span>
+              {{ t.get('broker_status') or t.get('broker_note') or 'simulated/local' }}
+              {%- if t.get('broker_mode') %}<br>{{ t.broker_mode }}{%- endif -%}
+            </div>
+            <div>
+              <span class="review-label">Thesis</span>
+              {{ (t.get('reasoning') or 'No thesis stored yet.')[:260] }}
+            </div>
+          </div>
         </td>
       </tr>
       {% endfor %}
