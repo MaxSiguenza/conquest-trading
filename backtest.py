@@ -66,6 +66,7 @@ OTM_PCT       = 0.02     # 2% OTM strike
 NOTIONAL      = 1_000    # per-trade notional = 1% of $100k starting capital
 RISK_FREE     = 0.05     # 5% annualised for Black-Scholes
 STARTING_CAPITAL = 100_000   # paper account starting value
+COVERED_CALL_MAX_CAPITAL = STARTING_CAPITAL * 0.10
 
 # ── Signal quality filter ──────────────────────────────────────────────────────
 # The live 6-agent swarm requires ≥4/6 agents to agree before trading.
@@ -80,6 +81,14 @@ MTF_MIN_SCORE = 2   # only trade when at least 2/3 timeframes confirm the signal
 OPT_COMMISSION_PER_CONTRACT = 0.65   # $0.65/contract (Robinhood/TastyTrade)
 STK_COMMISSION_PER_SHARE    = 0.003  # $0.003/share (most zero-commission + spread)
 IV_PREMIUM_FACTOR           = 1.20   # real IV ≈ HV × 1.20 (volatility risk premium)
+MIN_LONG_OPTION_PREMIUM       = 0.50
+MIN_SHORT_OPTION_PREMIUM      = 0.25
+MIN_CREDIT_SPREAD_CREDIT      = 0.25
+MIN_CREDIT_TO_WIDTH           = 0.20
+MAX_SYNTH_BID_ASK_PCT         = 0.30
+OPT_BASE_SPREAD_PCT           = 0.08
+OPT_LOW_PREMIUM_SPREAD_PCT    = 0.18
+OPT_EXIT_SPREAD_PCT           = 0.10
 # What this means: options cost ~20% more than Black-Scholes on raw HV predicts.
 # This is the most impactful adjustment — it directly reduces options entry P&L.
 
@@ -116,6 +125,66 @@ def _hist_vol(closes: np.ndarray, window: int = 30) -> float:
         return 0.25   # fallback 25%
     log_rets = np.diff(np.log(closes[-window - 1:]))
     return float(np.std(log_rets) * np.sqrt(252))
+
+
+def _strike_increment(spot: float) -> float:
+    """Approximate listed US equity option strike increments by price level."""
+    if spot < 25:
+        return 0.5
+    if spot < 100:
+        return 1.0
+    if spot < 250:
+        return 2.5
+    if spot < 500:
+        return 5.0
+    return 10.0
+
+
+def _round_option_strike(raw_strike: float, spot: float, option_type: str, *, otm: bool = True) -> float:
+    """Round a synthetic strike to a listed-style increment while preserving OTM intent."""
+    import math
+    inc = _strike_increment(spot)
+    scaled = raw_strike / inc
+    if otm:
+        rounded = math.ceil(scaled) * inc if option_type == "call" else math.floor(scaled) * inc
+    else:
+        rounded = round(scaled) * inc
+    return round(max(inc, rounded), 2)
+
+
+def _next_synthetic_expiry(entry_day: date, target_dte: int = DTE_TARGET) -> date:
+    """Pick a realistic Friday expiry near the target DTE."""
+    holiday_shifts = {
+        date(2026, 6, 19): date(2026, 6, 18),
+    }
+    earliest = entry_day + timedelta(days=max(14, target_dte - 10))
+    target = entry_day + timedelta(days=target_dte)
+    candidates = []
+    cursor = earliest
+    for _ in range(45):
+        if cursor.weekday() == 4:
+            candidates.append(holiday_shifts.get(cursor, cursor))
+        cursor += timedelta(days=1)
+    return min(candidates, key=lambda d: abs((d - target).days)) if candidates else target
+
+
+def _synthetic_bid_ask(mid: float, *, exit_quote: bool = False) -> tuple[float, float, float] | None:
+    """
+    Convert a model mid into a conservative synthetic bid/ask.
+    Low-premium contracts get wider spreads because that is where synthetic
+    option backtests are usually most fragile.
+    """
+    if mid <= 0:
+        return None
+    spread_pct = OPT_EXIT_SPREAD_PCT if exit_quote else OPT_BASE_SPREAD_PCT
+    if mid < 1:
+        spread_pct = max(spread_pct, OPT_LOW_PREMIUM_SPREAD_PCT)
+    if spread_pct > MAX_SYNTH_BID_ASK_PCT:
+        return None
+    half = mid * spread_pct / 2
+    bid = max(0.01, mid - half)
+    ask = mid + half
+    return round(bid, 4), round(ask, 4), spread_pct
 
 
 def _hv_rank(closes: np.ndarray, current_idx: int, lookback: int = 252) -> float:
@@ -198,15 +267,22 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                 iv_raw      = _hist_vol(closes[:i + 1])
                 # Apply IV premium: real options trade above raw HV due to vol risk premium
                 iv          = iv_raw * IV_PREMIUM_FACTOR
-                T           = DTE_TARGET / 365
+                expiry      = _next_synthetic_expiry(dates[entry_idx].date())
+                dte_entry   = max((expiry - dates[entry_idx].date()).days, 1)
+                T           = dte_entry / 365
 
                 if option_type == "call":
-                    K = spot * (1 + OTM_PCT)
+                    K = _round_option_strike(spot * (1 + OTM_PCT), spot, "call")
                 else:
-                    K = spot * (1 - OTM_PCT)
+                    K = _round_option_strike(spot * (1 - OTM_PCT), spot, "put")
 
-                premium = _bs_price(spot, K, T, RISK_FREE, iv, option_type)
-                if premium <= 0.01:
+                fair_mid = _bs_price(spot, K, T, RISK_FREE, iv, option_type)
+                quote = _synthetic_bid_ask(fair_mid)
+                if not quote:
+                    continue
+                bid, ask, spread_pct = quote
+                premium = ask
+                if premium < MIN_LONG_OPTION_PREMIUM:
                     continue    # unpriced — skip
 
                 # $1,000 notional → how many contracts (1 contract = 100 shares)
@@ -217,8 +293,13 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                     "iv":           round(iv, 4),
                     "iv_rank":      round(_hv_rank_now, 3),
                     "strike":       round(K, 2),
-                    "dte_entry":    DTE_TARGET,
+                    "expiry_date":  str(expiry),
+                    "dte_entry":    dte_entry,
                     "n_contracts":  n_contracts,
+                    "entry_mid":    round(fair_mid, 4),
+                    "entry_bid":    bid,
+                    "entry_ask":    ask,
+                    "entry_spread_pct": round(spread_pct, 4),
                     "mtf_score":    int(row.get("MTF_Score", 0)),
                     "entry_signal": bool(row.get("Entry_Signal", 0)),
                     "sqz_fired":    bool(row.get("SQZ_FIRED", 0)),
@@ -232,12 +313,14 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
 
         else:
             days_held = i - entry_idx + 1
-            dte_now   = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            dte_now   = max(0.5 / 365, (entry_meta["dte_entry"] - days_held) / 365)
             spot_now  = float(closes[i])
-            iv_now    = _hist_vol(closes[:i + 1])
+            iv_now    = _hist_vol(closes[:i + 1]) * IV_PREMIUM_FACTOR
 
-            current_premium = _bs_price(spot_now, strike, dte_now,
-                                        RISK_FREE, iv_now, option_type)
+            current_mid = _bs_price(spot_now, strike, dte_now,
+                                    RISK_FREE, iv_now, option_type)
+            quote_now = _synthetic_bid_ask(current_mid, exit_quote=True)
+            current_premium = quote_now[0] if quote_now else current_mid
             if entry_price > 0:
                 pnl_pct = (current_premium - entry_price) / entry_price
             else:
@@ -285,6 +368,13 @@ def _simulate_option_trades(ticker: str, df: pd.DataFrame,
                     "entry_price":  round(entry_price, 4),
                     "exit_price":   round(current_premium, 4),
                     "strike":       round(strike, 2),
+                    "expiry_date":  entry_meta["expiry_date"],
+                    "dte_entry":    entry_meta["dte_entry"],
+                    "entry_mid":    entry_meta["entry_mid"],
+                    "entry_bid":    entry_meta["entry_bid"],
+                    "entry_ask":    entry_meta["entry_ask"],
+                    "entry_spread_pct": entry_meta["entry_spread_pct"],
+                    "pricing_model": "synthetic_bs_with_tradability_constraints",
                     "pnl_pct":      round(pnl_pct * 100, 3),
                     "pnl_dollar":   round(pnl_dollar, 2),
                     "commission":   round(commission, 2),
@@ -346,25 +436,37 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                 spot      = float(opens[entry_idx])
                 iv_raw    = _hist_vol(closes[:i + 1])
                 iv        = iv_raw * IV_PREMIUM_FACTOR
-                T         = DTE_TARGET / 365
+                expiry    = _next_synthetic_expiry(dates[entry_idx].date())
+                dte_entry = max((expiry - dates[entry_idx].date()).days, 1)
+                T         = dte_entry / 365
 
                 if spread_type == "bull_put":
-                    short_k  = spot * 0.97   # sell put 3% below spot
-                    long_k   = spot * 0.94   # buy put 6% below spot (protection)
+                    short_k  = _round_option_strike(spot * 0.97, spot, "put")
+                    long_k   = _round_option_strike(spot * 0.94, spot, "put")
                     opt_type = "put"
                 else:
-                    short_k  = spot * 1.03   # sell call 3% above spot
-                    long_k   = spot * 1.06   # buy call 6% above spot (protection)
+                    short_k  = _round_option_strike(spot * 1.03, spot, "call")
+                    long_k   = _round_option_strike(spot * 1.06, spot, "call")
                     opt_type = "call"
 
                 short_val = _bs_price(spot, short_k, T, RISK_FREE, iv, opt_type)
                 long_val  = _bs_price(spot, long_k,  T, RISK_FREE, iv, opt_type)
-                credit    = short_val - long_val
+                short_quote = _synthetic_bid_ask(short_val)
+                long_quote = _synthetic_bid_ask(long_val)
+                if not short_quote or not long_quote:
+                    continue
+                short_bid, short_ask, short_spread_pct = short_quote
+                long_bid, long_ask, long_spread_pct = long_quote
+                credit    = short_bid - long_ask
 
                 spread_width = abs(short_k - long_k)
                 # Require credit >= 20% of spread width. Below this the payoff is too
                 # skewed: tiny premium collected vs full-width max loss.
-                if credit < spread_width * 0.20:
+                if (
+                    short_bid < MIN_SHORT_OPTION_PREMIUM or
+                    credit < MIN_CREDIT_SPREAD_CREDIT or
+                    credit < spread_width * MIN_CREDIT_TO_WIDTH
+                ):
                     continue
                 n_contracts  = max(1, int(NOTIONAL / (spread_width * 100)))
                 entry_credit = credit
@@ -374,6 +476,15 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                     "spread_width": spread_width,
                     "n_contracts":  n_contracts,
                     "iv":           round(iv, 4),
+                    "expiry_date":  str(expiry),
+                    "dte_entry":    dte_entry,
+                    "short_mid":    round(short_val, 4),
+                    "long_mid":     round(long_val, 4),
+                    "short_bid":    short_bid,
+                    "short_ask":    short_ask,
+                    "long_bid":     long_bid,
+                    "long_ask":     long_ask,
+                    "entry_spread_pct": round(max(short_spread_pct, long_spread_pct), 4),
                     "opt_type":     opt_type,
                     "mtf_score":    int(row.get("MTF_Score", 0)),
                     "rsi_entry":    float(row.get("RSI", 50)),
@@ -387,7 +498,7 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
 
         else:
             days_held  = i - entry_idx + 1
-            dte_now    = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            dte_now    = max(0.5 / 365, (entry_meta["dte_entry"] - days_held) / 365)
             spot_now   = float(closes[i])
             iv_now     = _hist_vol(closes[:i + 1])
 
@@ -399,7 +510,12 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                                RISK_FREE, iv_exit, entry_meta["opt_type"])
             lv_now = _bs_price(spot_now, entry_meta["long_k"],  dte_now,
                                RISK_FREE, iv_exit, entry_meta["opt_type"])
-            cost_to_close = max(sv_now - lv_now, 0)
+            short_quote_now = _synthetic_bid_ask(sv_now, exit_quote=True)
+            long_quote_now = _synthetic_bid_ask(lv_now, exit_quote=True)
+            if short_quote_now and long_quote_now:
+                cost_to_close = max(short_quote_now[1] - long_quote_now[0], 0)
+            else:
+                cost_to_close = max(sv_now - lv_now, 0)
 
             pnl_gross  = (entry_credit - cost_to_close) * entry_meta["n_contracts"] * 100
             commission = OPT_COMMISSION_PER_CONTRACT * entry_meta["n_contracts"] * 2
@@ -424,7 +540,7 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                           else "signal_reversal" if signal_reversed
                           else "max_hold")
                 ttype = "bull_put_spread" if spread_type == "bull_put" else "bear_call_spread"
-                max_risk = entry_meta["spread_width"] * entry_meta["n_contracts"] * 100
+                max_risk = (entry_meta["spread_width"] - entry_credit) * entry_meta["n_contracts"] * 100
                 trades.append({
                     "ticker":       ticker,
                     "trade_type":   ttype,
@@ -432,6 +548,19 @@ def _simulate_credit_spread_trades(ticker: str, df: pd.DataFrame,
                     "exit_date":    str(dates[i].date()),
                     "entry_price":  round(entry_credit, 4),
                     "exit_price":   round(cost_to_close, 4),
+                    "short_strike": entry_meta["short_k"],
+                    "long_strike":  entry_meta["long_k"],
+                    "expiry_date":  entry_meta["expiry_date"],
+                    "dte_entry":    entry_meta["dte_entry"],
+                    "short_mid":    entry_meta["short_mid"],
+                    "long_mid":     entry_meta["long_mid"],
+                    "short_bid":    entry_meta["short_bid"],
+                    "short_ask":    entry_meta["short_ask"],
+                    "long_bid":     entry_meta["long_bid"],
+                    "long_ask":     entry_meta["long_ask"],
+                    "entry_spread_pct": entry_meta["entry_spread_pct"],
+                    "max_risk":     round((entry_meta["spread_width"] - entry_credit) * entry_meta["n_contracts"] * 100, 2),
+                    "pricing_model": "synthetic_bs_with_tradability_constraints",
                     "pnl_pct":      round(pnl_dollar / max_risk * 100, 3) if max_risk else 0,
                     "pnl_dollar":   round(pnl_dollar, 2),
                     "commission":   round(commission, 2),
@@ -499,12 +628,21 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
                 entry_idx         = i + 1
                 spot              = float(opens[entry_idx])
+                if spot * 100 > COVERED_CALL_MAX_CAPITAL:
+                    continue
                 iv                = iv_raw_cc * IV_PREMIUM_FACTOR
-                T                 = DTE_TARGET / 365
-                strike_k          = spot * 1.03   # sell 3% OTM call
+                expiry            = _next_synthetic_expiry(dates[entry_idx].date())
+                dte_entry         = max((expiry - dates[entry_idx].date()).days, 1)
+                T                 = dte_entry / 365
+                strike_k          = _round_option_strike(spot * 1.03, spot, "call")
 
-                prem = _bs_price(spot, strike_k, T, RISK_FREE, iv, "call")
-                if prem <= 0.01:
+                fair_mid = _bs_price(spot, strike_k, T, RISK_FREE, iv, "call")
+                quote = _synthetic_bid_ask(fair_mid)
+                if not quote:
+                    continue
+                bid, ask, spread_pct = quote
+                prem = bid
+                if prem < MIN_SHORT_OPTION_PREMIUM:
                     continue
 
                 entry_stock_price = spot
@@ -516,6 +654,12 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                 entry_meta        = {
                     "entry_stock_price": spot,
                     "iv":                round(iv, 4),
+                    "expiry_date":       str(expiry),
+                    "dte_entry":         dte_entry,
+                    "entry_mid":         round(fair_mid, 4),
+                    "entry_bid":         bid,
+                    "entry_ask":         ask,
+                    "entry_spread_pct":  round(spread_pct, 4),
                     "mtf_score":         int(row.get("MTF_Score", 0)),
                     "rsi_entry":         float(row.get("RSI", 50)),
                     "entry_signal":      bool(row.get("Entry_Signal", 0)),
@@ -528,10 +672,14 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
 
         else:
             days_held       = i - entry_idx + 1
-            dte_now         = max(0.5 / 365, (DTE_TARGET - days_held) / 365)
+            dte_now         = max(0.5 / 365, (entry_meta["dte_entry"] - days_held) / 365)
             spot_now        = float(closes[i])
-            iv_now          = _hist_vol(closes[:i + 1])
-            current_premium = _bs_price(spot_now, strike, dte_now, RISK_FREE, iv_now, "call")
+            iv_now          = _hist_vol(closes[:i + 1]) * IV_PREMIUM_FACTOR
+            current_mid     = _bs_price(spot_now, strike, dte_now, RISK_FREE, iv_now, "call")
+            quote_now       = _synthetic_bid_ask(current_mid, exit_quote=True)
+            current_premium = quote_now[1] if quote_now else current_mid
+
+            hit_called  = spot_now >= strike                          # stock at/above strike -> assigned
 
             # Combined P&L:
             # Stock leg: gain from price move, but CAPPED at the strike (upside is sold away)
@@ -540,7 +688,10 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                 (spot_now - entry_s) * 100,          # uncapped move
                 (strike   - entry_s) * 100            # cap at strike (above strike = called away)
             )
-            opt_gain   = (entry_premium - current_premium) * 100  # positive when call decays
+            # If assigned, the short call is not bought back at an inflated ask. The
+            # shares are sold at strike and the original premium is kept.
+            effective_current_premium = 0.0 if hit_called else current_premium
+            opt_gain   = (entry_premium - effective_current_premium) * 100
             pnl_gross  = stock_gain + opt_gain
             commission = (OPT_COMMISSION_PER_CONTRACT * 2 +        # open + close option
                           STK_COMMISSION_PER_SHARE * 100 * 2)       # buy + sell 100 shares
@@ -550,7 +701,6 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
             cost_basis = entry_s * 100
 
             hit_premium = current_premium <= entry_premium * 0.20   # kept 80% of the premium
-            hit_called  = spot_now >= strike                          # stock at/above strike → called away
             # Stock-based stop: close when stock falls more than 4%.
             # The original stop (call premium doubled) never fires on slow declines because
             # the option premium DECREASES as the stock moves away from the OTM strike.
@@ -568,8 +718,15 @@ def _simulate_covered_call_trades(ticker: str, df: pd.DataFrame) -> list[dict]:
                     "entry_date":   str(dates[entry_idx].date()),
                     "exit_date":    str(dates[i].date()),
                     "entry_price":  round(entry_premium, 4),
-                    "exit_price":   round(current_premium, 4),
+                    "exit_price":   round(effective_current_premium, 4),
                     "strike":       round(strike, 2),
+                    "expiry_date":  entry_meta["expiry_date"],
+                    "dte_entry":    entry_meta["dte_entry"],
+                    "entry_mid":    entry_meta["entry_mid"],
+                    "entry_bid":    entry_meta["entry_bid"],
+                    "entry_ask":    entry_meta["entry_ask"],
+                    "entry_spread_pct": entry_meta["entry_spread_pct"],
+                    "pricing_model": "synthetic_bs_with_tradability_constraints",
                     "pnl_pct":      round(pnl_dollar / cost_basis * 100, 3) if cost_basis else 0,
                     "pnl_dollar":   round(pnl_dollar, 2),
                     "commission":   round(commission, 2),
@@ -849,7 +1006,10 @@ def _compute_stats(trades: list[dict]) -> dict:
         start_dt = pd.to_datetime(df["entry_date"].min())
         end_dt   = pd.to_datetime(df["exit_date"].max())
         years    = max((end_dt - start_dt).days / 365.25, 0.01)
-        ann_return_pct = round(((ending_capital / STARTING_CAPITAL) ** (1 / years) - 1) * 100, 2)
+        ann_return_pct = (
+            round(((ending_capital / STARTING_CAPITAL) ** (1 / years) - 1) * 100, 2)
+            if ending_capital > 0 else None
+        )
     except Exception:
         ann_return_pct = None
 
