@@ -33,6 +33,9 @@ sys.path.insert(0, APP_DIR)
 ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_PAPER  = os.getenv("ALPACA_PAPER", "true").lower() != "false"
+BROKER_EXECUTION_ENABLED = os.getenv("BROKER_EXECUTION_ENABLED", "false").lower() == "true"
+ALLOW_LIVE_TRADING = os.getenv("ALLOW_LIVE_TRADING", "false").lower() == "true"
+LIVE_TRADING_CONFIRM = os.getenv("LIVE_TRADING_CONFIRM", "")
 
 # Alpaca base URLs
 _PAPER_URL = "https://paper-api.alpaca.markets"
@@ -61,9 +64,30 @@ def broker_available() -> bool:
     return bool(ALPACA_KEY and ALPACA_SECRET)
 
 
+def live_trading_unlocked() -> bool:
+    """Live trading requires redundant explicit env flags."""
+    return ALPACA_PAPER or (
+        ALLOW_LIVE_TRADING
+        and LIVE_TRADING_CONFIRM == "I_UNDERSTAND_LIVE_RISK"
+    )
+
+
+def broker_execution_allowed() -> tuple[bool, str]:
+    """Whether automated broker order submission is allowed."""
+    if not BROKER_EXECUTION_ENABLED:
+        return False, "Broker execution disabled. Set BROKER_EXECUTION_ENABLED=true for paper orders."
+    if not broker_available():
+        return False, "No Alpaca keys configured."
+    if not ALPACA_PAPER and not live_trading_unlocked():
+        return False, "LIVE trading locked. Set ALLOW_LIVE_TRADING=true and LIVE_TRADING_CONFIRM=I_UNDERSTAND_LIVE_RISK."
+    return True, "broker execution allowed"
+
+
 def get_account() -> dict:
     """Return account info: buying power, portfolio value, etc."""
     try:
+        if not ALPACA_PAPER and not live_trading_unlocked():
+            return {"error": "LIVE trading locked by safety env vars.", "mode": "LIVE_LOCKED"}
         client  = _get_alpaca()
         account = client.get_account()
         return {
@@ -92,9 +116,17 @@ def execute_trade(trade: dict) -> dict:
     """
     result = dict(trade)
     tt     = trade.get("trade_type", "")
+    if tt in ("stock_long", "stock_short"):
+        allowed, note = broker_execution_allowed()
+        if not allowed:
+            result["broker_status"] = "simulated"
+            result["broker_mode"] = "PAPER" if ALPACA_PAPER else "LIVE_LOCKED"
+            result["broker_note"] = note
+            return result
 
     # ── Options: stay simulated ───────────────────────────────────────────────
-    if tt in ("long_call", "long_put", "call_spread", "put_spread", "iron_condor"):
+    if tt in ("long_call", "long_put", "call_spread", "put_spread",
+              "iron_condor", "bull_put_spread", "bear_call_spread", "covered_call"):
         result["broker_status"] = "simulated"
         result["broker_note"]   = "Options simulated locally (Alpaca stocks only). Phase 2: TastyTrade."
         return result
@@ -147,12 +179,15 @@ def close_position(trade: dict, reason: str = "system") -> dict:
     result = dict(trade)
     tt     = trade.get("trade_type", "")
 
-    if tt in ("long_call", "long_put", "call_spread", "put_spread", "iron_condor"):
+    if tt in ("long_call", "long_put", "call_spread", "put_spread",
+              "iron_condor", "bull_put_spread", "bear_call_spread", "covered_call"):
         result["broker_close_status"] = "simulated"
         return result
 
-    if not broker_available():
+    allowed, note = broker_execution_allowed()
+    if not allowed:
         result["broker_close_status"] = "simulated"
+        result["broker_close_note"] = note
         return result
 
     try:
@@ -186,7 +221,7 @@ def close_position(trade: dict, reason: str = "system") -> dict:
 
 def get_open_positions() -> list:
     """Fetch open positions from Alpaca account."""
-    if not broker_available():
+    if not broker_available() or (not ALPACA_PAPER and not live_trading_unlocked()):
         return []
     try:
         client    = _get_alpaca()
