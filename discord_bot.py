@@ -1437,6 +1437,7 @@ async def congress_debug_cmd(ctx):
     senate = data.get("senate", {})
     quiver = data.get("quiver", {})
     finnhub = data.get("finnhub", {})
+    congressflow = data.get("congressflow", {})
 
     def _err_lines(source: dict) -> list[str]:
         return [f"Errors: `{e[:260]}`" for e in (source.get("errors") or [])[:3]]
@@ -1473,7 +1474,15 @@ async def congress_debug_cmd(ctx):
     if finnhub.get("samples"):
         f_lines.append(f"First record:\n```json\n{json.dumps(finnhub['samples'][0], indent=2, default=str)[:600]}```")
 
-    for block in ["\n".join(q_lines), "\n".join(f_lines), "\n".join(h_lines), "\n".join(s_lines)]:
+    cf_lines = [
+        f"**CONGRESSFLOW** — `{congressflow.get('url','?')}`",
+        f"Status: **{congressflow.get('status','?')}** | Total rows: **{congressflow.get('total_rows','?')}** | Keys: `{congressflow.get('sample_keys','?')}`",
+        f"Sample tickers: `{', '.join(list(congressflow.get('sample_tickers',[]))[:25])}`",
+    ] + _err_lines(congressflow)
+    if congressflow.get("samples"):
+        cf_lines.append(f"First record:\n```json\n{json.dumps(congressflow['samples'][0], indent=2, default=str)[:600]}```")
+
+    for block in ["\n".join(q_lines), "\n".join(f_lines), "\n".join(cf_lines), "\n".join(h_lines), "\n".join(s_lines)]:
         if len(block) > 1900:
             await ctx.send(block[:1900])
         else:
@@ -2896,13 +2905,13 @@ async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
         )
         embed.add_field(
             name="This Period",
-            value=f"🏠 House: {stats.get('house_trades',0)} trades  🏛 Senate: {stats.get('senate_trades',0)} trades  |  Total: {stats.get('total_trades',0)}",
+            value=f"🏠 House: {stats.get('house_trades',0)} trades  🏛 Senate: {stats.get('senate_trades',0)} trades  🧾 Other filings: {stats.get('congress_trades',0)} trades  |  Total: {stats.get('total_trades',0)}",
             inline=False,
         )
         if stats.get("most_active"):
             active_str = "  ".join(f"{m['member'].split()[-1]} ({m['trades']})" for m in stats["most_active"][:3])
             embed.add_field(name="Most Active Members", value=active_str, inline=False)
-        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  housestockwatcher.com / senatestockwatcher.com")
+        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  CongressFlow / House / Senate sources")
         await channel.send(embed=embed)
 
 

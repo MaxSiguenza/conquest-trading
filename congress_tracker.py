@@ -86,11 +86,14 @@ _AMOUNT_LABEL = {
 def _parse_date(s: str) -> Optional[date]:
     if not s:
         return None
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(str(s)[:10], fmt).date()
-        except ValueError:
-            pass
+    text = str(s).strip()
+    candidates = [text, text[:10]]
+    for value in candidates:
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y", "%b %d, %Y", "%B %d, %Y"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                pass
     return None
 
 
@@ -250,6 +253,30 @@ def _normalize_finnhub(raw: dict) -> dict:
     }
 
 
+def _normalize_congressflow(raw: dict) -> dict:
+    member_raw = str(raw.get("Politician") or raw.get("politician") or "").strip()
+    party = member_raw[-1:] if member_raw[-1:] in ("D", "R", "I") else ""
+    member = member_raw[:-1].strip() if party else member_raw
+    member = re.sub(r"^[A-Z]{2,3}(?=[A-Z][a-z])", "", member).strip()
+    amount_raw = str(raw.get("Amount") or raw.get("amount") or "")
+    return {
+        "chamber":          "Congress",
+        "member":           member,
+        "state":            "",
+        "party":            party,
+        "ticker":           _extract_ticker(str(raw.get("Ticker") or raw.get("ticker") or "")),
+        "asset":            "",
+        "asset_type":       "Stock",
+        "action":           _parse_action(str(raw.get("Type") or raw.get("type") or "")),
+        "amount_raw":       amount_raw,
+        "amount_label":     _AMOUNT_LABEL.get(amount_raw, amount_raw or "?"),
+        "amount_order":     _AMOUNT_ORDER.get(amount_raw, 0),
+        "transaction_date": _parse_date(str(raw.get("Traded") or raw.get("traded") or "")),
+        "disclosure_date":  _parse_date(str(raw.get("Filed") or raw.get("filed") or "")),
+        "comment":          "congressflow",
+    }
+
+
 # ── Raw fetchers ───────────────────────────────────────────────────────────────
 def _fetch_from_endpoints(endpoints: list[str], normalizer, limit: int = 2000) -> tuple[list[dict], str]:
     """
@@ -324,6 +351,31 @@ def _fetch_quiver(limit: int = 2000) -> list[dict]:
     return []
 
 
+def _fetch_congressflow(limit: int = 2000) -> list[dict]:
+    try:
+        import pandas as pd
+        from io import StringIO
+        resp = requests.get("https://congressflow.com/trades", headers=_HEADERS, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
+        if not tables:
+            return []
+        rows = tables[0].head(limit).to_dict("records")
+        normalized = []
+        for r in rows:
+            try:
+                n = _normalize_congressflow(r)
+                if n["ticker"]:
+                    normalized.append(n)
+            except Exception:
+                pass
+        print(f"[Congress] CongressFlow -> {len(normalized)} trades with tickers")
+        return normalized
+    except Exception as e:
+        print(f"[Congress] CongressFlow failed: {type(e).__name__}: {e}")
+        return []
+
+
 def _fetch_house(limit: int = 2000) -> list[dict]:
     trades, _ = _fetch_from_endpoints(_HOUSE_ENDPOINTS, _normalize_house, limit)
     return trades
@@ -338,6 +390,9 @@ def _fetch_all(limit: int = 2000) -> list[dict]:
     quiver = _fetch_quiver(limit)
     if quiver:
         return quiver
+    congressflow = _fetch_congressflow(limit)
+    if congressflow:
+        return congressflow
     return _fetch_house(limit) + _fetch_senate(limit)
 
 
@@ -376,6 +431,10 @@ def _fetch_finnhub_ticker(ticker: str, days: int = 365) -> list[dict]:
         return []
 
 
+def _activity_date(t: dict) -> Optional[date]:
+    return t.get("disclosure_date") or t.get("transaction_date")
+
+
 # ── Debug helper ───────────────────────────────────────────────────────────────
 def debug_raw(n: int = 5) -> dict:
     """
@@ -388,6 +447,7 @@ def debug_raw(n: int = 5) -> dict:
         "senate": {"errors": []},
         "quiver": {"configured": bool(_env("QUIVER_API_KEY") or _env("QUIVER_QUANT_API_KEY")), "errors": []},
         "finnhub": {"configured": bool(_env("FINNHUB_API_KEY")), "errors": []},
+        "congressflow": {"errors": []},
     }
 
     key = _env("QUIVER_API_KEY") or _env("QUIVER_QUANT_API_KEY")
@@ -438,6 +498,24 @@ def debug_raw(n: int = 5) -> dict:
         except Exception as e:
             result["finnhub"]["errors"].append(f"{type(e).__name__}: check FINNHUB_API_KEY / plan access")
 
+    try:
+        import pandas as pd
+        from io import StringIO
+        resp = requests.get("https://congressflow.com/trades", headers=_HEADERS, timeout=_TIMEOUT)
+        result["congressflow"]["status"] = resp.status_code
+        result["congressflow"]["url"] = "https://congressflow.com/trades"
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
+        rows = tables[0].head(n).to_dict("records") if tables else []
+        result["congressflow"].update({
+            "total_rows": len(rows),
+            "sample_keys": list(rows[0].keys()) if rows else [],
+            "samples": rows[:n],
+            "sample_tickers": list({str(r.get("Ticker") or "").strip() for r in rows[:100]}),
+        })
+    except Exception as e:
+        result["congressflow"]["errors"].append(str(e))
+
     for url in _HOUSE_ENDPOINTS:
         try:
             resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
@@ -484,10 +562,10 @@ def recent_trades(days: int = 30, actions: Optional[list[str]] = None) -> list[d
     trades = _fetch_all()
     result = [
         t for t in trades
-        if t["transaction_date"] and t["transaction_date"] >= cutoff
+        if _activity_date(t) and _activity_date(t) >= cutoff
         and (actions is None or t["action"] in actions)
     ]
-    result.sort(key=lambda x: x["transaction_date"] or date.min, reverse=True)
+    result.sort(key=lambda x: _activity_date(x) or date.min, reverse=True)
     return result
 
 
@@ -499,10 +577,10 @@ def trades_for_ticker(ticker: str, days: int = 365) -> list[dict]:
     result = [
         t for t in trades
         if t["ticker"] == ticker
-        and t["transaction_date"]
-        and t["transaction_date"] >= cutoff
+        and _activity_date(t)
+        and _activity_date(t) >= cutoff
     ]
-    result.sort(key=lambda x: x["transaction_date"] or date.min, reverse=True)
+    result.sort(key=lambda x: _activity_date(x) or date.min, reverse=True)
     return result
 
 
@@ -514,11 +592,11 @@ def watchlist_trades(tickers: list[str], days: int = 14) -> list[dict]:
     result   = [
         t for t in trades
         if t["ticker"] in universe
-        and t["transaction_date"]
-        and t["transaction_date"] >= cutoff
+        and _activity_date(t)
+        and _activity_date(t) >= cutoff
     ]
     result.sort(
-        key=lambda x: (x["transaction_date"] or date.min, x["amount_order"]),
+        key=lambda x: (_activity_date(x) or date.min, x["amount_order"]),
         reverse=True,
     )
     return result
@@ -571,5 +649,6 @@ def summary_stats(days: int = 14) -> dict:
         "sell_count":    len(sells),
         "house_trades":  sum(1 for t in trades if t["chamber"] == "House"),
         "senate_trades": sum(1 for t in trades if t["chamber"] == "Senate"),
+        "congress_trades": sum(1 for t in trades if t["chamber"] == "Congress"),
         "most_active":   [{"member": m, "trades": c} for m, c in most_active],
     }
