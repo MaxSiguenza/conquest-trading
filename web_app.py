@@ -30,6 +30,30 @@ except Exception as _db_err:
 DEFAULT_WATCHLIST = "AAPL NVDA MSFT GOOGL AMZN META TSLA JPM XOM WMT COP SPY QQQ"
 
 
+def _market_open_scan_universe(settings: dict | None = None) -> list[str]:
+    """
+    Scheduled market-open scans should use the broad trading universe, not the
+    small UI watchlist. Set MARKET_OPEN_SCAN_SOURCE=watchlist to restore the
+    old behavior, or MARKET_OPEN_SCAN_LIMIT to cap the broad scan.
+    """
+    source = os.getenv("MARKET_OPEN_SCAN_SOURCE", "full").strip().lower()
+    if source == "watchlist":
+        settings = settings or _load_settings()
+        return settings.get("watchlist", DEFAULT_WATCHLIST).split()
+
+    try:
+        from universe_screener import SP500_UNIVERSE
+        tickers = list(SP500_UNIVERSE)
+    except Exception:
+        tickers = DEFAULT_WATCHLIST.split()
+
+    try:
+        limit = int(os.getenv("MARKET_OPEN_SCAN_LIMIT", "0") or "0")
+    except ValueError:
+        limit = 0
+    return tickers[:limit] if limit > 0 else tickers
+
+
 def _load_settings() -> dict:
     from db import kv_get
     data = kv_get("settings")
@@ -246,7 +270,7 @@ def _run_morning_briefing_job():
             if not s.get("auto_briefing"):
                 return  # Auto-briefing is disabled
             webhook   = s.get("webhook_url", "").strip()
-            watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
+            watchlist = _market_open_scan_universe(s)
             if not webhook or not webhook.startswith("https://discord.com/api/webhooks/"):
                 return
 
@@ -255,6 +279,7 @@ def _run_morning_briefing_job():
             from datetime import datetime, timezone
             import requests as _req
 
+            print(f"[Scheduler] Morning briefing scanning {len(watchlist)} tickers")
             scan_results = scan_watchlist(watchlist)
 
             # Enrich with live FRED macro context
@@ -296,7 +321,7 @@ def _run_morning_briefing_job():
             }
             resp = _req.post(webhook, json={"embeds": [embed]}, timeout=15)
             if resp.status_code == 204:
-                print(f"[Scheduler] Morning briefing sent at {datetime.now()}")
+                print(f"[Scheduler] Morning briefing sent at {datetime.now()} ({len(watchlist)} tickers scanned)")
             else:
                 print(f"[Scheduler] Discord returned {resp.status_code}")
         except Exception as e:
@@ -315,10 +340,10 @@ def _run_brief_generation_job():
                 return
             from morning_brief import generate_brief
             s         = _load_settings()
-            watchlist = s.get("watchlist", DEFAULT_WATCHLIST).split()
+            watchlist = _market_open_scan_universe(s)
             brief     = generate_brief(watchlist=watchlist, force=True)
             print(f"[Scheduler] Morning Intelligence Brief generated at "
-                  f"{brief.get('generated_at', '')[:16]}")
+                  f"{brief.get('generated_at', '')[:16]} ({len(watchlist)} tickers scanned)")
         except Exception as e:
             print(f"[Scheduler] Brief generation job failed: {e}")
 

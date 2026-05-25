@@ -64,6 +64,24 @@ def _save_settings(data: dict):
     kv_set("settings", data)
 
 
+def _market_open_scan_universe(settings: dict | None = None) -> list[str]:
+    source = os.getenv("MARKET_OPEN_SCAN_SOURCE", "full").strip().lower()
+    if source == "watchlist":
+        settings = settings or _load_settings()
+        return settings.get("watchlist", "").split()
+    try:
+        from universe_screener import SP500_UNIVERSE
+        tickers = list(SP500_UNIVERSE)
+    except Exception:
+        settings = settings or _load_settings()
+        tickers = settings.get("watchlist", "").split()
+    try:
+        limit = int(os.getenv("MARKET_OPEN_SCAN_LIMIT", "0") or "0")
+    except ValueError:
+        limit = 0
+    return tickers[:limit] if limit > 0 else tickers
+
+
 def _get_token() -> str:
     try:
         from dotenv import dotenv_values
@@ -2856,13 +2874,13 @@ async def morning_briefing_task():
                   "Create a #morning-briefing channel or set bot_alerts_channel_id.")
             return
 
-        watchlist = s.get("watchlist", "").split()
+        watchlist = _market_open_scan_universe(s)
 
-        await channel.send("⚔️ Generating morning intelligence brief...")
+        await channel.send(f"⚔️ Generating morning intelligence brief across {len(watchlist)} tickers...")
 
         def _do_auto_briefing():
             from morning_brief import generate_brief
-            return generate_brief(watchlist=watchlist)
+            return generate_brief(watchlist=watchlist, force=True)
 
         brief = await _run_sync(_do_auto_briefing)
 
@@ -2872,7 +2890,7 @@ async def morning_briefing_task():
         sectors         = brief.get("sector_rotation", [])
 
         await _post_full_brief(channel, sections, discord_summary, snapshot, sectors, title_suffix="Auto 9 AM ET")
-        print(f"[Bot] Auto morning brief posted at {now_et.strftime('%Y-%m-%d %H:%M ET')}")
+        print(f"[Bot] Auto morning brief posted at {now_et.strftime('%Y-%m-%d %H:%M ET')} ({len(watchlist)} tickers scanned)")
 
         # ── Earnings radar — post to #earnings-radar if any watchlist names report this week ──
         try:
