@@ -2069,6 +2069,7 @@ async def paper_trading_loop():
                 await ch_trades.send(embed=embed)
 
                 # Post one card per trade with full reasoning
+                debate_posts = 0
                 for t in new_trades:
                     tt_label = t["trade_type"].replace("_", " ").title()
                     price    = t.get("entry_price") or t.get("entry_net_debit") or t.get("entry_net_credit", 0)
@@ -2213,8 +2214,27 @@ async def paper_trading_loop():
                                     )
                                 )
                                 await ch_debate.send(embed=debate_embed)
+                                debate_posts += 1
                             except Exception as _de_err:
                                 print(f"[PaperLoop] Debate channel post failed: {_de_err}")
+                if debate_posts == 0:
+                    ch_debate = await _get_channel("agent-debate")
+                    if ch_debate:
+                        agent_count = sum(1 for t in new_trades if t.get("agent_consensus"))
+                        await ch_debate.send(
+                            embed=discord.Embed(
+                                title=f"🗣  Agent Debate — No Debate Data ({today.strftime('%b %d')})",
+                                description=(
+                                    f"Generated **{len(new_trades)}** paper trade(s), but none contained saved "
+                                    "`debate_pm` data, so there were no bull/bear debate cards to post.\n\n"
+                                    f"Agent-tagged trades: **{agent_count}/{len(new_trades)}**. "
+                                    "This usually means the batch came from the signal/fallback generator or "
+                                    "the agent swarm did not produce approved debate-backed trades."
+                                ),
+                                color=COLOR_DARK,
+                                timestamp=_ts(),
+                            )
+                        )
             elif ch_trades:
                 reason = (gen_status or {}).get("reason") or "no_new_trades"
                 requested = (gen_status or {}).get("requested", 10)
