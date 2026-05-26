@@ -1653,7 +1653,7 @@ _briefing_sent_date    = None   # date of last auto morning briefing
 _paper_generated_dates = set()  # dates paper trades were already generated
 _paper_notified_ids    = set()  # closed trade IDs already posted to Discord
 _paper_eod_dates       = set()  # dates EOD summary already posted
-_auto_scan_dates       = set()  # dates market-open watchlist scan was auto-posted
+_auto_scan_dates       = set()  # dates market-open watchlist scan was auto-posted (in-memory cache; DB is authoritative)
 _auto_discovery_dates  = set()  # dates auto-thesis discovery was run
 _positions_posted      = set()  # (date, label) tuples — "noon" and "preclose" positions updates
 _screener_dates        = set()  # Mondays the weekly screener was auto-posted
@@ -1743,8 +1743,21 @@ async def paper_trading_loop():
 
         # ── 0a. Auto-scan at market open (9:30–10:15 AM, once per day) ─────────
         open_window = (h == 9 and m >= 30) or (h == 10 and m <= 15)
+        # Check DB so bot restarts don't re-fire the scan (in-memory set resets on crash/redeploy)
+        _db_scan_key = f"auto_scan_done_{today.isoformat()}"
+        try:
+            from db import kv_get, kv_set as _kv_set
+            if kv_get(_db_scan_key):
+                _auto_scan_dates.add(today)
+        except Exception:
+            pass
         if open_window and today not in _auto_scan_dates:
             _auto_scan_dates.add(today)
+            try:
+                from db import kv_set as _kv_set
+                _kv_set(_db_scan_key, True)
+            except Exception:
+                pass
             s_cfg = _load_settings()
             wl_tickers = _market_open_scan_universe(s_cfg)
             if wl_tickers and ch_watchlist:
