@@ -197,6 +197,8 @@ def _round_strike(price: float, step: float) -> float:
 
 
 def _strike_step(price: float) -> float:
+    if price >= 1000:  return 25.0
+    if price >= 500:   return 10.0
     if price >= 200:   return 5.0
     if price >= 50:    return 2.5
     if price >= 20:    return 1.0
@@ -373,6 +375,12 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
         # Find the strike nearest our target
         idx = (pool["strike"] - target_strike).abs().idxmin()
         row = pool.loc[idx]
+
+        # Reject if the best match is more than 25% away from our target —
+        # this catches sparse chains returning totally wrong strikes (e.g. $95
+        # for NFLX when we wanted $1,190).
+        if target_strike > 0 and abs(float(row["strike"]) - target_strike) / target_strike > 0.25:
+            return None
 
         contract_symbol = str(row.get("contractSymbol") or "")
         bid = float(row.get("bid") or 0)
