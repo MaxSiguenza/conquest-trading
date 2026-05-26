@@ -71,6 +71,12 @@ def get_chain(ticker: str, expiry: str, opt_type: str) -> list[dict]:
             continue
         vol  = int(v) if (v := row.get("volume"))  is not None and str(v) != "nan" else 0
         oi   = int(v) if (v := row.get("openInterest")) is not None and str(v) != "nan" else 0
+        # Skip completely dead contracts
+        if vol == 0 and oi == 0:
+            continue
+        # Skip contracts with a bid-ask spread wider than 60% of mid (unfillable)
+        if bid > 0 and ask > 0 and (ask - bid) / m > 0.60:
+            continue
         iv   = float(row.get("impliedVolatility") or 0)
         rows.append({
             "strike": float(row["strike"]),
@@ -88,6 +94,11 @@ def get_chain(ticker: str, expiry: str, opt_type: str) -> list[dict]:
 
 # ── Spread finder ─────────────────────────────────────────────────────────────
 
+def _liquid(leg: dict) -> bool:
+    """Both OI and volume can't both be near zero — contract must be tradeable."""
+    return leg["oi"] >= 50 or leg["volume"] >= 10
+
+
 def find_call_spreads(ticker: str, price: float, chain: list[dict],
                       budget: float, expiry: str) -> list[dict]:
     """Bull call debit spreads within budget. Long ATM–slightly OTM, short 1-2 steps out."""
@@ -100,8 +111,12 @@ def find_call_spreads(ticker: str, price: float, chain: list[dict],
             break
         if lk < price * 0.90:
             continue
+        if not _liquid(long_leg):
+            continue
         for j in range(i + 1, min(i + 6, n)):
             short_leg = chain[j]
+            if not _liquid(short_leg):
+                continue
             sk = short_leg["strike"]
             width  = sk - lk
             if width < 2.0:
@@ -132,6 +147,8 @@ def find_call_spreads(ticker: str, price: float, chain: list[dict],
                 "dte":        _dte(expiry),
                 "long_iv":    long_leg["iv"],
                 "short_iv":   short_leg["iv"],
+                "min_oi":     min(long_leg["oi"],  short_leg["oi"]),
+                "min_vol":    min(long_leg["volume"], short_leg["volume"]),
             })
     # Sort by risk/reward descending, filter sensible RR
     results = [r for r in results if r["rr"] >= 0.5]
@@ -149,8 +166,12 @@ def find_put_spreads(ticker: str, price: float, chain: list[dict],
             continue
         if lk < price * 0.90:
             break
+        if not _liquid(long_leg):
+            continue
         for j in range(i - 1, max(i - 6, -1), -1):
             short_leg = chain[j]
+            if not _liquid(short_leg):
+                continue
             sk = short_leg["strike"]
             width = lk - sk
             if width < 2.0:
@@ -181,6 +202,8 @@ def find_put_spreads(ticker: str, price: float, chain: list[dict],
                 "dte":        _dte(expiry),
                 "long_iv":    long_leg["iv"],
                 "short_iv":   short_leg["iv"],
+                "min_oi":     min(long_leg["oi"],  short_leg["oi"]),
+                "min_vol":    min(long_leg["volume"], short_leg["volume"]),
             })
     results = [r for r in results if r["rr"] >= 0.5]
     return sorted(results, key=lambda r: -r["rr"])[:5]
@@ -366,7 +389,8 @@ def build_discord_embeds(data: dict, budget: float) -> list:
             lines.append(
                 f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
                 f"cost=${r['cost']:.0f}  max=${r['max_profit']:.0f}  "
-                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
+                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                f"OI={r['min_oi']}  vol={r['min_vol']}"
             )
         header["fields"].append({
             "name": "📈 Bull Call Spreads",
@@ -381,7 +405,8 @@ def build_discord_embeds(data: dict, budget: float) -> list:
             lines.append(
                 f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
                 f"cost=${r['cost']:.0f}  max=${r['max_profit']:.0f}  "
-                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
+                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                f"OI={r['min_oi']}  vol={r['min_vol']}"
             )
         header["fields"].append({
             "name": "📉 Bear Put Spreads",
@@ -450,14 +475,16 @@ if __name__ == "__main__":
         for r in data["call_spreads"]:
             print(f"  {r['label']:20s}  exp {r['expiry']} ({r['dte']}d)  "
                   f"cost=${r['cost']:>6.0f}  max=${r['max_profit']:>6.0f}  "
-                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
+                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                  f"OI={r['min_oi']}  vol={r['min_vol']}")
 
     if data["put_spreads"]:
         print("\n-- Bear Put Spreads --------------------------------------------")
         for r in data["put_spreads"]:
             print(f"  {r['label']:20s}  exp {r['expiry']} ({r['dte']}d)  "
                   f"cost=${r['cost']:>6.0f}  max=${r['max_profit']:>6.0f}  "
-                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
+                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                  f"OI={r['min_oi']}  vol={r['min_vol']}")
 
     if data["long_calls"]:
         print("\n-- Long Calls --------------------------------------------------")
