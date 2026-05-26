@@ -1746,7 +1746,7 @@ async def paper_trading_loop():
         if open_window and today not in _auto_scan_dates:
             _auto_scan_dates.add(today)
             s_cfg = _load_settings()
-            wl_tickers = s_cfg.get("watchlist", "").split()
+            wl_tickers = _market_open_scan_universe(s_cfg)
             if wl_tickers and ch_watchlist:
                 try:
                     def _do_open_scan():
