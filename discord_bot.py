@@ -3356,12 +3356,15 @@ Use them to give specific, data-anchored answers. Never say "I don't have access
 [CONGRESSIONAL TRADING] — STOCK Act disclosures for watchlist tickers last 14 days, plus top bought tickers across all of Congress
 [MACRO SNAPSHOT] — FRED macro data: Fed funds rate, CPI, GDP, yield curve, unemployment
 
+[LATEST MORNING BRIEF] - today's generated intelligence brief summary and section text
+
 When answering:
 - Paper trades → use [LIVE PAPER TRADES] block
 - Backtest questions → use [LAST BACKTEST RUN] block
 - "Is there anything big this week?" → use [MARKET CALENDAR] upcoming events
 - "What is Congress buying/selling?" → use [CONGRESSIONAL TRADING] block
 - "What's the macro environment?" → use [MACRO SNAPSHOT] block
+- Morning brief questions -> use [LATEST MORNING BRIEF]; if it is missing, tell the user to run !briefing
 - Congressional data shows conviction: multiple members buying the same ticker is a real signal worth flagging
 
 Your role: be the senior analyst on the desk. Direct, specific, data-anchored.
@@ -3529,6 +3532,29 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 pass
 
             # ── FRED macro snapshot (brief) ───────────────────────────────
+            brief_block = ""
+            try:
+                from morning_brief import load_cached_brief
+                br = load_cached_brief()
+                if br:
+                    summary = (br.get("discord_summary") or "").strip()
+                    sec = br.get("sections") or {}
+                    section_lines = []
+                    if isinstance(sec, dict):
+                        for name, text in sec.items():
+                            clean = str(text or "").strip()
+                            if clean:
+                                label = str(name).replace("_", " ").title()
+                                section_lines.append(f"{label}: {clean[:900]}")
+                    brief_block = (
+                        f"[LATEST MORNING BRIEF]\n"
+                        f"Market date: {br.get('market_date', '?')} | Generated: {br.get('generated_at', '?')}\n"
+                        f"Summary: {summary[:900]}\n"
+                        f"{chr(10).join(section_lines)[:3500]}"
+                    ).strip()
+            except Exception:
+                pass
+
             macro_block = ""
             try:
                 from macro.fred_data import fetch_fred_macro, fred_macro_context
@@ -3542,6 +3568,8 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 sections.append(calendar_block)
             if congress_block:
                 sections.append(congress_block)
+            if brief_block:
+                sections.append(brief_block)
             if macro_block:
                 sections.append(macro_block)
             return "\n\n".join(sections)
