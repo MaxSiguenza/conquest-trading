@@ -168,6 +168,13 @@ async def help_cmd(ctx):
         "`!generate` — manually trigger today's 10 trades\n"
         "`!agents` — view multi-agent brain weights & learning progress"
     ), inline=False)
+    embed.add_field(name="🎯  Options Finder", value=(
+        "`!options AAPL 500` — all plays within budget (spreads + singles)\n"
+        "`!options NVDA 1000 spreads` — debit spreads only\n"
+        "`!options SPY 750 calls` — call spreads + long calls\n"
+        "`!options TSLA 500 puts` — put spreads + long puts\n"
+        "`!options AAPL 500 long` — single-leg calls and puts only"
+    ), inline=False)
     embed.add_field(name="👁  Watchlist & Research", value=(
         "`!watch TICKER` — add to watchlist with thesis, conviction, price targets\n"
         "`!deepdive TICKER` — full 6-prompt deep research report\n"
@@ -1195,6 +1202,79 @@ async def deepdive_cmd(ctx, ticker: str = ""):
     if dest != ctx.channel:
         await ctx.send(
             f"🔬 Deep dive on **{ticker}** posted to {dest.mention}",
+            delete_after=10,
+        )
+
+
+@bot.command(name="options", aliases=["opt", "chain", "spreads", "calls", "puts"])
+async def options_cmd(ctx, ticker: str = "", budget: str = "1000", mode: str = "all"):
+    """
+    Find live options plays for a ticker within your budget.
+    Usage: !options AAPL 500            — all plays up to $500
+           !options NVDA 1000 spreads   — debit spreads only
+           !options SPY 750 calls       — call spreads + long calls
+           !options TSLA 500 puts       — put spreads + long puts
+           !options AAPL 500 long       — single-leg calls and puts only
+    """
+    if not ticker:
+        await ctx.send(
+            "Usage: `!options TICKER budget [mode]`\n"
+            "Examples: `!options AAPL 500`  `!options NVDA 1000 spreads`  `!options SPY calls`\n"
+            "Modes: `all` (default) · `spreads` · `calls` · `puts` · `long`"
+        )
+        return
+
+    ticker = ticker.upper()
+    try:
+        budget_val = float(budget)
+    except ValueError:
+        # budget might have been omitted, treat second arg as mode
+        mode = budget
+        budget_val = 1000.0
+
+    mode = mode.lower()
+    if mode not in ("all", "calls", "puts", "spreads", "long"):
+        mode = "all"
+
+    thinking = await ctx.send(
+        f"🔍 Scanning **{ticker}** options chain (budget ${budget_val:,.0f}, mode={mode})…"
+    )
+
+    def _run():
+        from options_finder import find_options, build_discord_embeds
+        data   = find_options(ticker, budget_val, mode)
+        embeds = build_discord_embeds(data, budget_val)
+        return embeds
+
+    try:
+        embeds = await _run_sync(_run)
+    except Exception as e:
+        await thinking.delete()
+        await ctx.send(f"⚠ Options finder failed for **{ticker}**: {str(e)[:200]}")
+        return
+
+    await thinking.delete()
+
+    dest = _get_channel("stocks", "watchlist", "general") or ctx.channel
+    for embed_data in embeds:
+        em = discord.Embed(
+            title=embed_data.get("title", ""),
+            description=embed_data.get("description", ""),
+            color=embed_data.get("color", 0x7c6af7),
+        )
+        for field in embed_data.get("fields", []):
+            em.add_field(
+                name=field["name"],
+                value=field["value"],
+                inline=field.get("inline", False),
+            )
+        if embed_data.get("footer"):
+            em.set_footer(text=embed_data["footer"].get("text", ""))
+        await dest.send(embed=em)
+
+    if dest != ctx.channel:
+        await ctx.send(
+            f"Options plays for **{ticker}** posted to {dest.mention}",
             delete_after=10,
         )
 
