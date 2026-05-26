@@ -3375,6 +3375,7 @@ You receive ALL of the following live context blocks prepended to each user mess
 Use them to give specific, data-anchored answers. Never say "I don't have access to that" if the block is present.
 
 [LIVE PAPER TRADES] — current open positions, P&L, win rate, Sharpe
+[LIVE OPTION POSITIONS] — exact strikes, expiry, contracts, entry debit/credit, live leg bid/ask, current mark, greeks, pricing confidence
 [LAST BACKTEST RUN] — most recent historical simulation results
 [MARKET CALENDAR] — is market open today, today's events, upcoming HIGH-impact events (FOMC/CPI/NFP/PCE/GDP)
 [CONGRESSIONAL TRADING] — STOCK Act disclosures for watchlist tickers last 14 days, plus top bought tickers across all of Congress
@@ -3384,6 +3385,9 @@ Use them to give specific, data-anchored answers. Never say "I don't have access
 
 When answering:
 - Paper trades → use [LIVE PAPER TRADES] block
+- Options/spread questions -> use [LIVE OPTION POSITIONS]. If live leg quotes are unavailable, say so. Never invent chain prices.
+- For debit spreads, default exit is closing the spread as a unit. Legging out is an advanced discretionary adjustment, not the standard bot action.
+- Long calls/puts have defined risk: the premium paid. Do not call long options "undefined risk."
 - Backtest questions → use [LAST BACKTEST RUN] block
 - "Is there anything big this week?" → use [MARKET CALENDAR] upcoming events
 - "What is Congress buying/selling?" → use [CONGRESSIONAL TRADING] block
@@ -3437,6 +3441,75 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
             s = get_paper_stats()
             open_t = s.get("open_trades", [])
             pos_lines = []
+            option_lines = []
+
+            def _fmt_money(v):
+                try:
+                    return f"${float(v):.2f}"
+                except Exception:
+                    return "?"
+
+            def _expiry_dte(t):
+                exp = (t.get("expiry_date") or t.get("expiry") or "")[:10]
+                if not exp:
+                    return "exp ?"
+                try:
+                    from datetime import date as _date
+                    dte = max((_date.fromisoformat(exp) - _date.today()).days, 0)
+                    return f"exp {exp} ({dte} DTE)"
+                except Exception:
+                    return f"exp {exp}"
+
+            def _option_context_line(t):
+                tt = t.get("trade_type", "?")
+                src = t.get("mark_source") or t.get("chain_source") or "?"
+                trusted = t.get("pricing_confidence") or ("trusted" if t.get("pnl_trusted") else "untrusted")
+                base = (
+                    f"{t.get('ticker','?')} {tt.replace('_',' ')} {t.get('contracts', 1)}x | {_expiry_dte(t)} | "
+                    f"P&L {_fmt_money(t.get('pnl', 0))} ({float(t.get('pnl_pct', 0) or 0)*100:+.1f}%) | "
+                    f"delta {t.get('delta', '?')} theta/day {_fmt_money(t.get('theta_dollar_day'))} | "
+                    f"mark_source {src} | confidence {trusted}"
+                )
+                if t.get("mark_error"):
+                    base += f" | mark_error {t.get('mark_error')}"
+                if tt in ("long_call", "long_put"):
+                    return (
+                        f"{base} | {t.get('opt_type','?')} strike {t.get('strike','?')} | "
+                        f"entry premium {_fmt_money(t.get('entry_option_price'))} | "
+                        f"current mid {_fmt_money(t.get('current_option_price'))} | "
+                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))}"
+                    )
+                if tt in ("call_spread", "put_spread"):
+                    return (
+                        f"{base} | DEBIT spread {t.get('opt_type','?')} long {t.get('long_strike','?')} / "
+                        f"short {t.get('short_strike','?')} | entry debit {_fmt_money(t.get('entry_net_debit'))} | "
+                        f"current spread mid {_fmt_money(t.get('current_net_value'))} | "
+                        f"long b/a {_fmt_money(t.get('long_bid'))}/{_fmt_money(t.get('long_ask'))}; "
+                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))}"
+                    )
+                if tt in ("bull_put_spread", "bear_call_spread"):
+                    return (
+                        f"{base} | CREDIT spread {t.get('opt_type','?')} short {t.get('short_strike','?')} / "
+                        f"long {t.get('long_strike','?')} | entry credit {_fmt_money(t.get('entry_net_credit'))} | "
+                        f"cost to close {_fmt_money(t.get('current_cost_to_close'))} | "
+                        f"credit captured {t.get('credit_captured_pct', '?')}% | "
+                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))}; "
+                        f"long b/a {_fmt_money(t.get('long_bid'))}/{_fmt_money(t.get('long_ask'))}"
+                    )
+                if tt == "iron_condor":
+                    return (
+                        f"{base} | condor short put/call {t.get('short_put_k','?')}/{t.get('short_call_k','?')} "
+                        f"long put/call {t.get('long_put_k','?')}/{t.get('long_call_k','?')} | "
+                        f"entry credit {_fmt_money(t.get('entry_net_credit'))} | current net {_fmt_money(t.get('current_net_value'))}"
+                    )
+                if tt == "covered_call":
+                    return (
+                        f"{base} | covered call strike {t.get('strike','?')} | "
+                        f"entry premium {_fmt_money(t.get('entry_option_price'))} | "
+                        f"current call mid {_fmt_money(t.get('current_option_price'))} | "
+                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))}"
+                    )
+                return base
             for t in open_t:
                 pnl     = t.get("pnl", 0) or 0
                 pnl_pct = (t.get("pnl_pct", 0) or 0) * 100
@@ -3445,7 +3518,10 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                     f"  {t.get('ticker','?')} {t.get('trade_type','?').replace('_',' ')} "
                     f"P&L ${pnl:+.2f} ({pnl_pct:+.1f}%) day {days}/5"
                 )
+                if t.get("trade_type") not in ("stock_long", "stock_short"):
+                    option_lines.append("  " + _option_context_line(t))
             pos_block = "\n".join(pos_lines) if pos_lines else "  none"
+            option_block = "\n".join(option_lines) if option_lines else "  none"
             live_block = (
                 f"[LIVE PAPER TRADES — today's active positions, NOT backtest]\n"
                 f"Paper trades: {s['total_trades']} total | {s['open_count']} open | "
@@ -3453,7 +3529,8 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 f"Win rate: {s.get('win_rate',0)*100:.1f}% | "
                 f"Total P&L: ${s.get('total_pnl',0):+.2f} | "
                 f"Sharpe: {s.get('sharpe') or 'N/A'}\n"
-                f"Open positions:\n{pos_block}"
+                f"Open positions:\n{pos_block}\n\n"
+                f"[LIVE OPTION POSITIONS - exact open option/spread details]\n{option_block}"
             )
 
             # Load last backtest results from DB — no hardcoded fallback
