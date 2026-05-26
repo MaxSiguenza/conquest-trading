@@ -3034,10 +3034,16 @@ async def morning_briefing_task():
                 lines = []
                 for s_item in sectors:
                     name   = s_item.get("sector", s_item.get("name","?"))
-                    chg    = s_item.get("change_pct", s_item.get("chg_pct", 0)) or 0
+                    chg    = (
+                        s_item.get("ret5")
+                        if s_item.get("ret5") is not None
+                        else s_item.get("change_pct", s_item.get("chg_pct", s_item.get("chg", 0)))
+                    ) or 0
+                    day_chg = s_item.get("chg")
                     signal = s_item.get("signal", s_item.get("trend",""))
                     icon   = "🟢" if chg > 1 else ("🔴" if chg < -1 else "⚪")
-                    lines.append(f"{icon} **{name}** {chg:+.1f}%  {signal}")
+                    extra = f" ({day_chg:+.1f}% 1d)" if day_chg is not None else ""
+                    lines.append(f"{icon} **{name}** {chg:+.1f}% 5d{extra}  {signal}")
                 if not lines:
                     lines = ["Sector data unavailable — check macro dashboard manually."]
                 sec_embed = discord.Embed(

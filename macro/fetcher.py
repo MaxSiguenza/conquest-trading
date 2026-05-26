@@ -143,8 +143,9 @@ def macro_health_score(data: dict) -> tuple[int, int]:
     # +1 yield curve normal (no recession signal)
     if data.get("YIELD_CURVE", {}).get("regime") == 1:
         score += 1
-    # +1 oil bullish
-    if data.get("CL=F", {}).get("regime") == 1:
+    # +1 oil bullish. Long-term regime alone is not enough when crude is
+    # actively falling; otherwise the macro post recommends Energy into a selloff.
+    if data.get("CL=F", {}).get("regime") == 1 and data.get("CL=F", {}).get("trend") != "FALLING":
         score += 1
     # +1 copper bullish (economic expansion)
     if data.get("HG=F", {}).get("regime") == 1:
@@ -160,8 +161,8 @@ def sector_rotation_phase(data: dict) -> tuple[str, str, list]:
     """
     hyg_bull   = data.get("HYG",       {}).get("regime") == 1
     curve_ok   = data.get("YIELD_CURVE",{}).get("regime") == 1
-    oil_bull   = data.get("CL=F",      {}).get("regime") == 1
-    copper_bull= data.get("HG=F",      {}).get("regime") == 1
+    oil_bull   = data.get("CL=F",      {}).get("regime") == 1 and data.get("CL=F", {}).get("trend") != "FALLING"
+    copper_bull= data.get("HG=F",      {}).get("regime") == 1 and data.get("HG=F", {}).get("trend") != "FALLING"
     spy_bull   = data.get("SPY",       {}).get("regime") == 1
 
     if hyg_bull and curve_ok and oil_bull and copper_bull:
@@ -170,11 +171,11 @@ def sector_rotation_phase(data: dict) -> tuple[str, str, list]:
             "Economy running hot. Commodities and industrials outperform.",
             ["Energy (XLE)", "Materials (XLB)", "Industrials (XLI)", "Financials (XLF)"]
         )
-    elif hyg_bull and curve_ok and not oil_bull:
+    elif hyg_bull and curve_ok and not oil_bull and copper_bull:
         return (
-            "EARLY-CYCLE RECOVERY",
-            "Economy recovering. Growth and tech lead the way.",
-            ["Technology (XLK)", "Consumer Discretionary (XLY)", "Financials (XLF)"]
+            "MIXED / DEFENSIVE ROTATION",
+            "Credit is stable, but crude is falling. Do not assume Energy leadership without sector confirmation.",
+            ["Healthcare (XLV)", "Utilities (XLU)", "Real Estate (XLRE)"]
         )
     elif hyg_bull and not curve_ok:
         return (
