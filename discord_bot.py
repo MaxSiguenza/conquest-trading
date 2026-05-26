@@ -3388,6 +3388,15 @@ When answering:
 - Options/spread questions -> use [LIVE OPTION POSITIONS]. If live leg quotes are unavailable, say so. Never invent chain prices.
 - For debit spreads, default exit is closing the spread as a unit. Legging out is an advanced discretionary adjustment, not the standard bot action.
 - Long calls/puts have defined risk: the premium paid. Do not call long options "undefined risk."
+- Debit spread math must be correct:
+  * Call debit spread max risk = net debit paid.
+  * Call debit spread max profit = short strike - long strike - net debit.
+  * Put debit spread max profit = long strike - short strike - net debit.
+  * Dollar values per 1 contract = per-share value * 100.
+  * Breakeven call debit spread = long strike + net debit.
+  * Breakeven put debit spread = long strike - net debit.
+  * Current profit = current spread mark - entry debit.
+  * Captured max profit percent = current profit / max profit, not current profit / entry debit.
 - Backtest questions → use [LAST BACKTEST RUN] block
 - "Is there anything big this week?" → use [MARKET CALENDAR] upcoming events
 - "What is Congress buying/selling?" → use [CONGRESSIONAL TRADING] block
