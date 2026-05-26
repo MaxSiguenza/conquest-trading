@@ -364,10 +364,9 @@ def build_discord_embeds(data: dict, budget: float) -> list:
         lines = []
         for r in data["call_spreads"][:3]:
             lines.append(
-                f"**{r['label']}**  cost=${r['cost']:.0f}  "
-                f"max_profit=${r['max_profit']:.0f}  "
-                f"RR {r['rr']:.1f}x  "
-                f"BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
+                f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
+                f"cost=${r['cost']:.0f}  max=${r['max_profit']:.0f}  "
+                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
             )
         header["fields"].append({
             "name": "📈 Bull Call Spreads",
@@ -380,10 +379,9 @@ def build_discord_embeds(data: dict, budget: float) -> list:
         lines = []
         for r in data["put_spreads"][:3]:
             lines.append(
-                f"**{r['label']}**  cost=${r['cost']:.0f}  "
-                f"max_profit=${r['max_profit']:.0f}  "
-                f"RR {r['rr']:.1f}x  "
-                f"BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
+                f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
+                f"cost=${r['cost']:.0f}  max=${r['max_profit']:.0f}  "
+                f"RR {r['rr']:.1f}x  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)"
             )
         header["fields"].append({
             "name": "📉 Bear Put Spreads",
@@ -396,9 +394,9 @@ def build_discord_embeds(data: dict, budget: float) -> list:
         lines = []
         for r in data["long_calls"][:3]:
             lines.append(
-                f"**{r['label']}**  ask=${r['ask']:.2f} (${r['cost']:.0f})  "
-                f"IV={r['iv']:.0%}  "
-                f"BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
+                f"ask=${r['ask']:.2f} (${r['cost']:.0f})  "
+                f"IV={r['iv']:.0%}  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
                 f"vol={r['volume']:,}"
             )
         header["fields"].append({
@@ -412,9 +410,9 @@ def build_discord_embeds(data: dict, budget: float) -> list:
         lines = []
         for r in data["long_puts"][:3]:
             lines.append(
-                f"**{r['label']}**  ask=${r['ask']:.2f} (${r['cost']:.0f})  "
-                f"IV={r['iv']:.0%}  "
-                f"BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
+                f"**{r['label']}  exp {r['expiry']} ({r['dte']}d)**  "
+                f"ask=${r['ask']:.2f} (${r['cost']:.0f})  "
+                f"IV={r['iv']:.0%}  BE ${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
                 f"vol={r['volume']:,}"
             )
         header["fields"].append({
@@ -450,27 +448,29 @@ if __name__ == "__main__":
     if data["call_spreads"]:
         print("-- Bull Call Spreads -------------------------------------------")
         for r in data["call_spreads"]:
-            print(f"  {r['label']:20s}  cost=${r['cost']:>6.0f}  "
-                  f"max=${r['max_profit']:>6.0f}  RR={r['rr']:.1f}x  "
-                  f"BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
+            print(f"  {r['label']:20s}  exp {r['expiry']} ({r['dte']}d)  "
+                  f"cost=${r['cost']:>6.0f}  max=${r['max_profit']:>6.0f}  "
+                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
 
     if data["put_spreads"]:
         print("\n-- Bear Put Spreads --------------------------------------------")
         for r in data["put_spreads"]:
-            print(f"  {r['label']:20s}  cost=${r['cost']:>6.0f}  "
-                  f"max=${r['max_profit']:>6.0f}  RR={r['rr']:.1f}x  "
-                  f"BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
+            print(f"  {r['label']:20s}  exp {r['expiry']} ({r['dte']}d)  "
+                  f"cost=${r['cost']:>6.0f}  max=${r['max_profit']:>6.0f}  "
+                  f"RR={r['rr']:.1f}x  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)")
 
     if data["long_calls"]:
         print("\n-- Long Calls --------------------------------------------------")
         for r in data["long_calls"]:
-            print(f"  {r['label']:12s}  ask=${r['ask']:.2f} (${r['cost']:.0f})  "
+            print(f"  {r['label']:12s}  exp {r['expiry']} ({r['dte']}d)  "
+                  f"ask=${r['ask']:.2f} (${r['cost']:.0f})  "
                   f"IV={r['iv']:.0%}  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
                   f"vol={r['volume']:,}")
 
     if data["long_puts"]:
         print("\n-- Long Puts ---------------------------------------------------")
         for r in data["long_puts"]:
-            print(f"  {r['label']:12s}  ask=${r['ask']:.2f} (${r['cost']:.0f})  "
+            print(f"  {r['label']:12s}  exp {r['expiry']} ({r['dte']}d)  "
+                  f"ask=${r['ask']:.2f} (${r['cost']:.0f})  "
                   f"IV={r['iv']:.0%}  BE=${r['breakeven']:.2f} ({r['be_move_pct']:+.1f}%)  "
                   f"vol={r['volume']:,}")
