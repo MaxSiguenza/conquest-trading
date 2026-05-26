@@ -2023,10 +2023,11 @@ async def paper_trading_loop():
             _paper_generated_dates.add(today)
 
             def _gen():
-                from paper_trader import generate_daily_trades
-                return generate_daily_trades(10)
+                import paper_trader
+                trades = paper_trader.generate_daily_trades(10)
+                return trades, getattr(paper_trader, "LAST_GENERATE_STATUS", {})
 
-            new_trades = await _run_sync(_gen)
+            new_trades, gen_status = await _run_sync(_gen)
 
             if new_trades and ch_trades:
                 type_counts: dict = {}
@@ -2214,6 +2215,26 @@ async def paper_trading_loop():
                                 await ch_debate.send(embed=debate_embed)
                             except Exception as _de_err:
                                 print(f"[PaperLoop] Debate channel post failed: {_de_err}")
+            elif ch_trades:
+                reason = (gen_status or {}).get("reason") or "no_new_trades"
+                requested = (gen_status or {}).get("requested", 10)
+                already = (gen_status or {}).get("already_today", 0)
+                approved = (gen_status or {}).get("risk_gate_approved")
+                attempted = (gen_status or {}).get("risk_gate_requested")
+                detail = (
+                    f"Requested **{requested}** trades. Already had **{already}** trade(s) for today.\n"
+                    f"Reason: `{reason}`"
+                )
+                if attempted is not None and approved is not None:
+                    detail += f"\nRisk gate approved **{approved}/{attempted}** candidate(s)."
+                await ch_trades.send(
+                    embed=discord.Embed(
+                        title=f"🧪  Paper Trade Generation Check — {today.strftime('%b %d')}",
+                        description=detail,
+                        color=COLOR_DARK,
+                        timestamp=_ts(),
+                    )
+                )
 
             # ── Post vetoed trades to #missed-trades ──────────────────────────
             ch_missed = await _get_channel("missed-trades")

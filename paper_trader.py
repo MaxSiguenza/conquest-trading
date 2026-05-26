@@ -22,6 +22,8 @@ import pytz
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ET      = pytz.timezone("America/New_York")
 
+LAST_GENERATE_STATUS: dict = {}
+
 # ── Extended universe (20 liquid names for variety) ───────────────────────────
 PAPER_UNIVERSE = [
     "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN",
@@ -1657,12 +1659,27 @@ def generate_daily_trades(n: int = 10) -> list:
 
     today_str = datetime.now(ET).strftime("%Y-%m-%d")
     all_trades = load_trades()
+    global LAST_GENERATE_STATUS
+    LAST_GENERATE_STATUS = {
+        "date": today_str,
+        "requested": n,
+        "already_today": 0,
+        "generated": 0,
+        "status": "started",
+        "reason": "",
+    }
 
     # Already ran today?
     already_today = [t for t in all_trades
                      if t.get("date_entered", "").startswith(today_str)]
+    LAST_GENERATE_STATUS["already_today"] = len(already_today)
     if len(already_today) >= n:
         print(f"[PaperTrader] Already have {len(already_today)} trades for {today_str}.")
+        LAST_GENERATE_STATUS.update({
+            "generated": 0,
+            "status": "skipped",
+            "reason": "already_ran_today",
+        })
         return []
 
     used_tickers = {t["ticker"] for t in already_today}
@@ -1780,6 +1797,8 @@ def generate_daily_trades(n: int = 10) -> list:
     if new_trades:
         before_gate = len(new_trades)
         new_trades = _apply_pretrade_risk_gate(new_trades, all_trades)
+        LAST_GENERATE_STATUS["risk_gate_requested"] = before_gate
+        LAST_GENERATE_STATUS["risk_gate_approved"] = len(new_trades)
         if len(new_trades) != before_gate:
             print(f"[RiskGate] Approved {len(new_trades)}/{before_gate} generated trade(s).")
 
@@ -1828,6 +1847,11 @@ def generate_daily_trades(n: int = 10) -> list:
 
     all_trades.extend(new_trades)
     save_trades(all_trades)
+    LAST_GENERATE_STATUS.update({
+        "generated": len(new_trades),
+        "status": "generated" if new_trades else "skipped",
+        "reason": "" if new_trades else "no_candidates_passed_risk_gate",
+    })
 
     # Submit stock trades to Alpaca (options stay simulated)
     try:
