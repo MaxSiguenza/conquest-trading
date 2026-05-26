@@ -20,6 +20,13 @@ from flask import Flask, render_template, request, redirect, url_for
 
 app = Flask(__name__)
 
+# Railway runs web_app.py as the web process and discord_bot.py as the worker.
+# The Discord worker owns automated paper trading because it posts trade cards,
+# agent debate, missed-trade, and EOD updates.
+ENABLE_WEB_PAPER_SCHEDULER = os.getenv("ENABLE_WEB_PAPER_SCHEDULER", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 # ── One-time migration: seed PostgreSQL from local JSON files on first deploy ─
 try:
     from db import migrate_files_to_db, db_available
@@ -350,6 +357,9 @@ def _run_brief_generation_job():
 
 def _run_paper_generate_job():
     """APScheduler job: generate 10 paper trades at 9:35 AM ET weekdays."""
+    if not ENABLE_WEB_PAPER_SCHEDULER:
+        print("[Scheduler] Paper generate skipped: Discord worker owns trade automation.")
+        return
     with app.app_context():
         try:
             from paper_trader import generate_daily_trades
@@ -361,6 +371,9 @@ def _run_paper_generate_job():
 
 def _run_paper_close_job():
     """APScheduler job: mark-to-market and close paper trades at 4:05 PM ET weekdays."""
+    if not ENABLE_WEB_PAPER_SCHEDULER:
+        print("[Scheduler] Paper close skipped: Discord worker owns trade automation.")
+        return
     with app.app_context():
         try:
             from paper_trader import run_daily_close
@@ -372,6 +385,8 @@ def _run_paper_close_job():
 
 def _run_intraday_monitor_job():
     """APScheduler job: check stop losses and profit targets every 30 min during market hours."""
+    if not ENABLE_WEB_PAPER_SCHEDULER:
+        return
     with app.app_context():
         try:
             from broker import check_intraday_stops
