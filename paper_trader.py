@@ -212,7 +212,6 @@ _TYPE_WEIGHTS = {
     "put_spread":       1,   # bear put debit spread (directional)
     "long_call":        1,
     "long_put":         1,
-    "iron_condor":      2,
     # ── Premium collection (new) — collect IV premium instead of paying it ──
     "bull_put_spread":  2,   # credit put spread: bullish, collects premium
     "bear_call_spread": 2,   # credit call spread: bearish/neutral, collects premium
@@ -223,7 +222,7 @@ DISABLED_NEW_TRADE_TYPES = {
     t.strip()
     for t in os.getenv(
         "DISABLED_NEW_TRADE_TYPES",
-        "bull_put_spread,bear_call_spread",
+        "bull_put_spread,bear_call_spread,iron_condor",
     ).split(",")
     if t.strip()
 }
@@ -292,9 +291,8 @@ def _assign_trade_type(scan: dict) -> str:
             # Bull put spread: collect fat premium, profit if stock holds above short put
             return random.choice(["bull_put_spread", "bull_put_spread", "covered_call"])
         if bearish and trending:
-            # Bear call spread: collect fat premium, profit if stock stays below short call
-            return random.choice(["bear_call_spread", "bear_call_spread", "iron_condor"])
-        return "iron_condor"
+            return random.choice(["bear_call_spread", "bear_call_spread", "put_spread"])
+        return random.choice(["bear_call_spread", "put_spread"])
 
     # ── Strong bullish + squeeze firing: directional momentum play ────────────
     if bullish and trending:
@@ -328,10 +326,10 @@ def _assign_trade_type(scan: dict) -> str:
         return random.choice(["bear_call_spread", "bear_call_spread", "long_put"]) if iv_cheap \
             else random.choice(["bear_call_spread", "bear_call_spread"])
 
-    # ── Neutral / mixed: range-bound → premium collection is king ────────────
+    # ── Neutral / mixed: range-bound → premium collection via spreads ────────
     if hv_rank > 40:
-        return random.choice(["iron_condor", "bull_put_spread", "bear_call_spread"])
-    return random.choice(["iron_condor", "covered_call", "bull_put_spread"])
+        return random.choice(["bear_call_spread", "bull_put_spread", "put_spread"])
+    return random.choice(["call_spread", "covered_call", "bull_put_spread"])
 
 
 # ── Live options chain query ───────────────────────────────────────────────────
@@ -1770,11 +1768,11 @@ def generate_daily_trades(n: int = 10) -> list:
                 type_counts[trade_type] = type_counts.get(trade_type, 0) + 1
                 used_tickers.add(scan["ticker"])
 
-        # Second pass: iron condors on leftovers
+        # Second pass: fill remaining slots with spreads/directional
         if len(new_trades) < n:
             remaining = [s for s in fallback_scans if s["ticker"] not in used_tickers]
             fallback_types = [
-                tt for tt in ("iron_condor", "call_spread", "put_spread",
+                tt for tt in ("call_spread", "put_spread",
                               "long_call", "long_put", "stock_long")
                 if _is_trade_type_enabled(tt)
             ]
