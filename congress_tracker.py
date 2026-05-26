@@ -387,13 +387,30 @@ def _fetch_senate(limit: int = 2000) -> list[dict]:
 
 
 def _fetch_all(limit: int = 2000) -> list[dict]:
-    quiver = _fetch_quiver(limit)
-    if quiver:
-        return quiver
-    congressflow = _fetch_congressflow(limit)
-    if congressflow:
-        return congressflow
-    return _fetch_house(limit) + _fetch_senate(limit)
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+
+    for source_rows in (
+        _fetch_quiver(limit),
+        _fetch_congressflow(limit),
+        _fetch_house(limit),
+        _fetch_senate(limit),
+    ):
+        for t in source_rows:
+            key = (
+                t.get("ticker"),
+                t.get("member"),
+                t.get("action"),
+                t.get("amount_raw"),
+                t.get("transaction_date"),
+                t.get("disclosure_date"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(t)
+
+    return merged[:limit]
 
 
 def _fetch_finnhub_ticker(ticker: str, days: int = 365) -> list[dict]:

@@ -2805,7 +2805,7 @@ async def _post_economic_calendar_embed(channel, days: int = 7, title_suffix: st
 
 # ── Congressional tracker helper ──────────────────────────────────────────────
 
-async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
+async def _post_congress_embed(channel, tickers: list = None, days: int = 14):
     """
     Post congressional trade activity to `channel`.
     If `tickers` provided: filter for those tickers (watchlist mode).
@@ -2819,6 +2819,7 @@ async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
             return {
                 "mode":   "watchlist",
                 "trades": watchlist_trades(tickers, days=days),
+                "top":    top_purchased_tickers(days=days, n=5),
                 "stats":  summary_stats(days=days),
             }
         else:
@@ -2836,14 +2837,31 @@ async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
     if data["mode"] == "watchlist":
         trades = data["trades"]
         if not trades:
+            stats_total = stats.get("total_trades", 0)
+            top = data.get("top") or []
+            top_line = ""
+            if top:
+                top_line = "\n\nMost active tickers this period: " + ", ".join(
+                    f"**{t['ticker']}** ({t['buy_count']}B/{t['sell_count']}S)"
+                    for t in top[:5]
+                )
+            desc = (
+                f"No congressional trades found for your watchlist in the last {days} days.\n"
+                f"Congress traded **{stats_total}** total stocks this period."
+                f"{top_line}"
+            )
+            if stats_total == 0:
+                desc = (
+                    "No current congressional trade rows were returned from the configured sources.\n"
+                    "Run `!congressdebug` to check CongressFlow / Quiver / House / Senate source status."
+                )
             embed = discord.Embed(
                 title=f"🏛  Congressional Tracker — {today_str}",
-                description=f"No congressional trades found for your watchlist in the last {days} days.\n"
-                            f"Congress traded **{stats.get('total_trades', 0)}** total stocks this period.",
+                description=desc,
                 color=COLOR_DARK,
                 timestamp=_ts(),
             )
-            embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  housestockwatcher.com / senatestockwatcher.com")
+            embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act disclosures  •  CongressFlow / Quiver / House / Senate sources")
             await channel.send(embed=embed)
             return
 
@@ -2872,7 +2890,7 @@ async def _post_congress_embed(channel, tickers: list = None, days: int = 7):
         sell_count = sum(1 for t in trades if t["action"] == "sell")
         embed.add_field(name="Summary", value=f"🟢 {buy_count} buys  🔴 {sell_count} sells  over {days} days", inline=True)
         embed.add_field(name="Congress-wide", value=f"{stats.get('total_trades',0)} total trades this period", inline=True)
-        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act  •  housestockwatcher.com / senatestockwatcher.com")
+        embed.set_footer(text="Conquest Congressional Tracker  •  STOCK Act  •  CongressFlow / Quiver / House / Senate sources")
         await channel.send(embed=embed)
 
     # ── Top tickers mode ──────────────────────────────────────────────────────
@@ -3022,7 +3040,7 @@ async def morning_briefing_task():
             congress_ch = await _get_channel("congressional-tracker", "macro-worldview", "general")
             if congress_ch:
                 watchlist = s.get("watchlist", "").split()
-                await _post_congress_embed(congress_ch, tickers=watchlist, days=7)
+                await _post_congress_embed(congress_ch, tickers=watchlist, days=14)
                 print(f"[Bot] Congressional tracker posted to #{congress_ch.name}")
         except Exception as e_cong:
             print(f"[Bot] Congressional tracker error: {e_cong}")
@@ -3270,7 +3288,7 @@ async def runmorning_cmd(ctx):
         congress_ch = await _get_channel("congressional-tracker", "macro-worldview", "general")
         if congress_ch:
             watchlist = s.get("watchlist", "").split()
-            await _post_congress_embed(congress_ch, tickers=watchlist, days=7)
+            await _post_congress_embed(congress_ch, tickers=watchlist, days=14)
             print(f"[Bot] !runmorning — congressional tracker posted to #{congress_ch.name}")
     except Exception as e:
         print(f"[Bot] !runmorning congressional tracker error: {e}")
