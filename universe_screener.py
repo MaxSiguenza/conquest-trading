@@ -121,7 +121,7 @@ def pre_screen(n: int = 40, universe: list = None, workers: int = 14) -> list:
         List of ticker strings, highest-signal first.
     """
     universe = universe or SP500_UNIVERSE
-    print(f"[PreScreener] Scanning {len(universe)} tickers → picking top {n}…")
+    print(f"[PreScreener] Scanning {len(universe)} tickers -> picking top {n}...")
 
     try:
         from alerts.scanner import scan_ticker

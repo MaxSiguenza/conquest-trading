@@ -93,8 +93,21 @@ def _get_token() -> str:
 
 async def _run_sync(func, *args):
     """Run a blocking sync function in a thread without freezing the bot."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, func, *args)
+
+
+async def _run_sync_timeout(func, timeout_s: float, *args):
+    """
+    Like _run_sync but raises asyncio.TimeoutError after timeout_s seconds.
+    The underlying thread continues (can't kill Python threads), but the
+    asyncio side moves on so subsequent loop ticks aren't blocked forever.
+    """
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, func, *args),
+        timeout=timeout_s,
+    )
 
 
 def _ts() -> datetime:
@@ -1846,7 +1859,7 @@ async def paper_trading_loop():
                         from alerts.scanner import scan_watchlist
                         return scan_watchlist(wl_tickers)
 
-                    scan_res  = await _run_sync(_do_open_scan)
+                    scan_res  = await _run_sync_timeout(_do_open_scan, 150)
                     entries   = [r for r in scan_res if r.get("entry_signal")  and not r.get("error")]
                     crosses   = [r for r in scan_res if r.get("macd_cross_up") and not r.get("entry_signal") and not r.get("error")]
 
@@ -1954,7 +1967,7 @@ async def paper_trading_loop():
                         )
                         return candidates[:MAX_ADDS_PER_DAY]
 
-                    top_candidates = await _run_sync(_scan_universe)
+                    top_candidates = await _run_sync_timeout(_scan_universe, 180)
 
                     if top_candidates:
                         await ch_watchlist.send(
@@ -2120,7 +2133,10 @@ async def paper_trading_loop():
                 trades = paper_trader.generate_daily_trades(10)
                 return trades, getattr(paper_trader, "LAST_GENERATE_STATUS", {})
 
-            new_trades, gen_status = await _run_sync(_gen)
+            # 5-minute timeout: agent swarm + Claude API can be slow but should
+            # never run indefinitely.  TimeoutError is caught by the outer try/except
+            # so the loop recovers cleanly on the next 15-minute tick.
+            new_trades, gen_status = await _run_sync_timeout(_gen, 300)
 
             if new_trades and ch_trades:
                 type_counts: dict = {}
@@ -2451,7 +2467,7 @@ async def paper_trading_loop():
             ]
             return newly
 
-        newly_closed = await _run_sync(_run_close)
+        newly_closed = await _run_sync_timeout(_run_close, 120)
 
         # Post a notification for every newly closed trade
         for t in newly_closed:
@@ -2709,13 +2725,47 @@ async def paper_trading_loop():
                     )
                     await ch_status.send(embed=status_embed)
 
+    except asyncio.TimeoutError as e:
+        print(f"[PaperLoop] Timeout — a blocking call took too long: {e}")
     except Exception as e:
-        print(f"[PaperLoop] Error: {e}")
+        import traceback
+        print(f"[PaperLoop] Error: {e}\n{traceback.format_exc()}")
 
 
 @paper_trading_loop.before_loop
 async def before_paper_loop():
     await bot.wait_until_ready()
+
+
+@paper_trading_loop.error
+async def paper_loop_error(error):
+    """
+    Called by discord.ext.tasks when an exception escapes paper_trading_loop.
+    Posts the error to Discord so it's visible, then restarts the loop.
+    """
+    import traceback
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    print(f"[PaperLoop] TASK ERROR — loop stopped:\n{tb}")
+    try:
+        ch = await _get_channel("trade-alerts", "general")
+        if ch:
+            await ch.send(
+                embed=discord.Embed(
+                    title="⚠️  Paper Trading Loop Crashed",
+                    description=(
+                        f"The paper trading task threw an unhandled error and stopped.\n"
+                        f"Auto-restarting now.\n\n"
+                        f"```\n{str(error)[:600]}\n```"
+                    ),
+                    color=COLOR_RED,
+                    timestamp=_ts(),
+                )
+            )
+    except Exception:
+        pass
+    # Auto-restart so the loop recovers without needing a full bot restart
+    if not paper_trading_loop.is_running():
+        paper_trading_loop.start()
 
 
 # ── _post_screener_results — shared helper for weekly screener output ─────────
