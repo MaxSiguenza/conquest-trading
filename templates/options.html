@@ -221,7 +221,7 @@ input[type="number"]:focus { border-color: #7c6af7; }
   </div>
   <div class="stat-box">
     <div class="stat-label">Budget</div>
-    <div class="stat-val">${{ "%,.0f"|format(budget) }}</div>
+    <div class="stat-val">${{ budget|int }}</div>
   </div>
 </div>
 
