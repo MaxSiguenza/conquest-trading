@@ -173,6 +173,7 @@
   <a href="/chart" {% if request.path == '/chart' %}class="active"{% endif %}>Chart</a>
   <a href="/alerts" {% if request.path == '/alerts' %}class="active"{% endif %}>🔔 Alerts</a>
   <a href="/paper-stats" {% if request.path.startswith('/paper-stats') %}class="active"{% endif %}>🧪 Paper Stats</a>
+  <a href="/options" {% if request.path.startswith('/options') %}class="active"{% endif %}>🎯 Options</a>
   <a href="/backtest" {% if request.path.startswith('/backtest') %}class="active"{% endif %}>🔬 Backtest</a>
   <a href="/watchlist" {% if request.path.startswith('/watchlist') %}class="active"{% endif %}>👁 Watchlist</a>
   <a href="/brief" {% if request.path.startswith('/brief') %}class="active"{% endif %}>🗞 Brief</a>

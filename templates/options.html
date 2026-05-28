@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+{% block title %}Options Finder — Conquest Trading{% endblock %}
+
+{% block extra_style %}
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.mode-btn {
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #94a3b8;
+  padding: 10px 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+  user-select: none;
+}
+.mode-btn:hover { border-color: #7c6af7; color: #e2e8f0; }
+.mode-btn.selected { border-color: #7c6af7; background: #1e1a3a; color: #a78bfa; }
+
+.play-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.play-table th {
+  background: #0f1117;
+  color: #64748b;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #2d3148;
+}
+.play-table td {
+  padding: 11px 12px;
+  border-bottom: 1px solid #1e2231;
+  vertical-align: middle;
+}
+.play-table tr:last-child td { border-bottom: none; }
+.play-table tr:hover td { background: #1e2231; }
+
+.badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.badge-call  { background: #0d2b1a; color: #4ade80; }
+.badge-put   { background: #2b0d0d; color: #f87171; }
+.badge-long  { background: #1a1535; color: #a78bfa; }
+.badge-spread{ background: #1c1a12; color: #fbbf24; }
+
+.rr-bar {
+  display: inline-block;
+  width: 40px;
+  height: 6px;
+  background: #2d3148;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.rr-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7c6af7, #4ade80);
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-box {
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+.stat-val   { font-size: 20px; font-weight: 700; color: #f1f5f9; }
+.stat-sub   { font-size: 11px; color: #64748b; margin-top: 2px; }
+
+.section-hdr {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #64748b;
+  margin: 28px 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-hdr::after { content: ""; flex: 1; height: 1px; background: #2d3148; }
+
+select {
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  width: 100%;
+  margin-bottom: 16px;
+}
+select:focus { border-color: #7c6af7; }
+
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: #475569;
+  font-size: 14px;
+}
+.empty-state .big { font-size: 36px; margin-bottom: 12px; }
+
+.expiry-chip {
+  display: inline-block;
+  background: #1e2231;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: 6px;
+}
+
+input[type="number"] {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #2d3148;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  margin-bottom: 16px;
+}
+input[type="number"]:focus { border-color: #7c6af7; }
+
+.breakeven-pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.be-bull { background: #0d2b1a; color: #4ade80; }
+.be-bear { background: #2b0d0d; color: #f87171; }
+
+.liq-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+.liq-hi { background: #4ade80; }
+.liq-md { background: #fbbf24; }
+.liq-lo { background: #f87171; }
+{% endblock %}
+
+{% block content %}
+<h1>🎯 Options Finder</h1>
+
+<div class="card">
+  <form method="POST" action="/options" id="optForm">
+    <div class="form-row">
+      <div class="field">
+        <label>Ticker</label>
+        <input type="text" name="ticker" value="{{ ticker }}" placeholder="AAPL" maxlength="10" required style="text-transform:uppercase">
+      </div>
+      <div class="field">
+        <label>Budget ($)</label>
+        <input type="number" name="budget" value="{{ budget|int }}" min="50" max="100000" step="50">
+      </div>
+      <div class="field">
+        <label>Mode</label>
+        <select name="mode">
+          <option value="all"     {% if mode=="all" %}selected{% endif %}>All plays</option>
+          <option value="spreads" {% if mode=="spreads" %}selected{% endif %}>Spreads only</option>
+          <option value="calls"   {% if mode=="calls" %}selected{% endif %}>Calls (spread + long)</option>
+          <option value="puts"    {% if mode=="puts" %}selected{% endif %}>Puts (spread + long)</option>
+          <option value="long"    {% if mode=="long" %}selected{% endif %}>Single-leg only</option>
+        </select>
+      </div>
+    </div>
+    <button type="submit">Find Options</button>
+  </form>
+</div>
+
+{% if error %}
+<div class="card" style="border-color:#f87171;background:#1a0d0d;">
+  <span style="color:#f87171;">⚠ {{ error }}</span>
+</div>
+{% endif %}
+
+{% if result and not error %}
+
+{% set price  = result.price %}
+{% set expiry = result.expiry %}
+{% set dte    = result.dte %}
+
+<!-- ── Header stats ────────────────────────────────────────────────── -->
+<div class="stat-row">
+  <div class="stat-box">
+    <div class="stat-label">Ticker</div>
+    <div class="stat-val">{{ result.ticker }}</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">Price</div>
+    <div class="stat-val">${{ "%.2f"|format(price) }}</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">Expiry</div>
+    <div class="stat-val" style="font-size:16px">{{ expiry }}</div>
+    <div class="stat-sub">{{ dte }} DTE</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">Budget</div>
+    <div class="stat-val">${{ "%,.0f"|format(budget) }}</div>
+  </div>
+</div>
+
+<!-- ── Bull call spreads ────────────────────────────────────────────── -->
+{% if result.call_spreads %}
+<div class="section-hdr">📈 Bull Call Spreads</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <table class="play-table">
+    <thead>
+      <tr>
+        <th>Spread</th>
+        <th>Expiry</th>
+        <th>Cost</th>
+        <th>Max Profit</th>
+        <th>R/R</th>
+        <th>Breakeven</th>
+        <th>Liquidity</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in result.call_spreads %}
+    {% set rr_pct = [s.rr / 3.0 * 100, 100] | min %}
+    {% set liq = s.min_oi %}
+    <tr>
+      <td>
+        <span class="badge badge-call">CALL</span>
+        <strong>${{ s.long_strike|int }}c / ${{ s.short_strike|int }}c</strong>
+        <span style="color:#64748b;font-size:11px">&nbsp;${{ s.width|int }}-wide</span>
+      </td>
+      <td style="color:#94a3b8">{{ s.expiry }}<span class="expiry-chip">{{ s.dte }}d</span></td>
+      <td><strong>${{ "%.0f"|format(s.cost) }}</strong><span style="color:#64748b;font-size:11px"> @${{ "%.2f"|format(s.debit) }}</span></td>
+      <td style="color:#4ade80"><strong>${{ "%.0f"|format(s.max_profit) }}</strong></td>
+      <td>
+        <div class="rr-bar"><div class="rr-fill" style="width:{{ rr_pct }}%"></div></div>
+        <strong>{{ "%.1f"|format(s.rr) }}x</strong>
+      </td>
+      <td>
+        <span class="breakeven-pill be-bull">${{ "%.2f"|format(s.breakeven) }}</span>
+        <span style="color:#64748b;font-size:11px">&nbsp;({{ "%+.1f"|format(s.be_move_pct) }}%)</span>
+      </td>
+      <td>
+        {% if liq >= 500 %}<span class="liq-dot liq-hi"></span>High{% elif liq >= 100 %}<span class="liq-dot liq-md"></span>Med{% else %}<span class="liq-dot liq-lo"></span>Low{% endif %}
+        <span style="color:#475569;font-size:11px">&nbsp;OI={{ s.min_oi }} vol={{ s.min_vol }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- ── Bear put spreads ─────────────────────────────────────────────── -->
+{% if result.put_spreads %}
+<div class="section-hdr">📉 Bear Put Spreads</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <table class="play-table">
+    <thead>
+      <tr>
+        <th>Spread</th>
+        <th>Expiry</th>
+        <th>Cost</th>
+        <th>Max Profit</th>
+        <th>R/R</th>
+        <th>Breakeven</th>
+        <th>Liquidity</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in result.put_spreads %}
+    {% set rr_pct = [s.rr / 3.0 * 100, 100] | min %}
+    {% set liq = s.min_oi %}
+    <tr>
+      <td>
+        <span class="badge badge-put">PUT</span>
+        <strong>${{ s.long_strike|int }}p / ${{ s.short_strike|int }}p</strong>
+        <span style="color:#64748b;font-size:11px">&nbsp;${{ s.width|int }}-wide</span>
+      </td>
+      <td style="color:#94a3b8">{{ s.expiry }}<span class="expiry-chip">{{ s.dte }}d</span></td>
+      <td><strong>${{ "%.0f"|format(s.cost) }}</strong><span style="color:#64748b;font-size:11px"> @${{ "%.2f"|format(s.debit) }}</span></td>
+      <td style="color:#4ade80"><strong>${{ "%.0f"|format(s.max_profit) }}</strong></td>
+      <td>
+        <div class="rr-bar"><div class="rr-fill" style="width:{{ rr_pct }}%"></div></div>
+        <strong>{{ "%.1f"|format(s.rr) }}x</strong>
+      </td>
+      <td>
+        <span class="breakeven-pill be-bear">${{ "%.2f"|format(s.breakeven) }}</span>
+        <span style="color:#64748b;font-size:11px">&nbsp;({{ "%+.1f"|format(s.be_move_pct) }}%)</span>
+      </td>
+      <td>
+        {% if liq >= 500 %}<span class="liq-dot liq-hi"></span>High{% elif liq >= 100 %}<span class="liq-dot liq-md"></span>Med{% else %}<span class="liq-dot liq-lo"></span>Low{% endif %}
+        <span style="color:#475569;font-size:11px">&nbsp;OI={{ s.min_oi }} vol={{ s.min_vol }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- ── Long calls ───────────────────────────────────────────────────── -->
+{% if result.long_calls %}
+<div class="section-hdr">🟢 Long Calls (single-leg)</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <table class="play-table">
+    <thead>
+      <tr>
+        <th>Contract</th>
+        <th>Expiry</th>
+        <th>Ask / Mid</th>
+        <th>Cost (1 contract)</th>
+        <th>Breakeven</th>
+        <th>IV</th>
+        <th>Liquidity</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in result.long_calls %}
+    <tr>
+      <td>
+        <span class="badge badge-long">CALL</span>
+        <strong>${{ c.strike|int }}c</strong>
+      </td>
+      <td style="color:#94a3b8">{{ c.expiry }}<span class="expiry-chip">{{ c.dte }}d</span></td>
+      <td>${{ "%.2f"|format(c.ask) }} <span style="color:#64748b;font-size:11px">/ ${{ "%.2f"|format(c.mid) }}</span></td>
+      <td><strong>${{ "%.0f"|format(c.cost) }}</strong></td>
+      <td>
+        <span class="breakeven-pill be-bull">${{ "%.2f"|format(c.breakeven) }}</span>
+        <span style="color:#64748b;font-size:11px">&nbsp;({{ "%+.1f"|format(c.be_move_pct) }}%)</span>
+      </td>
+      <td style="color:#94a3b8">{{ "%.0f"|format(c.iv * 100) }}%</td>
+      <td>
+        {% set liq = c.oi %}
+        {% if liq >= 500 %}<span class="liq-dot liq-hi"></span>High{% elif liq >= 100 %}<span class="liq-dot liq-md"></span>Med{% else %}<span class="liq-dot liq-lo"></span>Low{% endif %}
+        <span style="color:#475569;font-size:11px">&nbsp;OI={{ c.oi }} vol={{ c.volume }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- ── Long puts ────────────────────────────────────────────────────── -->
+{% if result.long_puts %}
+<div class="section-hdr">🔴 Long Puts (single-leg)</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <table class="play-table">
+    <thead>
+      <tr>
+        <th>Contract</th>
+        <th>Expiry</th>
+        <th>Ask / Mid</th>
+        <th>Cost (1 contract)</th>
+        <th>Breakeven</th>
+        <th>IV</th>
+        <th>Liquidity</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for p in result.long_puts %}
+    <tr>
+      <td>
+        <span class="badge badge-put">PUT</span>
+        <strong>${{ p.strike|int }}p</strong>
+      </td>
+      <td style="color:#94a3b8">{{ p.expiry }}<span class="expiry-chip">{{ p.dte }}d</span></td>
+      <td>${{ "%.2f"|format(p.ask) }} <span style="color:#64748b;font-size:11px">/ ${{ "%.2f"|format(p.mid) }}</span></td>
+      <td><strong>${{ "%.0f"|format(p.cost) }}</strong></td>
+      <td>
+        <span class="breakeven-pill be-bear">${{ "%.2f"|format(p.breakeven) }}</span>
+        <span style="color:#64748b;font-size:11px">&nbsp;({{ "%+.1f"|format(p.be_move_pct) }}%)</span>
+      </td>
+      <td style="color:#94a3b8">{{ "%.0f"|format(p.iv * 100) }}%</td>
+      <td>
+        {% set liq = p.oi %}
+        {% if liq >= 500 %}<span class="liq-dot liq-hi"></span>High{% elif liq >= 100 %}<span class="liq-dot liq-md"></span>Med{% else %}<span class="liq-dot liq-lo"></span>Low{% endif %}
+        <span style="color:#475569;font-size:11px">&nbsp;OI={{ p.oi }} vol={{ p.volume }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if not result.call_spreads and not result.put_spreads and not result.long_calls and not result.long_puts %}
+<div class="card">
+  <div class="empty-state">
+    <div class="big">🔍</div>
+    No options plays found within your budget / filters for <strong>{{ result.ticker }}</strong>.
+    Try increasing your budget or switching to a different mode.
+  </div>
+</div>
+{% endif %}
+
+{% elif not error %}
+<div class="card">
+  <div class="empty-state">
+    <div class="big">🎯</div>
+    Enter a ticker and budget to find liquid options plays.<br>
+    <span style="font-size:12px;margin-top:8px;display:block">
+      Filters out dead contracts (zero OI + volume), wide bid-ask spreads (&gt;60% of mid),
+      and ranks spreads by risk/reward. Same liquidity checks as the paper trading system.
+    </span>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

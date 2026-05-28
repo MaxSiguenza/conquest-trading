@@ -822,15 +822,68 @@ def _build_stock(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     }
 
 
+def _of_best_single(ticker: str, opt_type: str) -> dict | None:
+    """
+    Use options_finder to locate the most liquid, near-ATM single-leg contract.
+    Returns a minimal dict {strike, expiry, dte_actual} or None on any failure.
+    This is used to guide strike/expiry selection; live quotes are still fetched
+    separately by _live_chain / _live_leg_quote for accurate P&L tracking.
+    """
+    try:
+        from options_finder import find_options as _of
+        data    = _of(ticker, budget=50_000, mode="long")
+        singles = data.get("long_calls" if opt_type == "call" else "long_puts", [])
+        if singles:
+            best = singles[0]
+            return {
+                "strike":     best["strike"],
+                "expiry":     best["expiry"],
+                "dte_actual": best["dte"],
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _of_best_spread(ticker: str, opt_type: str) -> dict | None:
+    """
+    Use options_finder to find the highest risk/reward liquid spread.
+    Returns {long_strike, short_strike, expiry, dte_actual} or None on failure.
+    """
+    try:
+        from options_finder import find_options as _of
+        data    = _of(ticker, budget=50_000, mode="all")
+        spreads = data.get("call_spreads" if opt_type == "call" else "put_spreads", [])
+        if spreads:
+            best = spreads[0]
+            return {
+                "long_strike":  best["long_strike"],
+                "short_strike": best["short_strike"],
+                "expiry":       best["expiry"],
+                "dte_actual":   best["dte"],
+            }
+    except Exception:
+        pass
+    return None
+
+
 def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
 
-    opt_type    = "call" if trade_type == "long_call" else "put"
-    step        = _strike_step(price)
-    target_k    = _round_strike(price * (1.02 if opt_type == "call" else 0.98), step)
-    entry_d     = date.fromisoformat(ts[:10])
+    opt_type = "call" if trade_type == "long_call" else "put"
+    entry_d  = date.fromisoformat(ts[:10])
+
+    # ── Try options_finder for best liquid strike / expiry ────────────────────
+    # Falls back silently to formula if options_finder is unavailable.
+    of_hit   = _of_best_single(scan["ticker"], opt_type)
+    step     = _strike_step(price)
+    target_k = (
+        of_hit["strike"]
+        if of_hit
+        else _round_strike(price * (1.02 if opt_type == "call" else 0.98), step)
+    )
 
     # Try live options chain first — real expiry, real strike, real mid price
     live = _live_chain(scan["ticker"], opt_type, target_k, entry_d)
@@ -882,20 +935,77 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
     price = scan.get("price", 0)
     if not price:
         return None
-    step  = _strike_step(price)
-    width = step * 2   # e.g. 5-wide on $200 stock, 2-wide on $60 stock
+    opt_type = "call" if trade_type == "call_spread" else "put"
+    entry_d  = date.fromisoformat(ts[:10])
+    step     = _strike_step(price)
+    width    = step * 2   # e.g. 5-wide on $200 stock, 2-wide on $60 stock
 
+    # ── Try options_finder for best-RR liquid spread ──────────────────────────
+    # Replaces the formula-based strike selection with the highest RR spread
+    # that actually has volume/OI on both legs.  Falls back to formula silently.
+    of_hit = _of_best_spread(scan["ticker"], opt_type)
+    if of_hit:
+        of_long_k  = of_hit["long_strike"]
+        of_short_k = of_hit["short_strike"]
+        of_expiry  = of_hit["expiry"]
+        of_dte     = of_hit["dte_actual"]
+
+        lq, lerr = _live_leg_quote(scan["ticker"], of_expiry, opt_type, of_long_k)
+        sq, serr = _live_leg_quote(scan["ticker"], of_expiry, opt_type, of_short_k)
+
+        if lq and sq:
+            of_width  = round(abs(of_short_k - of_long_k), 2)
+            long_val  = lq["mid"]
+            short_val = sq["mid"]
+            debit     = round(long_val - short_val, 4)
+            if debit > 0.05:
+                sigma    = _avg_live_iv([lq, sq]) or _hv(scan["ticker"])
+                max_gain = round(of_width - debit, 4)
+                cost     = round(debit * 100 * OPTION_CONTRACTS, 2)
+                trade = {
+                    "id":                f"{ts}_{scan['ticker']}_{trade_type}",
+                    "date_entered":      ts,
+                    "ticker":            scan["ticker"],
+                    "trade_type":        trade_type,
+                    "status":            "open",
+                    "opt_type":          opt_type,
+                    "long_strike":       of_long_k,
+                    "short_strike":      of_short_k,
+                    "spread_width":      of_width,
+                    "t_days":            of_dte,
+                    "expiry_date":       of_expiry,
+                    "sigma":             round(sigma, 4),
+                    "chain_source":      "live",
+                    "entry_source":      "live_chain_mid",
+                    "pnl_trusted":       True,
+                    "entry_stock_price": round(price, 4),
+                    "entry_net_debit":   debit,
+                    "max_gain":          max_gain,
+                    "cost_basis":        cost,
+                    "contracts":         OPTION_CONTRACTS,
+                    "current_net_value": debit,
+                    "pnl":               0.0,
+                    "pnl_pct":           0.0,
+                    "date_closed":       None,
+                    "close_reason":      None,
+                    "days_held":         0,
+                    "mtf_score":         scan.get("mtf_score", 0),
+                    "rsi_entry":         round(scan.get("rsi", 50), 1),
+                }
+                trade.update(_quote_fields(lq, "long"))
+                trade.update(_quote_fields(sq, "short"))
+                return _set_option_risk(trade)
+        # Live quote failed for options_finder strikes — fall through to formula
+
+    # ── Formula fallback ──────────────────────────────────────────────────────
     if trade_type == "call_spread":
         long_k   = _round_strike(price * 1.01, step)
         short_k  = long_k + width
-        opt_type = "call"
     else:  # put_spread
         long_k   = _round_strike(price * 0.99, step)
         short_k  = long_k - width
-        opt_type = "put"
 
     # New spreads must be built from actual listed contracts and live mids.
-    entry_d = date.fromisoformat(ts[:10])
     live = _live_chain(scan["ticker"], opt_type, long_k, entry_d)
     if not live:
         return None

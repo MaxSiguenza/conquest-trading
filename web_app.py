@@ -631,6 +631,44 @@ def backtest_page():
     return render_template("backtest.html", status=status, error=error)
 
 
+@app.route("/options", methods=["GET", "POST"])
+def options_page():
+    """
+    Options Finder — find the best liquid spreads and single-leg plays for
+    a given ticker and budget.
+    GET  → show the search form
+    POST → run find_options() and render results
+    """
+    result = None
+    error  = None
+    ticker = ""
+    budget = 1000
+    mode   = "all"
+
+    if request.method == "POST":
+        ticker = request.form.get("ticker", "").strip().upper()
+        try:
+            budget = float(request.form.get("budget", "1000").replace(",", "") or "1000")
+        except ValueError:
+            budget = 1000
+        mode = request.form.get("mode", "all").strip()
+
+        if ticker:
+            try:
+                from options_finder import find_options
+                result = find_options(ticker, budget=budget, mode=mode)
+                if result.get("error"):
+                    error = result["error"]
+            except Exception as e:
+                error = str(e)
+        else:
+            error = "Please enter a ticker symbol."
+
+    return render_template("options.html",
+                           result=result, error=error,
+                           ticker=ticker, budget=budget, mode=mode)
+
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
