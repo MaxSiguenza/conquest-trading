@@ -23,8 +23,7 @@ apscheduler==3.11.2
 aiohttp==3.13.5
 pytz==2024.2
 
-# Indicators
-pandas-ta>=0.3.14b0
+# Indicators (pandas-ta removed — no longer on PyPI; TTM Squeeze degrades gracefully without it)
 
 # Discord bot
 discord.py==2.7.1
