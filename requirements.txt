@@ -36,4 +36,4 @@ psycopg2-binary==2.9.10
 notion-client>=2.2.1
 
 # Robinhood options trading
-robin-stocks==3.0.8
+robin-stocks==3.4.0

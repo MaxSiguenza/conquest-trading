@@ -1268,7 +1268,7 @@ async def options_cmd(ctx, ticker: str = "", budget: str = "1000", mode: str = "
 
     await thinking.delete()
 
-    dest = _get_channel("stocks", "watchlist", "general") or ctx.channel
+    dest = await _get_channel("stocks", "watchlist", "general") or ctx.channel
     for embed_data in embeds:
         em = discord.Embed(
             title=embed_data.get("title", ""),
@@ -3289,8 +3289,12 @@ async def morning_briefing_task():
                     await _post_screener_results(screener_ch, screen_results, today)
                     print(f"[Bot] Weekly screener posted: {len(screen_results)} tickers")
             except Exception as e_sc:
-                await screener_ch.send(f"⚠️ Screener error: {e_sc}")
                 print(f"[Bot] Weekly screener error: {e_sc}")
+                try:
+                    if screener_ch:
+                        await screener_ch.send(f"⚠️ Screener error: {e_sc}")
+                except Exception:
+                    pass
 
     except Exception as e:
         print(f"[Bot] Auto-briefing task error: {e}")
