@@ -44,7 +44,31 @@ _NYSE_HOLIDAYS: frozenset = frozenset({
     date(2026, 9,  7),   # Labor Day
     date(2026, 11, 26),  # Thanksgiving
     date(2026, 12, 25),  # Christmas
+    # 2027
+    date(2027, 1,  1),   # New Year's Day
+    date(2027, 1, 18),   # MLK Day
+    date(2027, 2, 15),   # Presidents' Day
+    date(2027, 3, 26),   # Good Friday
+    date(2027, 5, 31),   # Memorial Day
+    date(2027, 6, 19),   # Juneteenth (observed — falls on Saturday → Friday)
+    date(2027, 7,  5),   # Independence Day (observed — July 4 falls on Sunday)
+    date(2027, 9,  6),   # Labor Day
+    date(2027, 11, 25),  # Thanksgiving
+    date(2027, 12, 24),  # Christmas (observed — Dec 25 falls on Saturday)
 })
+
+# Runtime guard: warn loudly if the calendar has no holidays for the current year
+def _check_calendar_coverage():
+    today = date.today()
+    if not any(h.year == today.year for h in _NYSE_HOLIDAYS):
+        import warnings
+        warnings.warn(
+            f"[market_calendar] No NYSE holidays defined for {today.year}! "
+            "Scheduler may fire on closed market days. Update market_calendar.py.",
+            stacklevel=2,
+        )
+
+_check_calendar_coverage()
 
 # Holiday display names
 _HOLIDAY_NAMES: dict[date, str] = {
@@ -68,6 +92,16 @@ _HOLIDAY_NAMES: dict[date, str] = {
     date(2026, 9,  7): "Labor Day",
     date(2026, 11, 26): "Thanksgiving",
     date(2026, 12, 25): "Christmas",
+    date(2027, 1,  1): "New Year's Day",
+    date(2027, 1, 18): "MLK Day",
+    date(2027, 2, 15): "Presidents' Day",
+    date(2027, 3, 26): "Good Friday",
+    date(2027, 5, 31): "Memorial Day",
+    date(2027, 6, 19): "Juneteenth (observed)",
+    date(2027, 7,  5): "Independence Day (observed)",
+    date(2027, 9,  6): "Labor Day",
+    date(2027, 11, 25): "Thanksgiving",
+    date(2027, 12, 24): "Christmas (observed)",
 }
 
 

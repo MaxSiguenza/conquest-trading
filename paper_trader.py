@@ -1799,7 +1799,7 @@ def generate_daily_trades(n: int = 10) -> list:
         return []
 
     used_tickers = {t["ticker"] for t in already_today}
-    ts           = datetime.now(ET).strftime("%Y-%m-%dT%H:%M")
+    ts           = datetime.now(ET).strftime("%Y-%m-%dT%H:%M:%S")
     new_trades   = []
     type_counts  = {tt: 0 for tt in _TYPE_WEIGHTS}
 
@@ -2132,15 +2132,21 @@ def run_daily_close() -> dict:
 
     save_trades(trades)
 
-    # Log all closed trades to Notion
+    # Log all closed trades to Notion — one try/except per trade so a single
+    # failure doesn't silently skip the rest of the batch
     try:
         from notion_journal import log_trade_close
         closed_trades = [t for t in trades if t.get("status") == "closed"
                          and t.get("date_closed", "").startswith(now_str[:10])]
+        notion_ok = 0
         for t in closed_trades:
-            log_trade_close(t)
+            try:
+                log_trade_close(t)
+                notion_ok += 1
+            except Exception as _ne:
+                print(f"[PaperTrader] Notion close-log failed for {t.get('id','?')}: {_ne}")
         if closed_trades:
-            print(f"[PaperTrader] Notion close-log: {len(closed_trades)} trades updated.")
+            print(f"[PaperTrader] Notion close-log: {notion_ok}/{len(closed_trades)} trades updated.")
     except Exception as e:
         print(f"[PaperTrader] Notion close-logging skipped: {e}")
     result = {

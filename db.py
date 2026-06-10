@@ -129,6 +129,7 @@ def kv_set(key: str, value) -> None:
     Always writes to both DB (if available) and local file (for localhost dev).
     """
     conn = _get_conn()
+    db_write_ok = False
     if conn:
         try:
             with conn.cursor() as cur:
@@ -139,10 +140,18 @@ def kv_set(key: str, value) -> None:
                         SET value      = EXCLUDED.value,
                             updated_at = NOW();
                 """, (key, json.dumps(value, default=str)))
+            db_write_ok = True
         except Exception as e:
-            log.warning(f"[DB] kv_set({key}) DB error: {e}")
+            # ERROR-level so this is visible in Railway logs — data is at risk
+            log.error(f"[DB] kv_set({key}) DB write FAILED: {e}")
 
-    # Always mirror to local file (keeps localhost working)
+    # Mirror to local file for localhost dev.
+    # On Railway the container filesystem is ephemeral, but it keeps localhost working.
+    # Skip the file write if DB is configured but the write just failed — avoids
+    # a divergence where the file has newer data than the DB.
+    if conn and not db_write_ok:
+        return  # don't write a newer version to the file when DB has the stale one
+
     path = _FILE_MAP.get(key)
     if path:
         try:
