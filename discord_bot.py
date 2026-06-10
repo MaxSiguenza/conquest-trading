@@ -3305,6 +3305,21 @@ async def before_morning_briefing():
     await bot.wait_until_ready()
 
 
+@morning_briefing_task.error
+async def morning_briefing_error(error):
+    import traceback
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    print(f"[MorningBriefing] TASK ERROR — loop stopped:\n{tb}")
+    try:
+        ch = await _get_channel("morning-briefing", "general")
+        if ch:
+            await ch.send(f"⚠️ Morning briefing task crashed and restarted. Error: `{str(error)[:200]}`")
+    except Exception:
+        pass
+    if not morning_briefing_task.is_running():
+        morning_briefing_task.start()
+
+
 # ── Eve-of-event alert — 4:30 PM ET, alerts about next trading day's HIGH events ─
 
 @tasks.loop(minutes=1)
@@ -3374,6 +3389,15 @@ async def evening_calendar_task():
 @evening_calendar_task.before_loop
 async def before_evening_calendar():
     await bot.wait_until_ready()
+
+
+@evening_calendar_task.error
+async def evening_calendar_error(error):
+    import traceback
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    print(f"[EveningCalendar] TASK ERROR — loop stopped:\n{tb}")
+    if not evening_calendar_task.is_running():
+        evening_calendar_task.start()
 
 
 # ── !runmorning — manually fire the 9 AM bundle for testing ──────────────────
@@ -4078,6 +4102,25 @@ if __name__ == "__main__":
         print("=" * 60 + "\n")
         sys.exit(1)
 
+    import time
+
     print("⚔️  Starting Conquest Trading Bot...")
     print("   Press Ctrl+C to stop.\n")
-    bot.run(token)
+
+    restart_delay = 10
+    while True:
+        try:
+            bot.run(token, reconnect=True)
+            # bot.run() only returns normally on a clean shutdown — exit cleanly
+            print("Bot shut down cleanly.")
+            break
+        except discord.LoginFailure:
+            print("❌ Invalid DISCORD_BOT_TOKEN — exiting.")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("👋 Shutting down.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"⚠️  Bot crashed: {e}. Restarting in {restart_delay}s...")
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay * 2, 300)  # back off up to 5 min
