@@ -58,7 +58,7 @@ def scan_ticker(ticker: str) -> dict:
         sqz_fired = bool(last.get("SQZ_FIRED", 0))  # just broke out of squeeze
         sqz_mom   = float(last.get("SQZ_MOMENTUM", 0) or 0)
 
-        return {
+        result = {
             "ticker":        ticker,
             "price":         live_price,         # what it's trading at right now
             "eod_price":     eod_price,          # what signal was based on
@@ -73,11 +73,13 @@ def scan_ticker(ticker: str) -> dict:
             "daily":         "BULL" if last.get("Regime",   0) == 1 else "BEAR",
             "weekly":        "BULL" if last.get("W_Regime", 0) == 1 else "BEAR",
             "monthly":       "BULL" if last.get("M_Regime", 0) == 1 else "BEAR",
-            "sqz_on":        sqz_on,     # True = squeeze building (watch for break)
-            "sqz_fired":     sqz_fired,  # True = squeeze just released (potential entry)
-            "sqz_momentum":  sqz_mom,    # + = bullish momentum, - = bearish
+            "sqz_on":        sqz_on,
+            "sqz_fired":     sqz_fired,
+            "sqz_momentum":  sqz_mom,
             "error":         None,
         }
+        del df, adx_df, vix  # free DataFrames before returning
+        return result
     except Exception as exc:
         return {"ticker": ticker, "error": str(exc)}
 

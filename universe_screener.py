@@ -104,7 +104,7 @@ def get_last_screen() -> list:
     return list(_last_screen_results)
 
 
-def pre_screen(n: int = 40, universe: list = None, workers: int = 14) -> list:
+def pre_screen(n: int = 40, universe: list = None, workers: int = 6) -> list:
     """
     Run a lightweight momentum pre-screen over the full universe.
     Returns the top `n` ticker symbols ranked by signal strength.
@@ -144,6 +144,7 @@ def pre_screen(n: int = 40, universe: list = None, workers: int = 14) -> list:
     results.sort(key=lambda r: r["_score"], reverse=True)
     global _last_screen_results
     _last_screen_results = results   # cache for Discord bot to read
+    import gc; gc.collect()  # release DataFrames freed inside scan_ticker
 
     top_tickers = [r["ticker"] for r in results[:n]]
 

@@ -45,6 +45,7 @@ def generate_chart(ticker: str) -> tuple[str, dict]:
     Generate an interactive Plotly chart for a ticker.
     Returns (plotly_html_fragment, stats_dict).
     """
+    import gc; gc.collect()  # free any large objects from previous chart requests
     cfg = Config(data=DataConfig(ticker=ticker))
 
     df             = fetch_ohlcv(ticker, cfg.data.start_date, cfg.data.end_date)
@@ -350,6 +351,7 @@ def generate_chart(ticker: str) -> tuple[str, dict]:
             "scrollZoom": True,
         },
     )
+    del fig  # release the large Plotly figure object immediately
 
     stats = {
         "ticker":     ticker,
