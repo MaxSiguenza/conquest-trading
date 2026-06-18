@@ -43,6 +43,7 @@ MAX_OPEN_POSITIONS = 20
 MAX_TRADE_RISK_USD = 1_000
 MAX_STOCK_NOTIONAL_USD = 1_500
 MAX_OPTION_BA_SPREAD_PCT = 0.35
+MIN_ENTRY_LIQUIDITY = "B"   # reject contracts graded C or D at entry
 
 # ── Stock exit thresholds (fixed — signal confirmed these work) ────────────────
 STK_PROFIT   =  0.05   # close stock  when up   5 %
@@ -678,6 +679,18 @@ def _liquidity_grade(bid: float, ask: float, mid: float,
     return "D"
 
 
+_GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+
+def _grade_ok(quote: dict) -> bool:
+    """Return True if a quote meets the minimum entry liquidity grade."""
+    grade = _liquidity_grade(
+        quote.get("bid", 0), quote.get("ask", 0), quote.get("mid", 0),
+        int(quote.get("volume") or 0), int(quote.get("open_interest") or 0),
+    )
+    return _GRADE_ORDER.get(grade, 3) <= _GRADE_ORDER.get(MIN_ENTRY_LIQUIDITY, 1)
+
+
 def _entry_quote_pairs(t: dict) -> list[tuple[str, float | None, float | None, float | None]]:
     pairs = []
     if t.get("entry_bid") is not None or t.get("entry_ask") is not None:
@@ -1009,6 +1022,8 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
 
     if val <= 0.05:
         return None
+    if not _grade_ok(live):
+        return None   # C/D liquidity — skip, don't pay wide spread to enter
 
     cost = round(val * 100 * OPTION_CONTRACTS, 2)
     trade = {
@@ -1067,7 +1082,7 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         lq, lerr = _live_leg_quote(scan["ticker"], of_expiry, opt_type, of_long_k)
         sq, serr = _live_leg_quote(scan["ticker"], of_expiry, opt_type, of_short_k)
 
-        if lq and sq:
+        if lq and sq and _grade_ok(lq) and _grade_ok(sq):
             of_width  = round(abs(of_short_k - of_long_k), 2)
             long_val  = lq["mid"]
             short_val = sq["mid"]
@@ -1149,6 +1164,8 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
 
     if debit <= 0.05:
         return None
+    if not _grade_ok(live) or not _grade_ok(short_q):
+        return None   # either leg is C/D — skip
 
     max_gain = round(width - debit, 4)
     cost     = round(debit * 100 * OPTION_CONTRACTS, 2)
@@ -1325,6 +1342,8 @@ def _build_credit_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]
 
     if credit <= 0.05:
         return None
+    if not _grade_ok(live) or not _grade_ok(long_q):
+        return None   # either leg is C/D — skip
 
     spread_width = round(abs(short_k - long_k), 2)
     max_loss     = round(spread_width - credit, 4)
@@ -1389,6 +1408,8 @@ def _build_covered_call(scan: dict, ts: str) -> Optional[dict]:
 
     if premium <= 0.05:
         return None
+    if not _grade_ok(live):
+        return None   # C/D liquidity — skip
 
     trade = {
         "id":                  f"{ts}_{scan['ticker']}_covered_call",
