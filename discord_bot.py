@@ -3699,12 +3699,18 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                 )
                 if t.get("mark_error"):
                     base += f" | mark_error {t.get('mark_error')}"
+                liq = t.get("liquidity_grade", "?")
+                liq_emoji = {"A": "🟢", "B": "🟡", "C": "🟠", "D": "🔴"}.get(liq, "⚪")
+                liq_tag = f"liq {liq_emoji}{liq}"
                 if tt in ("long_call", "long_put"):
+                    vol = t.get("volume", 0)
+                    oi  = t.get("open_interest", 0)
                     return (
                         f"{base} | {t.get('opt_type','?')} strike {t.get('strike','?')} | "
                         f"entry premium {_fmt_money(t.get('entry_option_price'))} | "
                         f"current mid {_fmt_money(t.get('current_option_price'))} | "
-                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))}"
+                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))} | "
+                        f"{liq_tag} vol {vol} OI {oi}"
                     )
                 if tt in ("call_spread", "put_spread"):
                     return (
@@ -3712,29 +3718,37 @@ async def _conquest_ai_reply(message: discord.Message, question: str):
                         f"short {t.get('short_strike','?')} | entry debit {_fmt_money(t.get('entry_net_debit'))} | "
                         f"current spread mid {_fmt_money(t.get('current_net_value'))} | "
                         f"long b/a {_fmt_money(t.get('long_bid'))}/{_fmt_money(t.get('long_ask'))}; "
-                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))}"
+                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))} | "
+                        f"{liq_tag}"
                     )
                 if tt in ("bull_put_spread", "bear_call_spread"):
+                    short_oi = t.get("short_oi", 0)
+                    long_oi  = t.get("long_oi", 0)
                     return (
                         f"{base} | CREDIT spread {t.get('opt_type','?')} short {t.get('short_strike','?')} / "
                         f"long {t.get('long_strike','?')} | entry credit {_fmt_money(t.get('entry_net_credit'))} | "
                         f"cost to close {_fmt_money(t.get('current_cost_to_close'))} | "
                         f"credit captured {t.get('credit_captured_pct', '?')}% | "
-                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))}; "
-                        f"long b/a {_fmt_money(t.get('long_bid'))}/{_fmt_money(t.get('long_ask'))}"
+                        f"short b/a {_fmt_money(t.get('short_bid'))}/{_fmt_money(t.get('short_ask'))} OI {short_oi}; "
+                        f"long b/a {_fmt_money(t.get('long_bid'))}/{_fmt_money(t.get('long_ask'))} OI {long_oi} | "
+                        f"{liq_tag}"
                     )
                 if tt == "iron_condor":
                     return (
                         f"{base} | condor short put/call {t.get('short_put_k','?')}/{t.get('short_call_k','?')} "
                         f"long put/call {t.get('long_put_k','?')}/{t.get('long_call_k','?')} | "
-                        f"entry credit {_fmt_money(t.get('entry_net_credit'))} | current net {_fmt_money(t.get('current_net_value'))}"
+                        f"entry credit {_fmt_money(t.get('entry_net_credit'))} | current net {_fmt_money(t.get('current_net_value'))} | "
+                        f"{liq_tag}"
                     )
                 if tt == "covered_call":
+                    vol = t.get("volume", 0)
+                    oi  = t.get("open_interest", 0)
                     return (
                         f"{base} | covered call strike {t.get('strike','?')} | "
                         f"entry premium {_fmt_money(t.get('entry_option_price'))} | "
                         f"current call mid {_fmt_money(t.get('current_option_price'))} | "
-                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))}"
+                        f"bid/ask {_fmt_money(t.get('option_bid'))}/{_fmt_money(t.get('option_ask'))} | "
+                        f"{liq_tag} vol {vol} OI {oi}"
                     )
                 return base
             for t in open_t:

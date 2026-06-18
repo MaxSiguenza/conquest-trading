@@ -421,6 +421,8 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
         last = float(row.get("lastPrice") or 0)
         mid = round((bid + ask) / 2, 4) if ask > 0 else 0.0
         iv  = float(row.get("impliedVolatility") or 0)
+        volume = int(row.get("volume") or 0)
+        oi     = int(row.get("openInterest") or 0)
 
         if mid <= 0.01:   # no real market — too illiquid
             return None
@@ -433,6 +435,8 @@ def _live_chain(ticker: str, opt_type: str, target_strike: float,
             "ask":        round(ask, 4),
             "last":       round(last, 4),
             "iv":         round(iv, 4),
+            "volume":     volume,
+            "open_interest": oi,
             "contract_symbol": contract_symbol,
             "dte_actual": actual_dte,
             "source":     "live",
@@ -484,6 +488,8 @@ def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
         ask = float(row.get("ask") or 0)
         last = float(row.get("lastPrice") or 0)
         iv = float(row.get("impliedVolatility") or 0)
+        volume = int(row.get("volume") or 0)
+        oi     = int(row.get("openInterest") or 0)
         if bid > 0 and ask > 0:
             mid = round((bid + ask) / 2, 4)
         elif last > 0:
@@ -498,6 +504,8 @@ def _live_leg_quote(ticker: str, expiry: str, opt_type: str,
             "mid": mid,
             "last": round(last, 4),
             "iv": round(iv, 4),
+            "volume": volume,
+            "open_interest": oi,
             "contract_symbol": contract_symbol,
         }, None
     except Exception as e:
@@ -581,15 +589,24 @@ def _avg_live_iv(quotes: list[dict]) -> float:
 
 
 def _quote_fields(q: dict, prefix: str = "") -> dict:
-    """Compact audit fields for an option quote."""
+    """Compact audit fields for an option quote including liquidity metrics."""
     p = f"{prefix}_" if prefix else ""
+    bid = q.get("bid") or 0
+    ask = q.get("ask") or 0
+    mid = q.get("mid") or 0
+    vol = int(q.get("volume") or 0)
+    oi  = int(q.get("open_interest") or 0)
+    grade = _liquidity_grade(bid, ask, mid, vol, oi) if mid > 0 else "?"
     return {
-        f"{p}contract_symbol": q.get("contract_symbol"),
-        f"{p}entry_bid": q.get("bid"),
-        f"{p}entry_ask": q.get("ask"),
-        f"{p}entry_mid": q.get("mid"),
-        f"{p}entry_last": q.get("last"),
-        f"{p}entry_iv": q.get("iv"),
+        f"{p}contract_symbol":  q.get("contract_symbol"),
+        f"{p}entry_bid":        q.get("bid"),
+        f"{p}entry_ask":        q.get("ask"),
+        f"{p}entry_mid":        q.get("mid"),
+        f"{p}entry_last":       q.get("last"),
+        f"{p}entry_iv":         q.get("iv"),
+        f"{p}entry_volume":     vol,
+        f"{p}entry_oi":         oi,
+        f"{p}entry_liquidity":  grade,
     }
 
 
@@ -630,6 +647,35 @@ def _quote_spread_pct(bid: float | None, ask: float | None, mid: float | None) -
         return round((ask_f - bid_f) / mid_f, 4)
     except Exception:
         return None
+
+
+def _liquidity_grade(bid: float, ask: float, mid: float,
+                     volume: int, open_interest: int) -> str:
+    """
+    Single-letter liquidity grade for an options contract.
+
+    A  — tight spread (<10%) AND active market (OI>500, vol>50)
+    B  — spread 10-20% OR moderate OI/volume
+    C  — spread 20-40% OR thin market (OI 100-500)
+    D  — spread >40% OR very thin (OI<100) — hard to exit at mid
+
+    The spread % is the most important factor because it's the direct cost
+    of getting in and out.  OI/volume matter for fill probability.
+    """
+    if mid <= 0:
+        return "D"
+    spread_pct = (ask - bid) / mid * 100 if bid > 0 and ask > 0 else 100.0
+    liquid_oi  = open_interest >= 500
+    ok_oi      = open_interest >= 100
+    liquid_vol = volume >= 50
+
+    if spread_pct < 10 and liquid_oi and liquid_vol:
+        return "A"
+    if spread_pct < 20 and ok_oi:
+        return "B"
+    if spread_pct < 40 and ok_oi:
+        return "C"
+    return "D"
 
 
 def _entry_quote_pairs(t: dict) -> list[tuple[str, float | None, float | None, float | None]]:
@@ -1456,6 +1502,11 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
                 t["option_last"] = quote["last"]
+                t["volume"]    = quote.get("volume", 0)
+                t["open_interest"] = quote.get("open_interest", 0)
+                t["liquidity_grade"] = _liquidity_grade(
+                    quote["bid"], quote["ask"], cur,
+                    t["volume"], t["open_interest"])
                 if quote["iv"] > 0:
                     t["sigma"] = quote["iv"]
             elif qerr in ("strike_not_listed", "expiry_not_listed"):
@@ -1606,6 +1657,16 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t["expiry_date"] = expiry
                 t["short_bid"], t["short_ask"] = sq["bid"], sq["ask"]
                 t["long_bid"],  t["long_ask"]  = lq["bid"], lq["ask"]
+                # Liquidity grade: worst of the two legs (weakest link on exit)
+                sg = _liquidity_grade(sq["bid"], sq["ask"], sq["mid"],
+                                      sq.get("volume", 0), sq.get("open_interest", 0))
+                lg = _liquidity_grade(lq["bid"], lq["ask"], lq["mid"],
+                                      lq.get("volume", 0), lq.get("open_interest", 0))
+                t["liquidity_grade"] = max(sg, lg)  # "D" > "C" > "B" > "A" alphabetically = worst
+                t["short_volume"] = sq.get("volume", 0)
+                t["short_oi"]     = sq.get("open_interest", 0)
+                t["long_volume"]  = lq.get("volume", 0)
+                t["long_oi"]      = lq.get("open_interest", 0)
                 ivs = [q["iv"] for q in (sq, lq) if q["iv"] > 0]
                 if ivs:
                     t["sigma"] = round(sum(ivs) / len(ivs), 4)
@@ -1655,6 +1716,11 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
                 t["option_bid"] = quote["bid"]
                 t["option_ask"] = quote["ask"]
                 t["option_last"] = quote["last"]
+                t["volume"]    = quote.get("volume", 0)
+                t["open_interest"] = quote.get("open_interest", 0)
+                t["liquidity_grade"] = _liquidity_grade(
+                    quote["bid"], quote["ask"], cur,
+                    t["volume"], t["open_interest"])
                 if quote["iv"] > 0:
                     t["sigma"] = quote["iv"]
             elif qerr in ("strike_not_listed", "expiry_not_listed"):
