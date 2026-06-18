@@ -510,6 +510,38 @@ def _live_leg_quote_near(ticker: str, expiry: str, opt_type: str,
         return None, f"chain_error:{e}"
 
 
+def _rh_leg_quote(ticker: str, expiry: str, opt_type: str, strike: float) -> dict | None:
+    """
+    Secondary price source: Robinhood real-time bid/ask via robin_stocks.
+    Called only when yfinance chain lookup fails (but not when the contract
+    itself doesn't exist — 'strike_not_listed' / 'expiry_not_listed' errors
+    bypass this too).
+
+    Returns {bid, ask, mid} or None on any failure (no credentials, API down, etc.)
+    """
+    try:
+        from robinhood_broker import rh_login
+        import robin_stocks.robinhood as rh
+        if not rh_login():
+            return None
+        data = rh.options.get_option_market_data(ticker, expiry, str(strike), opt_type)
+        if not data or not data[0]:
+            return None
+        m = data[0][0] if isinstance(data[0], list) else data[0]
+        bid  = float(m.get("bid_price") or 0)
+        ask  = float(m.get("ask_price") or 0)
+        mark = float(m.get("mark_price") or 0)
+        if bid > 0 and ask > 0:
+            mid = round((bid + ask) / 2, 4)
+        elif mark > 0:
+            mid = round(mark, 4)
+        else:
+            return None
+        return {"bid": round(bid, 4), "ask": round(ask, 4), "mid": mid, "source": "robinhood"}
+    except Exception:
+        return None
+
+
 def _avg_live_iv(quotes: list[dict]) -> float:
     ivs = [q["iv"] for q in quotes if q.get("iv", 0) > 0]
     return round(sum(ivs) / len(ivs), 4) if ivs else 0.0
@@ -1387,8 +1419,15 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             elif qerr in ("strike_not_listed", "expiry_not_listed"):
                 return _mark_invalid(t, qerr)
             else:
-                cur = _bs(price, t["strike"], T_rem, t["sigma"], t["opt_type"])
-                _mark_synthetic(t, qerr or "live_quote_unavailable")
+                rh_q = _rh_leg_quote(t["ticker"], expiry, t["opt_type"], t["strike"])
+                if rh_q:
+                    cur = rh_q["mid"]
+                    t["mark_source"] = "robinhood"
+                    t["mark_error"] = None
+                    t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
+                else:
+                    cur = _bs(price, t["strike"], T_rem, t["sigma"], t["opt_type"])
+                    _mark_synthetic(t, qerr or "live_quote_unavailable")
             t["current_option_price"] = round(cur, 4)
             raw  = (cur - t["entry_option_price"]) * 100 * t["contracts"]
             t["pnl"]     = round(raw, 2)
@@ -1429,9 +1468,17 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             elif lerr in ("strike_not_listed", "expiry_not_listed") or serr in ("strike_not_listed", "expiry_not_listed"):
                 return _mark_invalid(t, f"long:{lerr};short:{serr}")
             else:
-                lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
-                sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
-                _mark_synthetic(t, f"long:{lerr};short:{serr}")
+                rh_l = _rh_leg_quote(t["ticker"], expiry, t["opt_type"], t["long_strike"])
+                rh_s = _rh_leg_quote(t["ticker"], expiry, t["opt_type"], t["short_strike"])
+                if rh_l and rh_s:
+                    lv, sv = rh_l["mid"], rh_s["mid"]
+                    t["mark_source"] = "robinhood"
+                    t["mark_error"] = None
+                    t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
+                else:
+                    lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+                    sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+                    _mark_synthetic(t, f"long:{lerr};short:{serr}")
             net    = lv - sv
             t["current_net_value"] = round(net, 4)
             raw  = (net - t["entry_net_debit"]) * 100 * t["contracts"]
@@ -1469,11 +1516,21 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             elif any(e in ("strike_not_listed", "expiry_not_listed") for e in (scerr, lcerr, sperr, lperr)):
                 return _mark_invalid(t, f"sc:{scerr};lc:{lcerr};sp:{sperr};lp:{lperr}")
             else:
-                sc = _bs(price, t["short_call_k"], T_rem, t["sigma"], "call")
-                lc = _bs(price, t["long_call_k"],  T_rem, t["sigma"], "call")
-                sp = _bs(price, t["short_put_k"],  T_rem, t["sigma"], "put")
-                lp = _bs(price, t["long_put_k"],   T_rem, t["sigma"], "put")
-                _mark_synthetic(t, f"sc:{scerr};lc:{lcerr};sp:{sperr};lp:{lperr}")
+                rh_sc = _rh_leg_quote(t["ticker"], expiry, "call", t["short_call_k"])
+                rh_lc = _rh_leg_quote(t["ticker"], expiry, "call", t["long_call_k"])
+                rh_sp = _rh_leg_quote(t["ticker"], expiry, "put",  t["short_put_k"])
+                rh_lp = _rh_leg_quote(t["ticker"], expiry, "put",  t["long_put_k"])
+                if rh_sc and rh_lc and rh_sp and rh_lp:
+                    sc, lc, sp, lp = rh_sc["mid"], rh_lc["mid"], rh_sp["mid"], rh_lp["mid"]
+                    t["mark_source"] = "robinhood"
+                    t["mark_error"] = None
+                    t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
+                else:
+                    sc = _bs(price, t["short_call_k"], T_rem, t["sigma"], "call")
+                    lc = _bs(price, t["long_call_k"],  T_rem, t["sigma"], "call")
+                    sp = _bs(price, t["short_put_k"],  T_rem, t["sigma"], "put")
+                    lp = _bs(price, t["long_put_k"],   T_rem, t["sigma"], "put")
+                    _mark_synthetic(t, f"sc:{scerr};lc:{lcerr};sp:{sperr};lp:{lperr}")
             cur_net = (sc - lc) + (sp - lp)
             t["current_net_value"] = round(cur_net, 4)
             raw  = (t["entry_net_credit"] - cur_net) * 100 * t["contracts"]
@@ -1513,9 +1570,17 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             elif lerr in ("strike_not_listed", "expiry_not_listed") or serr in ("strike_not_listed", "expiry_not_listed"):
                 return _mark_invalid(t, f"short:{serr};long:{lerr}")
             else:
-                sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
-                lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
-                _mark_synthetic(t, f"short:{serr};long:{lerr}")
+                rh_s = _rh_leg_quote(t["ticker"], expiry, t["opt_type"], t["short_strike"])
+                rh_l = _rh_leg_quote(t["ticker"], expiry, t["opt_type"], t["long_strike"])
+                if rh_s and rh_l:
+                    sv, lv = rh_s["mid"], rh_l["mid"]
+                    t["mark_source"] = "robinhood"
+                    t["mark_error"] = None
+                    t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
+                else:
+                    sv = _bs(price, t["short_strike"], T_rem, t["sigma"], t["opt_type"])
+                    lv = _bs(price, t["long_strike"],  T_rem, t["sigma"], t["opt_type"])
+                    _mark_synthetic(t, f"short:{serr};long:{lerr}")
             cost_now = max(sv - lv, 0)
             t["current_cost_to_close"] = round(cost_now, 4)
             credit = t.get("entry_net_credit", 0)
@@ -1553,8 +1618,15 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
             elif qerr in ("strike_not_listed", "expiry_not_listed"):
                 return _mark_invalid(t, qerr)
             else:
-                cur = _bs(price, t["strike"], T_rem, t["sigma"], "call")
-                _mark_synthetic(t, qerr or "live_quote_unavailable")
+                rh_q = _rh_leg_quote(t["ticker"], expiry, "call", t["strike"])
+                if rh_q:
+                    cur = rh_q["mid"]
+                    t["mark_source"] = "robinhood"
+                    t["mark_error"] = None
+                    t["pnl_trusted"] = t.get("entry_source") in TRUSTED_OPTION_ENTRY_SOURCES
+                else:
+                    cur = _bs(price, t["strike"], T_rem, t["sigma"], "call")
+                    _mark_synthetic(t, qerr or "live_quote_unavailable")
             t["current_option_price"] = round(cur, 4)
             entry_prem = t.get("entry_option_price", 0)
             raw  = (entry_prem - cur) * 100 * t["contracts"]
