@@ -224,7 +224,7 @@ DISABLED_NEW_TRADE_TYPES = {
     t.strip()
     for t in os.getenv(
         "DISABLED_NEW_TRADE_TYPES",
-        "bull_put_spread,bear_call_spread,iron_condor",
+        "",
     ).split(",")
     if t.strip()
 }
@@ -241,7 +241,7 @@ def _is_trade_type_enabled(trade_type: str) -> bool:
     return trade_type not in DISABLED_NEW_TRADE_TYPES
 
 
-def _choose_enabled(candidates: list[str], fallback: str = "stock_long") -> str:
+def _choose_enabled(candidates: list[str], fallback: str = "call_spread") -> str:
     allowed = [tt for tt in candidates if _is_trade_type_enabled(tt)]
     return random.choice(allowed) if allowed else fallback
 
@@ -257,13 +257,13 @@ def _replacement_trade_type(scan: dict, blocked_type: str) -> str:
 
     if blocked_type == "bull_put_spread":
         if bullish and iv_cheap and sqz_fired:
-            return _choose_enabled(["long_call", "call_spread", "stock_long"])
-        return _choose_enabled(["covered_call", "stock_long", "call_spread"])
+            return _choose_enabled(["long_call", "call_spread"])
+        return _choose_enabled(["covered_call", "call_spread"])
     if blocked_type == "bear_call_spread":
         if bearish and iv_cheap:
-            return _choose_enabled(["long_put", "put_spread", "stock_short"], "put_spread")
-        return _choose_enabled(["put_spread", "stock_short"], "put_spread")
-    return _choose_enabled(["stock_long", "call_spread", "long_call"])
+            return _choose_enabled(["long_put", "put_spread"], "put_spread")
+        return _choose_enabled(["put_spread"], "put_spread")
+    return _choose_enabled(["call_spread", "long_call", "bull_put_spread"])
 
 def _assign_trade_type(scan: dict) -> str:
     """
@@ -302,17 +302,17 @@ def _assign_trade_type(scan: dict) -> str:
             # Squeeze breakout + cheap IV = ideal conditions for long calls.
             # Expensive IV → collect premium instead; the move is already priced in.
             if iv_cheap:
-                return random.choice(["long_call", "bull_put_spread", "covered_call", "stock_long"])
+                return random.choice(["long_call", "bull_put_spread", "covered_call"])
             else:
-                return random.choice(["bull_put_spread", "covered_call", "stock_long"])
+                return random.choice(["bull_put_spread", "covered_call"])
         if entry_sig and rsi < 45:
             # Clean entry signal, not overbought. Only buy calls if IV is cheap.
             if iv_cheap:
-                return random.choice(["long_call", "stock_long", "bull_put_spread"])
+                return random.choice(["long_call", "call_spread", "bull_put_spread"])
             else:
-                return random.choice(["stock_long", "bull_put_spread"])
+                return random.choice(["bull_put_spread", "call_spread"])
         # General bullish without squeeze or cheap IV → lean income
-        return random.choice(["bull_put_spread", "covered_call", "stock_long",
+        return random.choice(["bull_put_spread", "covered_call", "call_spread",
                                "covered_call", "bull_put_spread"])
 
     # ── Bearish: lean credit over debit (IV premium problem on long puts) ─────
@@ -1891,11 +1891,11 @@ def generate_daily_trades(n: int = 10) -> list:
             remaining = [s for s in fallback_scans if s["ticker"] not in used_tickers]
             fallback_types = [
                 tt for tt in ("call_spread", "put_spread",
-                              "long_call", "long_put", "stock_long")
+                              "long_call", "long_put", "bull_put_spread")
                 if _is_trade_type_enabled(tt)
             ]
             if not fallback_types:
-                fallback_types = ["stock_long"]
+                fallback_types = ["call_spread", "bull_put_spread"]
             fi = 0
             for scan in remaining:
                 if len(new_trades) >= n:
