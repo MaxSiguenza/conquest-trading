@@ -236,6 +236,39 @@ OPT_TYPES = (
 )
 TRUSTED_OPTION_ENTRY_SOURCES = ("live_chain_mid", "historical_contract_close")
 
+# ── Signal scan cache ──────────────────────────────────────────────────────────
+# run_daily_close() scans every open option ticker for regime/MTF data.
+# Scanning on every 15-minute tick would hammer yfinance; instead we refresh
+# once per trading day (first call of the day) and reuse the results all day.
+# MTF signals are built from daily/weekly bars so intraday staleness is fine.
+_signal_scan_cache: dict[str, dict] = {}   # {ticker: scan_result}
+_signal_scan_date: "date | None"    = None
+
+
+def _refresh_signal_cache(tickers: list[str]) -> None:
+    """Parallel-scan tickers and store results in module-level cache."""
+    global _signal_scan_cache, _signal_scan_date
+    if not tickers:
+        return
+    try:
+        from alerts.scanner import scan_ticker
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+        fresh: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futs = {pool.submit(scan_ticker, tk): tk for tk in tickers}
+            for fut in _ac(futs):
+                try:
+                    r = fut.result()
+                    if r and not r.get("error"):
+                        fresh[r["ticker"]] = r
+                except Exception:
+                    pass
+        _signal_scan_cache = fresh
+        _signal_scan_date  = date.today()
+        print(f"[PaperTrader] Signal cache refreshed: {len(fresh)}/{len(tickers)} tickers scanned.")
+    except Exception as e:
+        print(f"[PaperTrader] Signal cache refresh failed: {e}")
+
 
 def _is_trade_type_enabled(trade_type: str) -> bool:
     return trade_type not in DISABLED_NEW_TRADE_TYPES
@@ -2243,31 +2276,19 @@ def run_daily_close() -> dict:
         price     = prices.get(trade["ticker"])
         trades[i] = mark_trade(trade, price=price)
 
-    # ── Signal scan for open options (parallel, same worker count as screener) ──
-    # Re-scan every ticker that has an open options position so _should_close()
-    # can apply regime-reversal, MTF-deterioration, and delta-floor rules.
+    # ── Signal scan cache — refresh once per trading day ─────────────────────
+    # MTF signals are daily/weekly so refreshing every 15-min tick is wasteful.
+    # First call of each trading day triggers a full parallel scan; subsequent
+    # calls reuse the cached results so yfinance isn't hammered all session.
     opt_types = ("long_call", "long_put", "call_spread", "put_spread",
                  "bull_put_spread", "bear_call_spread", "iron_condor", "covered_call")
     opt_tickers = list({
         t["ticker"] for t in trades
         if t.get("status") == "open" and t.get("trade_type") in opt_types
     })
-    scan_map: dict[str, dict] = {}
-    if opt_tickers:
-        try:
-            from alerts.scanner import scan_ticker
-            from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                futs = {pool.submit(scan_ticker, tk): tk for tk in opt_tickers}
-                for fut in _ac(futs):
-                    try:
-                        r = fut.result()
-                        if r and not r.get("error"):
-                            scan_map[r["ticker"]] = r
-                    except Exception:
-                        pass
-        except Exception as _se:
-            print(f"[PaperTrader] Signal scan skipped: {_se}")
+    if opt_tickers and _signal_scan_date != date.today():
+        _refresh_signal_cache(opt_tickers)
+    scan_map: dict[str, dict] = _signal_scan_cache
 
     # ── Agent exit review for long option / debit spread positions ────────────
     open_options = [t for t in trades
