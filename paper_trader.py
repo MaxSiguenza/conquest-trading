@@ -958,6 +958,9 @@ def _build_option(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "days_held":           0,
         "mtf_score":           scan.get("mtf_score", 0),
         "rsi_entry":           round(scan.get("rsi", 50), 1),
+        "entry_sigma":         round(sigma, 4),
+        "entry_daily":         scan.get("daily", "BULL"),
+        "entry_weekly":        scan.get("weekly", "BULL"),
     }
     trade.update(_quote_fields(live))
     return _set_option_risk(trade)
@@ -1023,6 +1026,9 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
                     "days_held":         0,
                     "mtf_score":         scan.get("mtf_score", 0),
                     "rsi_entry":         round(scan.get("rsi", 50), 1),
+                    "entry_sigma":       round(sigma, 4),
+                    "entry_daily":       scan.get("daily", "BULL"),
+                    "entry_weekly":      scan.get("weekly", "BULL"),
                 }
                 trade.update(_quote_fields(lq, "long"))
                 trade.update(_quote_fields(sq, "short"))
@@ -1097,6 +1103,9 @@ def _build_spread(scan: dict, trade_type: str, ts: str) -> Optional[dict]:
         "days_held":         0,
         "mtf_score":         scan.get("mtf_score", 0),
         "rsi_entry":         round(scan.get("rsi", 50), 1),
+        "entry_sigma":       round(sigma, 4),
+        "entry_daily":       scan.get("daily", "BULL"),
+        "entry_weekly":      scan.get("weekly", "BULL"),
     }
     trade.update(_quote_fields(live, "long"))
     trade.update(_quote_fields(short_q, "short"))
@@ -1647,56 +1656,124 @@ def mark_trade(trade: dict, price: Optional[float] = None) -> dict:
     return t
 
 
-def _should_close(t: dict) -> Optional[str]:
+def _should_close(t: dict, scan: dict | None = None) -> Optional[str]:
     """
-    Determines if a trade should be closed based on rules.
+    Determines if a trade should be closed.
 
-    Stocks      → fixed profit/stop (signal confirmed these work at 50.8 % WR).
-    Options     → AI agent decisions only (see agent_exit_review).
-                  Only the BACKSTOP_OPT safety net and MAX_HOLD_OPT apply here.
-    Iron condors→ credit-trade rules (50 % of credit earned = close).
+    Stocks        → fixed P&L stops (backtest-validated).
+    Long options  → hedge-fund style: signal reversal + delta floor + IV expansion.
+                    Backstop at -80% catches anything else.
+    Debit spreads → same signal rules + hard P&L stops (-50% debit / +80% max gain).
+    Credit spreads→ fixed credit rules (50% profit / 2x stop) + regime reversal.
+    Iron condors  → same as credit spreads.
+    Covered calls → premium decay rules.
+
+    `scan` is today's fresh scanner result for this ticker.  Passed in by
+    run_daily_close() after a parallel scan of all open option tickers.
     """
     days = t.get("days_held", 0)
     pct  = t.get("pnl_pct",  0.0)
     pnl  = t.get("pnl",      0.0)
     tt   = t["trade_type"]
 
-    # ── Stocks: fixed exits (work well in backtest) ───────────────────────────
+    # ── Helper: did the directional thesis reverse? ───────────────────────────
+    def _regime_flipped() -> bool:
+        if not scan:
+            return False
+        entry_daily  = t.get("entry_daily",  "BULL")
+        entry_weekly = t.get("entry_weekly", "BULL")
+        cur_daily    = scan.get("daily",  "BULL")
+        cur_weekly   = scan.get("weekly", "BULL")
+        # Thesis was bullish: both timeframes must have been BULL at entry
+        if entry_daily == "BULL" and entry_weekly == "BULL":
+            return cur_daily == "BEAR" and cur_weekly == "BEAR"
+        # Thesis was bearish
+        if entry_daily == "BEAR" and entry_weekly == "BEAR":
+            return cur_daily == "BULL" and cur_weekly == "BULL"
+        return False
+
+    def _signal_gone() -> bool:
+        """MTF score dropped to ≤1 on a position that needed a strong signal."""
+        if not scan:
+            return False
+        return int(scan.get("mtf_score", 3)) <= 1
+
+    # ── Stocks: fixed exits ───────────────────────────────────────────────────
     if tt in ("stock_long", "stock_short"):
-        if days >= MAX_HOLD_STK:       return "max_hold"
-        if pct >= STK_PROFIT:          return "profit_target"
-        if pct <= STK_STOP:            return "stop_loss"
+        if days >= MAX_HOLD_STK:   return "max_hold"
+        if pct >= STK_PROFIT:      return "profit_target"
+        if pct <= STK_STOP:        return "stop_loss"
 
-    # ── Long options / spreads: agent-driven, safety net only ─────────────────
-    elif tt in ("long_call", "long_put", "call_spread", "put_spread"):
-        if days >= MAX_HOLD_OPT:       return "max_hold"       # approaching expiry
-        if pct <= BACKSTOP_OPT:        return "backstop_stop"  # catastrophic protection
+    # ── Long options: signal-driven (hedge fund style) ────────────────────────
+    elif tt in ("long_call", "long_put"):
+        if days >= MAX_HOLD_OPT:   return "max_hold"
+        if pct <= BACKSTOP_OPT:    return "backstop_stop"   # -80%: catastrophic
 
-    # ── Iron condors: credit-trade rules (time decay is the edge here) ────────
+        # Thesis is dead → stop holding regardless of P&L
+        if _regime_flipped():      return "regime_reversal"
+        if _signal_gone():         return "signal_deteriorated"
+
+        # Delta floor: option so far OTM it's basically worthless, redeploy capital
+        delta = abs(t.get("delta", 0.30))
+        if delta < 0.15:           return "delta_floor"
+
+        # IV expansion: if IV has expanded >60% since entry we're now overpaying
+        # to hold a long option — the move we expected is already priced in
+        entry_sigma = t.get("entry_sigma", 0)
+        cur_sigma   = t.get("sigma", 0)
+        if entry_sigma > 0 and cur_sigma > entry_sigma * 1.60:
+            return "iv_expansion"
+
+        # Take profit: 2x on premium (let winners run, but bank at 100%)
+        entry_prem = t.get("entry_option_price", 0)
+        cur_prem   = t.get("current_option_price", entry_prem)
+        if entry_prem > 0 and cur_prem >= entry_prem * 2.0:
+            return "profit_target"
+
+    # ── Debit spreads: signal rules + hard P&L stops ──────────────────────────
+    elif tt in ("call_spread", "put_spread"):
+        if days >= MAX_HOLD_OPT:   return "max_hold"
+        if pct <= BACKSTOP_OPT:    return "backstop_stop"
+
+        if _regime_flipped():      return "regime_reversal"
+        if _signal_gone():         return "signal_deteriorated"
+
+        debit    = t.get("entry_net_debit", 0)
+        max_gain = t.get("max_gain", 0)
+        net_now  = t.get("current_net_value", debit)
+        if debit > 0:
+            if net_now <= debit * 0.50:          return "stop_loss"    # lost 50% of debit
+        if max_gain > 0 and debit > 0:
+            captured = net_now - debit
+            if captured >= max_gain * 0.80:      return "profit_target"  # 80% of max gain
+
+    # ── Iron condors: credit rules + regime check ─────────────────────────────
     elif tt == "iron_condor":
-        if days >= MAX_HOLD_OPT:       return "max_hold"
+        if days >= MAX_HOLD_OPT:   return "max_hold"
+        if _regime_flipped():      return "regime_reversal"
         credit_usd = t.get("entry_net_credit", 0) * 100
         if credit_usd > 0:
-            if pnl >= credit_usd * IC_PROFIT:  return "profit_target"
-            if pnl <= -credit_usd * IC_STOP:   return "stop_loss"
+            if pnl >= credit_usd * IC_PROFIT:    return "profit_target"
+            if pnl <= -credit_usd * IC_STOP:     return "stop_loss"
 
-    # ── Credit spreads: rules-based (credit trades always use fixed rules) ────
+    # ── Credit spreads: fixed credit rules + regime check ────────────────────
     elif tt in ("bull_put_spread", "bear_call_spread"):
-        if days >= MAX_HOLD_OPT:       return "max_hold"
-        credit    = t.get("entry_net_credit", 0)
-        cost_now  = t.get("current_cost_to_close", credit)
+        if days >= MAX_HOLD_OPT:   return "max_hold"
+        if _regime_flipped():      return "regime_reversal"
+        credit   = t.get("entry_net_credit", 0)
+        cost_now = t.get("current_cost_to_close", credit)
         if credit > 0:
-            if cost_now <= credit * 0.25:  return "profit_target"  # kept 75% of credit
-            if cost_now >= credit * 2.0:   return "stop_loss"       # spread doubled against us
+            if cost_now <= credit * 0.25:        return "profit_target"  # 75% of credit kept
+            if cost_now >= credit * 2.0:         return "stop_loss"      # spread doubled
 
-    # ── Covered calls: rules-based (premium decay trade) ─────────────────────
+    # ── Covered calls: premium decay rules ───────────────────────────────────
     elif tt == "covered_call":
-        if days >= MAX_HOLD_OPT:       return "max_hold"
+        if days >= MAX_HOLD_OPT:   return "max_hold"
         entry_prem = t.get("entry_option_price", 0)
         cur_prem   = t.get("current_option_price", entry_prem)
         if entry_prem > 0:
-            if cur_prem <= entry_prem * 0.20:  return "profit_target"  # kept 80% of premium
-            if cur_prem >= entry_prem * 2.0:   return "stop_loss"      # stock blew through strike
+            if cur_prem <= entry_prem * 0.20:    return "profit_target"  # 80% decayed
+            if cur_prem >= entry_prem * 2.0:     return "stop_loss"      # blew through strike
 
     return None
 
@@ -2166,7 +2243,33 @@ def run_daily_close() -> dict:
         price     = prices.get(trade["ticker"])
         trades[i] = mark_trade(trade, price=price)
 
-    # ── Agent exit review for option positions ────────────────────────────────
+    # ── Signal scan for open options (parallel, same worker count as screener) ──
+    # Re-scan every ticker that has an open options position so _should_close()
+    # can apply regime-reversal, MTF-deterioration, and delta-floor rules.
+    opt_types = ("long_call", "long_put", "call_spread", "put_spread",
+                 "bull_put_spread", "bear_call_spread", "iron_condor", "covered_call")
+    opt_tickers = list({
+        t["ticker"] for t in trades
+        if t.get("status") == "open" and t.get("trade_type") in opt_types
+    })
+    scan_map: dict[str, dict] = {}
+    if opt_tickers:
+        try:
+            from alerts.scanner import scan_ticker
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futs = {pool.submit(scan_ticker, tk): tk for tk in opt_tickers}
+                for fut in _ac(futs):
+                    try:
+                        r = fut.result()
+                        if r and not r.get("error"):
+                            scan_map[r["ticker"]] = r
+                    except Exception:
+                        pass
+        except Exception as _se:
+            print(f"[PaperTrader] Signal scan skipped: {_se}")
+
+    # ── Agent exit review for long option / debit spread positions ────────────
     open_options = [t for t in trades
                     if t.get("status") == "open"
                     and t.get("trade_type") in
@@ -2176,7 +2279,7 @@ def run_daily_close() -> dict:
     for i, trade in enumerate(trades):
         if trade["status"] != "open":
             continue
-        reason = _should_close(trades[i])
+        reason = _should_close(trades[i], scan=scan_map.get(trades[i]["ticker"]))
 
         # Merge agent decision: if the agent wants to close and rules didn't, use agent
         if not reason and trades[i].get("id") in agent_closes:
